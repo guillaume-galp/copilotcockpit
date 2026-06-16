@@ -166,3 +166,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E3-US5** START — lib/cmd-e2e.sh scaffold.
 - **TH1-E3-US5** DONE — lib/cmd-e2e.sh scaffold (commit 788e682). Reviewer: APPROVED (substitute-everywhere + atomic staging + sed-injection hardening validated).
 - **TH1-E3-US6** START — lib/cmd-e2e.sh --update content-preserving refresh.
+- **TH1-E3-US6** DONE — --update content-preserving refresh (commit 493f3be). Reviewer: APPROVED (never-touch + idempotency + scaffold-regression validated).
+- **EPIC E3** all 6 stories done — running large-epic ceremony (integration + quality check).

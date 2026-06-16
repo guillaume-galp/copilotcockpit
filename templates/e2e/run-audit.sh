@@ -358,7 +358,7 @@ INDEX_FILE="$RUNS_DIR/INDEX.md"
 RUN_NUM=1
 
 if [ -f "$INDEX_FILE" ]; then
-  LAST_NUM=$(grep -E '^\| [0-9]+' "$INDEX_FILE" | head -n 1 | awk -F'|' '{print $2}' | tr -d ' ')
+  LAST_NUM=$(grep -E '^\| [0-9]+' "$INDEX_FILE" | head -n 1 | awk -F'|' '{print $2}' | tr -d ' ' || true)
   [ -n "$LAST_NUM" ] && RUN_NUM=$(( LAST_NUM + 1 ))
 fi
 
@@ -387,7 +387,7 @@ LABEL_SAFE="${LABEL:-—}"
 NEW_ROW="| ${RUN_NUM} | ${RUN_ID} | ${TS_SHORT} | ${DETECTED_ENV} | ${SCOPE} | ${STATUS_ICON} | ${T_PASS} | ${T_FAIL} | ${T_SKIP} | ${DURATION_S} | ${LABEL_SAFE} |"
 
 # Newest row goes directly under the table separator (temp-file + mv; no sed -i).
-SEP_LINE=$(grep -n '^|---' "$INDEX_FILE" | head -n 1 | cut -d: -f1)
+SEP_LINE=$(grep -n '^|---' "$INDEX_FILE" | head -n 1 | cut -d: -f1 || true)
 if [ -n "$SEP_LINE" ]; then
   head -n "$SEP_LINE" "$INDEX_FILE" > "${INDEX_FILE}.tmp"
   printf '%s\n' "$NEW_ROW" >> "${INDEX_FILE}.tmp"
