@@ -166,6 +166,241 @@ EOF
 	return 0
 }
 
+# --- Token resolution (shared by scaffold + --update) ------------------------
+# _e2e_resolve_tokens <target_abs> — resolve the 4 Tier-1 tokens (first-hit-wins:
+# .e2e-config.yaml → prompt → default) and pre-escape them for the sed pass.
+# Sets the _E2E_*_ESC globals consumed by _e2e_substitute, so refreshed framework
+# files are tokenised exactly as the scaffold would have written them (US6 dod).
+_e2e_resolve_tokens() {
+	local target_abs="$1" def_app
+	_E2E_CONFIG_FILE="$target_abs/.e2e-config.yaml"
+	def_app="$(basename "$target_abs")"
+
+	local app_name backend_port frontend_port health_path
+	app_name="$(_e2e_resolve_token app_name "App name (@@APP_NAME@@)" "$def_app")"
+	backend_port="$(_e2e_resolve_token backend_port "Backend port (@@BACKEND_PORT@@)" "8000")"
+	frontend_port="$(_e2e_resolve_token frontend_port "Frontend port (@@FRONTEND_PORT@@)" "5173")"
+	health_path="$(_e2e_resolve_token health_path "Health path (@@HEALTH_PATH@@)" "/health")"
+
+	# Resolved (raw) values for callers that report them (scaffold dry-run).
+	_E2E_APP_NAME="$app_name"
+	_E2E_BACKEND_PORT="$backend_port"
+	_E2E_FRONTEND_PORT="$frontend_port"
+	_E2E_HEALTH_PATH="$health_path"
+
+	_E2E_APP_NAME_ESC="$(_e2e_sed_escape "$app_name")"
+	_E2E_BACKEND_PORT_ESC="$(_e2e_sed_escape "$backend_port")"
+	_E2E_FRONTEND_PORT_ESC="$(_e2e_sed_escape "$frontend_port")"
+	_E2E_HEALTH_PATH_ESC="$(_e2e_sed_escape "$health_path")"
+}
+
+# --- MANIFEST.toml ownership classifier (ADR-006 / E6-US2) -------------------
+# Pure-bash `[[ str == glob ]]` matcher driven by three path arrays parsed from
+# templates/e2e/MANIFEST.toml. Precedence: seed → framework → project-glob →
+# default `project` (the safe failure mode: an unlisted path is NEVER touched).
+
+# _e2e_manifest_section <section> — print the quoted path entries of the
+# [<section>] table in $_E2E_MANIFEST, one per line. A section runs from its
+# `[name]` header to the next `[...]` header; `#` comments carry no quotes so
+# they are naturally ignored.
+_e2e_manifest_section() {
+	awk -v sect="$1" '
+		BEGIN { in_s = 0 }
+		/^[[:space:]]*\[/ {
+			hdr = $0; sub(/[[:space:]]*#.*/, "", hdr); gsub(/[[:space:]]/, "", hdr)
+			in_s = (hdr == "[" sect "]") ? 1 : 0
+			next
+		}
+		in_s {
+			line = $0
+			while (match(line, /"[^"]*"/)) {
+				print substr(line, RSTART + 1, RLENGTH - 2)
+				line = substr(line, RSTART + RLENGTH)
+			}
+		}
+	' "$_E2E_MANIFEST"
+}
+
+# _e2e_load_manifest — parse $_E2E_MANIFEST into the FRAMEWORK/SEED/PROJECT
+# global arrays. Returns non-zero if any class is empty (a corrupt manifest).
+_e2e_load_manifest() {
+	local p
+	FRAMEWORK=() SEED=() PROJECT=()
+	while IFS= read -r p; do [[ -n "$p" ]] && FRAMEWORK+=("$p"); done <<EOF
+$(_e2e_manifest_section framework)
+EOF
+	while IFS= read -r p; do [[ -n "$p" ]] && SEED+=("$p"); done <<EOF
+$(_e2e_manifest_section seed)
+EOF
+	while IFS= read -r p; do [[ -n "$p" ]] && PROJECT+=("$p"); done <<EOF
+$(_e2e_manifest_section project)
+EOF
+	[[ ${#FRAMEWORK[@]} -gt 0 && ${#SEED[@]} -gt 0 && ${#PROJECT[@]} -gt 0 ]]
+}
+
+# _e2e_classify <dest-rel-path> — echo framework|seed|project for a scaffolded
+# (post-tokenisation, `.tmpl`-stripped) path. Globs match via `[[ == ]]` string
+# matching (no globstar needed — a single `*` already spans `/` here).
+_e2e_classify() {
+	local p="$1" g
+	for g in "${SEED[@]}"; do [[ "$p" == $g ]] && { printf 'seed'; return; }; done
+	for g in "${FRAMEWORK[@]}"; do [[ "$p" == $g ]] && { printf 'framework'; return; }; done
+	for g in "${PROJECT[@]}"; do [[ "$p" == $g ]] && { printf 'project'; return; }; done
+	printf 'project' # AC3: unclassified → safe default (never touch)
+}
+
+# --- --update per-file refresh engine (ADR-006) ------------------------------
+# _e2e_update_one <src> <destrel> <dest_root> <class> — apply the class action
+# for one template file. Bumps the _e2e_u_{refreshed,skipped,preserved} counters
+# and prints a one-line summary for every CHANGED (or already-current framework)
+# file. Honours DRY_RUN (describe, write nothing).
+_e2e_update_one() {
+	local src="$1" destrel="$2" dest_root="$3" class="$4"
+	local dst="$dest_root/$destrel" dry="${DRY_RUN:-0}"
+
+	case "$class" in
+	project)
+		# AC2/AC3/AC4: never touch — provably untouched.
+		_e2e_u_preserved=$((_e2e_u_preserved + 1))
+		return 0
+		;;
+	seed)
+		# AC2: create only if missing; never overwrite an existing seed file.
+		if [[ -e "$dst" ]]; then
+			_e2e_u_skipped=$((_e2e_u_skipped + 1))
+			return 0
+		fi
+		if [[ "$dry" != "0" ]]; then
+			printf '  would create  e2e/%s  (seed; missing)\n' "$destrel"
+			_e2e_u_refreshed=$((_e2e_u_refreshed + 1))
+			return 0
+		fi
+		mkdir -p "$(dirname "$dst")" || return 1
+		_e2e_substitute "$src" "$dst" || {
+			log_error "e2e: failed to create $destrel"
+			return 1
+		}
+		printf '  created       e2e/%s  (seed; was missing)\n' "$destrel"
+		_e2e_u_refreshed=$((_e2e_u_refreshed + 1))
+		return 0
+		;;
+	framework)
+		# AC2/AC7: render the would-be-written (tokenised) content, then only
+		# overwrite+backup when it DIFFERS from the existing file. Identical →
+		# "already current", no backup (idempotent).
+		local tmp
+		tmp="$(mktemp "${TMPDIR:-/tmp}/cc-e2e-upd.XXXXXX")" || return 1
+		if ! _e2e_substitute "$src" "$tmp"; then
+			rm -f "$tmp"
+			log_error "e2e: failed to render $destrel"
+			return 1
+		fi
+		if [[ -f "$dst" ]] && cmp -s "$tmp" "$dst"; then
+			rm -f "$tmp"
+			printf '  already current  e2e/%s\n' "$destrel"
+			_e2e_u_skipped=$((_e2e_u_skipped + 1))
+			return 0
+		fi
+		if [[ "$dry" != "0" ]]; then
+			if [[ -e "$dst" ]]; then
+				printf '  would refresh  e2e/%s  (framework; differs — would back up first)\n' "$destrel"
+			else
+				printf '  would create   e2e/%s  (framework; missing)\n' "$destrel"
+			fi
+			rm -f "$tmp"
+			_e2e_u_refreshed=$((_e2e_u_refreshed + 1))
+			return 0
+		fi
+		mkdir -p "$(dirname "$dst")" || { rm -f "$tmp"; return 1; }
+		if [[ -e "$dst" ]]; then
+			local backup
+			backup="${dst}.bak-$(cc_timestamp)"
+			if ! cp -p "$dst" "$backup"; then
+				rm -f "$tmp"
+				log_error "e2e: failed to back up $dst -> $backup"
+				return 1
+			fi
+			if ! mv "$tmp" "$dst"; then
+				log_error "e2e: failed to overwrite $dst"
+				return 1
+			fi
+			printf '  refreshed     e2e/%s  (backup: %s)\n' "$destrel" "$(basename "$backup")"
+		else
+			if ! mv "$tmp" "$dst"; then
+				log_error "e2e: failed to write $dst"
+				return 1
+			fi
+			printf '  created       e2e/%s  (framework; was missing)\n' "$destrel"
+		fi
+		_e2e_u_refreshed=$((_e2e_u_refreshed + 1))
+		return 0
+		;;
+	*)
+		log_error "e2e: internal — unknown class '$class' for $destrel"
+		return 1
+		;;
+	esac
+}
+
+# _e2e_run_update <target_abs> <dest> <target_disp> — the `--update` entry point.
+# AC1: refuses unless <dest> already exists. Iterates the template, classifies
+# each path via MANIFEST.toml, and applies the class action. AC5: prints a final
+# refreshed/skipped/preserved count. AC6: DRY_RUN lists changes and writes none.
+_e2e_run_update() {
+	local target_abs="$1" dest="$2" target_disp="$3"
+
+	# --- AC1: require an existing e2e/ ; otherwise point at a plain scaffold --
+	if [[ ! -d "$dest" ]]; then
+		log_error "e2e: --update requires an existing e2e/ at: $dest"
+		log_error "no harness found — run 'bootstrap.sh e2e $target_disp' to scaffold one first"
+		return 1
+	fi
+
+	_E2E_MANIFEST="$CC_TEMPLATE_ROOT/MANIFEST.toml"
+	if [[ ! -f "$_E2E_MANIFEST" ]]; then
+		log_error "e2e: ownership manifest missing: $_E2E_MANIFEST"
+		return 1
+	fi
+	if ! _e2e_load_manifest; then
+		log_error "e2e: failed to parse $_E2E_MANIFEST (empty ownership class?)"
+		return 1
+	fi
+
+	# Resolve tokens so refreshed framework files tokenise like the scaffold.
+	_e2e_resolve_tokens "$target_abs"
+
+	_e2e_u_refreshed=0
+	_e2e_u_skipped=0
+	_e2e_u_preserved=0
+
+	if [[ "${DRY_RUN:-0}" != "0" ]]; then
+		printf 'e2e --update dry-run — would refresh framework files in: %s\n\n' "$dest"
+	else
+		log_info "e2e --update: refreshing framework files in $dest"
+		printf 'e2e --update — refreshing: %s\n\n' "$dest"
+	fi
+
+	local rel destrel class src
+	while IFS= read -r rel; do
+		[[ -n "$rel" ]] || continue
+		destrel="$(_e2e_dest_rel "$rel")"
+		src="$CC_TEMPLATE_ROOT/$rel"
+		class="$(_e2e_classify "$destrel")"
+		_e2e_update_one "$src" "$destrel" "$dest" "$class" || return 1
+	done <<EOF
+$(_e2e_each_file)
+EOF
+
+	printf '\n'
+	if [[ "${DRY_RUN:-0}" != "0" ]]; then
+		printf 'Dry-run complete — nothing written.\n'
+	fi
+	# AC5: final tally.
+	printf 'Summary: %d refreshed, %d skipped, %d preserved.\n' \
+		"$_e2e_u_refreshed" "$_e2e_u_skipped" "$_e2e_u_preserved"
+	return 0
+}
+
 # --- Optional fault-injection test seam (AC5 atomicity verification) ---------
 # When CC_E2E_FAIL_AFTER_COPY=1, the scaffold aborts AFTER the staging tree is
 # built but BEFORE the atomic move, to prove an interruption leaves no partial
@@ -297,10 +532,10 @@ main() {
 	}
 	dest="$target_abs/e2e"
 
-	# --- --update is a separate story (TH1-E3-US6) ---------------------------
+	# --- --update: content-preserving refresh (TH1-E3-US6) -------------------
 	if [[ "$do_update" -eq 1 ]]; then
-		log_error "e2e: --update (content-preserving refresh) is not yet implemented (TH1-E3-US6)"
-		return 2
+		_e2e_run_update "$target_abs" "$dest" "$target"
+		return $?
 	fi
 
 	# --- AC2: refuse to clobber an existing e2e/ -----------------------------
@@ -311,21 +546,13 @@ main() {
 	fi
 
 	# --- AC3: resolve the 4 Tier-1 tokens (first-hit-wins) -------------------
-	_E2E_CONFIG_FILE="$target_abs/.e2e-config.yaml"
-	local def_app
-	def_app="$(basename "$target_abs")"
-
+	# Shared with --update so refreshed framework files tokenise identically.
+	_e2e_resolve_tokens "$target_abs"
 	local app_name backend_port frontend_port health_path
-	app_name="$(_e2e_resolve_token app_name "App name (@@APP_NAME@@)" "$def_app")"
-	backend_port="$(_e2e_resolve_token backend_port "Backend port (@@BACKEND_PORT@@)" "8000")"
-	frontend_port="$(_e2e_resolve_token frontend_port "Frontend port (@@FRONTEND_PORT@@)" "5173")"
-	health_path="$(_e2e_resolve_token health_path "Health path (@@HEALTH_PATH@@)" "/health")"
-
-	# Pre-escape once for the substitution pass (used inside _e2e_substitute).
-	_E2E_APP_NAME_ESC="$(_e2e_sed_escape "$app_name")"
-	_E2E_BACKEND_PORT_ESC="$(_e2e_sed_escape "$backend_port")"
-	_E2E_FRONTEND_PORT_ESC="$(_e2e_sed_escape "$frontend_port")"
-	_E2E_HEALTH_PATH_ESC="$(_e2e_sed_escape "$health_path")"
+	app_name="$_E2E_APP_NAME"
+	backend_port="$_E2E_BACKEND_PORT"
+	frontend_port="$_E2E_FRONTEND_PORT"
+	health_path="$_E2E_HEALTH_PATH"
 
 	# --- AC8: dry-run — print plan, write nothing ----------------------------
 	if [[ "${DRY_RUN:-0}" != "0" ]]; then

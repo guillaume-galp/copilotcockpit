@@ -168,7 +168,7 @@ themes:
             depends_on: [TH1-E1-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]
           - id: TH1-E3-US6
             title: "lib/cmd-e2e.sh --update: content-preserving refresh via MANIFEST.toml"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US6-cmd-e2e-update.md
             depends_on: [TH1-E3-US5, TH1-E3-US4]

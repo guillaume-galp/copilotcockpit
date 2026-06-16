@@ -164,3 +164,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E3-US4** START — templates/e2e/MANIFEST.toml ownership classification.
 - **TH1-E3-US4** DONE — MANIFEST.toml (commit 640ac96). Reviewer: APPROVED (flaky-known.md safe-default = correct, non-blocker).
 - **TH1-E3-US5** START — lib/cmd-e2e.sh scaffold.
+- **TH1-E3-US5** DONE — lib/cmd-e2e.sh scaffold (commit 788e682). Reviewer: APPROVED (substitute-everywhere + atomic staging + sed-injection hardening validated).
+- **TH1-E3-US6** START — lib/cmd-e2e.sh --update content-preserving refresh.
