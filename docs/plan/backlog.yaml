@@ -162,7 +162,7 @@ themes:
             depends_on: [TH1-E6-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]
           - id: TH1-E3-US5
             title: "lib/cmd-e2e.sh scaffold (copy + tokenise + git init + npm install + handoff)"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US5-cmd-e2e-scaffold.md
             depends_on: [TH1-E1-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]
