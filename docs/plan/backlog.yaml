@@ -126,7 +126,7 @@ themes:
             depends_on: [TH1-E1-US2, TH1-E2-US1, TH1-E2-US2]
           - id: TH1-E2-US4
             title: "Cold install: install.sh wrapper + global --from-release <ref>"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US4-cold-install.md
             depends_on: [TH1-E2-US3]

@@ -148,3 +148,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E2-US2** DONE — cockpit-wake vendored (commit 97d26d5). Verbatim verified.
 - **TH1-E2-US3** START — lib/cmd-global.sh install/update 8 skills + cockpit-wake.
 - **TH1-E2-US3** DONE — lib/cmd-global.sh installs/updates 8 skills + cockpit-wake; all 9 ACs verified against scratch HOME (copy/link/dry-run/drift/idempotent/PATH/AC9-fatal).
+- **TH1-E2-US3** DONE — lib/cmd-global.sh (commit 31c04a1). Reviewer: APPROVED.
+- **TH1-E2-US4** START — install.sh wrapper + global --from-release.

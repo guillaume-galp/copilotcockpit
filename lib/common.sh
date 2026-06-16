@@ -91,6 +91,46 @@ cc_files_identical() {
 	[[ -f "$1" && -f "$2" ]] && cmp -s "$1" "$2"
 }
 
+# --- cc_sha256_file <file> — print the hex sha256 of <file>, portable. --------
+# Linux ships `sha256sum`; macOS/BSD ships `shasum -a 256` (and sometimes both).
+# Detect whichever is available (portability-cheatsheet.md doctrine: never assume
+# a single tool name). Prints ONLY the 64-char hash, nothing else.
+cc_sha256_file() {
+	local f="$1"
+	if [[ ! -f "$f" ]]; then
+		log_error "cc_sha256_file: not a file: $f"
+		return 1
+	fi
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$f" | awk '{print $1; exit}'
+	elif command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$f" | awk '{print $1; exit}'
+	else
+		log_error "cc_sha256_file: no sha256 tool found (need sha256sum or shasum)"
+		return 1
+	fi
+}
+
+# --- cc_sha256_verify <file> <expected-hex> — 0 if match, else error+non-zero -
+# The expected hash is the first field of a `.sha256` companion file. On
+# mismatch this logs both hashes and returns non-zero so callers can abort
+# (ADR-007 integrity; tamper-evident cold install).
+cc_sha256_verify() {
+	local f="$1" expected="$2" actual
+	if [[ -z "$expected" ]]; then
+		log_error "cc_sha256_verify: empty expected checksum for $f"
+		return 1
+	fi
+	actual="$(cc_sha256_file "$f")" || return 1
+	if [[ "$actual" != "$expected" ]]; then
+		log_error "checksum mismatch for $f"
+		log_error "  expected: $expected"
+		log_error "  actual:   $actual"
+		return 1
+	fi
+	return 0
+}
+
 # --- cc_run: dry-run-aware command runner (AC5) ------------------------------
 # Prints the command (when DRY_RUN=1) instead of executing it. When executing,
 # the command is run as given. Arguments are passed through verbatim.

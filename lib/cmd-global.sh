@@ -44,16 +44,19 @@ CC_ALL_ROLES="$CC_HARNESS_ROLES $CC_PENDING_ROLES"
 
 usage() {
 	cat <<'EOF'
-Usage: bootstrap.sh global [--link] [--dry-run]
+Usage: bootstrap.sh global [--link] [--dry-run] [--from-release <ref>]
 
 Install/update the managed skills and cockpit-wake into your home:
   ~/.copilot/skills/<role>/SKILL.md   (8 managed roles)
   ~/.local/bin/cockpit-wake           (+x)
 
 Options:
-  --link        Symlink each artefact back to the repo instead of copying.
-  --dry-run     Describe every action; change nothing.
-  -h, --help    Show this help and exit.
+  --link                Symlink each artefact back to the repo instead of copying.
+  --dry-run             Describe every action; change nothing.
+  --from-release <ref>  Cold-install from a GitHub release instead of local files.
+                        <ref> is 'latest' or a tag like 'v1.2.3'. The tarball and
+                        its .sha256 are downloaded and verified before extraction.
+  -h, --help            Show this help and exit.
 EOF
 }
 
@@ -127,19 +130,143 @@ cc_place() {
 	fi
 }
 
+# --- Cold-install plumbing (AC3/AC4/AC6, ADR-007, architecture §8) ------------
+#
+# Test seam (intentional, undocumented in user help): set CC_RELEASE_BASE_URL to
+# a base URL — including a `file://<dir>` — to fetch the tarball + `.sha256` from
+# a local fixture instead of the live GitHub Releases CDN. This lets E5 integration
+# tests and TH1-E2-US4's local verification exercise the verify/extract/run/abort
+# path with NO published release. CC_RELEASE_REPO overrides the `<org>/<repo>` slug.
+
+# cc_curl_download <url> <dest> — fetch <url> into <dest> with curl -fsSL.
+# Honours GH_TOKEN as a bearer auth header when present (AC7: rate-limit / private
+# mitigation); the documented one-liner needs no token because the redirect is
+# public. Non-zero on any HTTP/transport failure (curl -f).
+cc_curl_download() {
+	local url="$1" dest="$2"
+	if [[ -n "${GH_TOKEN:-}" ]]; then
+		curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" "$url" -o "$dest"
+	else
+		curl -fsSL "$url" -o "$dest"
+	fi
+}
+
+# cc_install_from_release <ref> [passthrough-args...] — fetch+verify+extract a
+# release tarball, then run the NORMAL install pass (E2-US3) from the extracted
+# directory (AC3/AC4). Atomic (AC6): everything happens in a mktemp dir that is
+# cleaned on ANY exit; the checksum is verified BEFORE extraction, so a bad
+# download or tamper leaves NO partial install.
+cc_install_from_release() {
+	local ref="$1"
+	shift
+
+	local repo="${CC_RELEASE_REPO:-copilotcockpit/copilotcockpit}"
+	local tarball base
+	case "$ref" in
+	latest)
+		# Stable unversioned alias via the redirect — no API call (AC7, ADR-007).
+		tarball="copilotcockpit.tar.gz"
+		base="https://github.com/${repo}/releases/latest/download"
+		;;
+	v[0-9]*.[0-9]*.[0-9]*)
+		# Pin to an explicit tag's version-stamped asset (architecture §8).
+		tarball="copilotcockpit-${ref}.tar.gz"
+		base="https://github.com/${repo}/releases/download/${ref}"
+		;;
+	*)
+		log_error "global: --from-release ref must be 'latest' or 'vX.Y.Z' (got: $ref)"
+		return 2
+		;;
+	esac
+	# Test seam: override the base URL (e.g. file://) for local/E5 testing.
+	base="${CC_RELEASE_BASE_URL:-$base}"
+
+	local tmp
+	tmp="$(mktemp -d "${TMPDIR:-/tmp}/cc-release.XXXXXX")" || {
+		log_error "global: failed to create temp working directory"
+		return 1
+	}
+	# Atomicity (AC6/NFR-1): wipe the temp dir on ANY exit. Use a script-global
+	# (not the function-local `tmp`, which is out of scope when the EXIT trap
+	# fires) with a :- default so the trap is safe under `set -u`. The install
+	# pass below copies into HOME then returns, so nothing partial is left behind.
+	_CC_RELEASE_TMP="$tmp"
+	trap 'rm -rf "${_CC_RELEASE_TMP:-}"' EXIT
+
+	local tb="$tmp/$tarball" sha="$tmp/$tarball.sha256"
+
+	log_info "fetching release '$ref' from $base"
+	if ! cc_curl_download "$base/$tarball" "$tb"; then
+		log_error "global: download failed: $base/$tarball"
+		return 1
+	fi
+	if ! cc_curl_download "$base/$tarball.sha256" "$sha"; then
+		log_error "global: download failed: $base/$tarball.sha256"
+		return 1
+	fi
+
+	# Verify BEFORE extracting (AC3/AC6) — tamper-evident, abort on mismatch.
+	local expected
+	expected="$(awk '{print $1; exit}' "$sha")"
+	if ! cc_sha256_verify "$tb" "$expected"; then
+		log_error "global: checksum verification failed — nothing was installed"
+		return 1
+	fi
+	log_ok "checksum verified: $tarball"
+
+	if ! tar -xzf "$tb" -C "$tmp"; then
+		log_error "global: failed to extract $tb"
+		return 1
+	fi
+	local extracted="$tmp/copilotcockpit"
+	if [[ ! -x "$extracted/bootstrap.sh" ]]; then
+		log_error "global: extracted tarball missing copilotcockpit/bootstrap.sh"
+		return 1
+	fi
+
+	# AC4: run the ordinary local install pass from the extracted dir. We run
+	# (not exec) so the EXIT trap above still cleans the temp dir afterwards.
+	log_info "running global install from extracted release ($ref)"
+	"$extracted/bootstrap.sh" global "$@"
+}
+
 main() {
 	_CC_LINK_MODE=0
+	local from_release=""
+	# Passthrough args forwarded to the inner install pass when --from-release is
+	# used (AC4). bash 3.2-safe indexed array; expanded with the empty-array guard.
+	local -a pass=()
 
 	# --- Parse options (AC1/AC6/AC7) -----------------------------------------
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
+		--from-release)
+			from_release="${2:-}"
+			if [[ -z "$from_release" ]]; then
+				log_error "global: --from-release requires a <ref> (latest | vX.Y.Z)"
+				usage >&2
+				return 2
+			fi
+			shift 2
+			;;
+		--from-release=*)
+			from_release="${1#*=}"
+			if [[ -z "$from_release" ]]; then
+				log_error "global: --from-release requires a <ref> (latest | vX.Y.Z)"
+				usage >&2
+				return 2
+			fi
+			shift
+			;;
 		--link)
 			_CC_LINK_MODE=1
+			pass+=("--link")
 			shift
 			;;
 		--dry-run)
 			# bootstrap.sh already sets DRY_RUN; honour it here too for robustness.
 			DRY_RUN=1
+			pass+=("--dry-run")
 			shift
 			;;
 		-h | --help)
@@ -154,6 +281,15 @@ main() {
 		esac
 	done
 	export DRY_RUN
+
+	# --- Cold-install path (AC3/AC4/AC6) -------------------------------------
+	# Entered ONLY when --from-release is explicitly given. With no flag we fall
+	# through to the local-files install pass below and make NO network call
+	# (AC5, ADR-007 default).
+	if [[ -n "$from_release" ]]; then
+		cc_install_from_release "$from_release" ${pass[@]+"${pass[@]}"}
+		return $?
+	fi
 
 	local skills_root="$CC_ROOT/skills"
 	local cw_src="$CC_ROOT/bin/cockpit-wake"
