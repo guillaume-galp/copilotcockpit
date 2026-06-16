@@ -1,0 +1,50 @@
+name: ci
+
+# PR quality gate (ADR-008, architecture §9). Runs the four PRE-RELEASE test
+# categories via the dispatcher:
+#   1 unit · 2 template · 3 skills · 4 integration  (== ./run-tests.sh all)
+# Category 5 (release-asset validation) lives ONLY in release.yml (E4-US2); it is
+# deliberately absent here.
+#
+# Triggers: PRs targeting main, plus pushes to any non-main branch (feature
+# branches). Direct pushes to main are intentionally ignored so the release
+# version-bump commit ("chore: bump version … [skip ci]") does not double-run.
+#
+# [skip ci] (AC4): GitHub Actions NATIVELY skips `push` and `pull_request`
+# workflow runs when the HEAD commit message contains a skip directive such as
+# `[skip ci]` / `[ci skip]`. The version bump is a push to main (already excluded
+# by branches-ignore) AND carries `[skip ci]`, so it never triggers this
+# workflow. No custom guard is added — a guard would risk breaking normal runs.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PR checks (categories 1-4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install contributor test deps (bats, PyYAML)
+        run: |
+          set -euo pipefail
+          # bats: Category 1 (unit) + Category 4 (integration).
+          sudo apt-get update
+          sudo apt-get install -y bats
+          # PyYAML: Category 3 (skills lint) does `python3 -c 'import yaml'`.
+          python3 -m pip install --user pyyaml
+          # Confirm tooling is on PATH for the run step.
+          bats --version
+          node --version
+          python3 --version
+          git --version
+
+      - name: Run test categories 1-4 (dispatcher)
+        run: ./run-tests.sh all

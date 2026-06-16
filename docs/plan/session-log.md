@@ -194,3 +194,10 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - Categories 2-4 added and auto-wired into `run-tests.sh`: `tests/template/check-template.sh` (token resolution after test-substitution of the 4 sanctioned tokens, package.json.tmpl valid JSON, MANIFEST.toml explicit coverage of every templates/e2e/ path, `bash -n` of run-audit.sh/run-playwright.sh), `tests/skills/lint-skills.sh` (YAML frontmatter + non-empty name/description via PyYAML), `tests/integration/smoke.bats` (global/e2e/doctor dry-run smoke under fake HOME).
 - Coverage check surfaced 2 genuine manifest gaps → classified in MANIFEST.toml: `MANIFEST.toml`→[framework], `governance/flaky-known.md`→[seed].
 - All categories exit 0; `./run-tests.sh template|skills|integration|all` green (all incl. 14 Category-1 unit tests). Fake-HOME hard-guard isolation; real ~/.copilot/cockpit-wake untouched. `bash -n` clean.
+
+### TH1-E5-US2 — DONE (reviewer APPROVED)
+- Category 2 `tests/template/check-template.sh`, Category 3 `tests/skills/lint-skills.sh`, Category 4 `tests/integration/smoke.bats`. Closed 2 MANIFEST coverage gaps (MANIFEST.toml→framework, governance/flaky-known.md→seed, classifications verified correct). `run-tests.sh all` exits 0 (14 unit + cat2/3/4). Commit 047197d.
+- DEFERRED (non-blocking): sync architecture §7 embedded MANIFEST block with the 2 new classifications; add min-count assert to lint-skills.
+
+### TH1-E4-US3 — START
+- Dispatching developer: `.github/workflows/ci.yml` PR checks running test categories 1-4.

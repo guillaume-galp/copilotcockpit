@@ -192,7 +192,7 @@ themes:
             depends_on: [TH1-E3-US1, TH1-E3-US2, TH1-E3-US3, TH1-E4-US1, TH1-E2-US4]
           - id: TH1-E4-US3
             title: ".github/workflows/ci.yml: PR checks (test categories 1-4)"
-            status: pending
+            status: done
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E4-cicd-releases/US3-ci-workflow.md
             depends_on: [TH1-E5-US1, TH1-E5-US2]
