@@ -176,7 +176,7 @@ themes:
       - id: E4
         title: "CI/CD & releases — VERSION/CHANGELOG, release.yml, ci.yml"
         slug: cicd-releases
-        status: not_started
+        status: done
         stories:
           - id: TH1-E4-US1
             title: "VERSION + CHANGELOG.md (semver source of truth)"

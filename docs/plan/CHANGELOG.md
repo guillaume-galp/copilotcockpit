@@ -104,3 +104,19 @@ audit-trail→update round-trip→idempotency) PASS against scratch dirs after f
 review APPROVED. Deferred tech-debt: MANIFEST.toml ships into scaffold but is unread there
 (drift risk) — classify framework or exclude; flaky-known.md relies on implicit project default.
 Real Docker/Playwright run validated structurally; full E2E deferred to E5 integration.
+
+## Epic E4 — CI/CD & releases
+
+**Stories completed:** TH1-E4-US1 (VERSION + CHANGELOG.md), TH1-E4-US2 (release.yml), TH1-E4-US3 (ci.yml)
+
+**Key changes:**
+- Established semver source of truth: repo-root `VERSION` (0.1.0) + `CHANGELOG.md` with `## vX.Y.Z` sections consumed by the release workflow for notes.
+- `.github/workflows/release.yml`: tag-driven (`v[0-9]+.[0-9]+.[0-9]+`, pre-release `-suffix` excluded by glob + guard) release pipeline. Assembles a deterministic `copilotcockpit-${TAG}.tar.gz` (top dir `copilotcockpit/`, exactly `bootstrap.sh lib/ skills/ bin/ templates/ README.md`; excludes docs/.git/tests/.github), computes sha256, and publishes via `gh release create --latest` attaching both the versioned tarball+sha256 and an unversioned `copilotcockpit.tar.gz`+sha256 alias plus `install.sh` — exactly the asset names `install.sh` and `lib/cmd-global.sh --from-release` pin. A Category-5 `validate` job downloads, verifies checksum, extracts and runs `bootstrap.sh global --dry-run` + `doctor` under a throwaway HOME, failing the release on a broken artefact.
+- `.github/workflows/ci.yml`: PR merge-gate on `pull_request → main` (+ push to non-main); installs bats + PyYAML and runs categories 1–4 via `./run-tests.sh all`; honours `[skip ci]`; deliberately excludes Category 5.
+- Added repo-root `README.md` (part of the install surface shipped in the tarball).
+
+**Files modified:** `VERSION`, `CHANGELOG.md`, `README.md`, `.github/workflows/release.yml`, `.github/workflows/ci.yml`.
+
+**Epic ceremony (small, 3 stories):** both workflows parse as valid YAML; VERSION + CHANGELOG present with a `## v0.1.0` section; release packaging + Category-5 logic and the ci dispatcher job-body were validated locally (live GitHub Actions execution deferred to a real tag push / PR). All 3 stories reviewer-APPROVED.
+
+**Deferred (non-blocking):** sync architecture §7 embedded MANIFEST block; PyYAML install hardening for PEP-668; richer release notes mtime.
