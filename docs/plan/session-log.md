@@ -174,3 +174,12 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E4-US1** START — VERSION + CHANGELOG.md (semver source of truth).
 - **TH1-E4-US1** DONE — VERSION 0.1.0 + CHANGELOG.md (commit b8222e8). XS: self-review.
 - **TH1-E4-US2** START — .github/workflows/release.yml (tag-driven tarball + sha256 + gh release).
+
+### TH1-E4-US2 — DONE (reviewer APPROVED)
+- `.github/workflows/release.yml` (tag-driven tarball + dual sha256 + gh release --latest + Category-5 validate job) + repo-root `README.md`. Commit a8db271. Local packaging dry-run + Category-5 extract/global-dry-run/doctor all PASS; actionlint clean.
+
+### TH1-E5-US1 — START
+- Dispatching developer: run-tests.sh dispatcher + Category-1 bats unit tests (cmd-global/cmd-e2e/cmd-doctor). bats not present on host — developer to install.
+
+### TH1-E5-US1 — DONE
+- `run-tests.sh` repo-root dispatcher (`unit|template|skills|integration|all`; absent categories auto-skip without false pass, auto-wire when E5-US2 files land) + `tests/unit/{cmd-global,cmd-e2e,cmd-doctor}.bats` + `tests/unit/helper.bash`. All 14 unit tests green via `./run-tests.sh unit`; bats installed under $HOME (not committed). Fake-HOME isolation enforced in helper (hard guard); real ~/.copilot untouched. `bash -n` clean.

@@ -204,7 +204,7 @@ themes:
         stories:
           - id: TH1-E5-US1
             title: "run-tests.sh dispatcher + Category-1 bats unit tests"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US1-run-tests-unit.md
             depends_on: [TH1-E1-US3, TH1-E2-US3, TH1-E3-US6]
