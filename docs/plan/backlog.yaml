@@ -84,7 +84,7 @@ themes:
         stories:
           - id: TH1-E1-US1
             title: "lib/common.sh shared helpers (logging, OS detection, idempotency, dry-run)"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US1-common-lib.md
             depends_on: [TH1-E6-US1]
