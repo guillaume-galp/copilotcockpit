@@ -17,6 +17,13 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.1.3 — 2026-06-16
+
+### Changed
+- **README**: clarify `copilotautopilot` section — it bootstraps the `the-copilot-build-method` skill specifically (not just a generic "autopilot"); update compound flow diagram labels accordingly.
+
+_Nothing yet._
+
 ## v0.1.2 — 2026-06-16
 
 ### Changed

@@ -162,13 +162,14 @@ skills are skipped; changed files are backed up before overwrite.
 ## Works great with `copilotautopilot`
 
 `copilotcockpit` pairs naturally with its sibling toolkit
-**[copilotautopilot](https://github.com/guillaume-galp/copilotautopilot)** — the
-4-phase autonomous product development lifecycle (Vision → Architecture → Planning →
-Autopilot).
+**[copilotautopilot](https://github.com/guillaume-galp/copilotautopilot)** — which
+installs and bootstraps the **`the-copilot-build-method`** skill: a 4-phase
+autonomous product development lifecycle (Vision → Architecture → Planning →
+Autopilot) that drives a squad of agents from idea to merged code.
 
 ```
 copilotautopilot                         copilotcockpit
-─────────────────                        ───────────────────────────
+── the-copilot-build-method skill ──     ── e2e harness skills ──────
 /kickstart-vision  →  product brief      bootstrap.sh global
 /plan-product      →  epics + stories    bootstrap.sh e2e <dir>
 /run-autopilot     →  developer builds   /setup-e2e-cockpit
@@ -179,9 +180,9 @@ copilotautopilot                         copilotcockpit
                                                    worker-fix triages
 ```
 
-The autopilot squad **writes the code**; the cockpit squad **verifies it lives**.
-Use them together: let `copilotautopilot` drive your sprints and `copilotcockpit`
-provide the continuous test signal that keeps every story honest.
+The `the-copilot-build-method` squad **writes the code**; the cockpit squad
+**verifies it lives**. Use them together: let `copilotautopilot` drive your sprints
+and `copilotcockpit` provide the continuous test signal that keeps every story honest.
 
 ---
 
