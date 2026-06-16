@@ -17,6 +17,18 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.1.1 — 2026-06-16
+
+### Fixed
+- **cockpit-wake**: replaced `send-keys '{escaped_msg}' Enter` with `load-buffer + paste-buffer + separate Enter` — the previous approach broke on long messages and special characters, causing scheduled messages to never reach the overseer pane. The new approach writes the message to a temp file, loads it into the tmux paste buffer, pastes it, then sends a bare Enter to submit.
+
+### Added
+- **cockpit-wake**: persistent inbox (`~/.config/cockpit-wake/inbox.md`) — every fired awakening is appended so future Copilot sessions can catch up on missed messages.
+- **cockpit-wake**: optional desktop notification via `notify-send` when a scheduled message fires.
+
+### Changed
+- `actions/checkout` bumped from `v4` → `v6` in both `ci.yml` and `release.yml` (Node 20 deprecation on GitHub Actions runners).
+
 ## v0.1.0 — 2026-06-16
 
 Initial bootstrap release — **TH1: Bootstrap Tooling**.

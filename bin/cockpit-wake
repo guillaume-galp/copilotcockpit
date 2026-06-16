@@ -140,23 +140,52 @@ def parse_once_timespec(once_str):
     iso_str     = target.strftime("%Y-%m-%dT%H:%M:00")
     return at_timespec, iso_str
 
+# ── Inbox ──────────────────────────────────────────────────────────────────────
+INBOX_FILE = WAKE_DIR / "inbox.md"
+
+def write_inbox(id_, label, message, fired_at):
+    entry = f"## [{fired_at}] {label or id_}\n\n{message}\n\n---\n\n"
+    with open(INBOX_FILE, "a") as f:
+        f.write(entry)
+
 # ── Fire script ────────────────────────────────────────────────────────────────
-def make_fire_script(id_, session, window, message):
+def make_fire_script(id_, session, window, message, label=""):
     """Write a standalone bash fire script. Used by both at and cron."""
-    script = JOBS_DIR / f"{id_}.sh"
-    escaped_msg = message.replace("'", "'\\''")   # single-quote safe
+    script  = JOBS_DIR / f"{id_}.sh"
+    msg_file = JOBS_DIR / f"{id_}.msg"
+    msg_file.write_text(message)          # pre-written message file for load-buffer
+
+    notify_bin = subprocess.run(["which", "notify-send"], capture_output=True, text=True).stdout.strip()
+    notify_line = (
+        f'"{notify_bin}" "cockpit-wake ⏰" "{(label or id_)}" 2>/dev/null || true'
+        if notify_bin else "true  # notify-send not available"
+    )
+    escaped_label = (label or id_).replace('"', '\\"')
+
     content = f"""#!/usr/bin/env bash
 # cockpit-wake fire script — {id_}
 # Auto-generated — do not edit manually.
 
-TMUX="{TMUX_BIN}"
+TMUX_BIN="{TMUX_BIN}"
 PYTHON="{PYTHON_BIN}"
 SELF="{SELF}"
+MSG_FILE="{msg_file}"
+FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
-# Send message to tmux pane (works attached or detached)
-"$TMUX" send-keys -t "{session}:{window}" '{escaped_msg}' Enter 2>/dev/null || true
+# 1. Write to persistent inbox — readable by any future Copilot session
+"$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT"
 
-# Mark awakening as fired in state
+# 2. Desktop notification (if available)
+{notify_line}
+
+# 3. Deliver via load-buffer + paste-buffer (reliable for long messages in Copilot readline)
+#    Falls back gracefully if the pane is not a Copilot session
+"$TMUX_BIN" load-buffer "$MSG_FILE" 2>/dev/null && \\
+  "$TMUX_BIN" paste-buffer -t "{session}:{window}" 2>/dev/null || true
+sleep 1
+"$TMUX_BIN" send-keys -t "{session}:{window}" "" Enter 2>/dev/null || true
+
+# 4. Mark awakening as fired in state
 "$PYTHON" "$SELF" _mark-fired {id_}
 """
     script.write_text(content)
@@ -172,13 +201,30 @@ def cmd_mark_fired(args):
         a["fired_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     save_state(state)
 
+def cmd_write_inbox(args):
+    msg = Path(args.msg_file).read_text() if Path(args.msg_file).exists() else args.msg_file
+    write_inbox(args.id, args.label, msg, args.fired_at)
+
+# ── inbox ──────────────────────────────────────────────────────────────────────
+def cmd_inbox(args):
+    if not INBOX_FILE.exists() or not INBOX_FILE.read_text().strip():
+        print("📭 Inbox is empty — no pending awakenings.")
+        return
+    print(f"📬 Pending awakenings:\n")
+    print(INBOX_FILE.read_text())
+
+def cmd_inbox_clear(args):
+    if INBOX_FILE.exists():
+        INBOX_FILE.unlink()
+    print("🧹 Inbox cleared.")
+
 # ── schedule ───────────────────────────────────────────────────────────────────
 def cmd_schedule(args):
     state = load_state()
     id_   = gen_id()
     once  = args.once is not None
 
-    job_script = make_fire_script(id_, args.s, args.w, args.m)
+    job_script = make_fire_script(id_, args.s, args.w, args.m, label=args.label or "")
 
     if once:
         at_timespec, iso_dt = parse_once_timespec(args.once)
@@ -321,19 +367,26 @@ def main():
     pf.add_argument("id")
     sub.add_parser("status", help="Summary counts")
     sub.add_parser("clean",  help="Remove fired/cancelled entries")
+    sub.add_parser("inbox",       help="Show unread inbox messages from fired awakenings")
+    sub.add_parser("inbox-clear", help="Clear the inbox")
 
     # Internal — called by fire scripts
     pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
+    pw = sub.add_parser("_write-inbox")
+    pw.add_argument("id"); pw.add_argument("label"); pw.add_argument("msg_file"); pw.add_argument("fired_at")
 
     args = p.parse_args()
     dispatch = {
-        "schedule":    cmd_schedule,
-        "list":        cmd_list,
-        "cancel":      cmd_cancel,
-        "fire":        cmd_fire,
-        "status":      cmd_status,
-        "clean":       cmd_clean,
-        "_mark-fired": cmd_mark_fired,
+        "schedule":     cmd_schedule,
+        "list":         cmd_list,
+        "cancel":       cmd_cancel,
+        "fire":         cmd_fire,
+        "status":       cmd_status,
+        "clean":        cmd_clean,
+        "inbox":        cmd_inbox,
+        "inbox-clear":  cmd_inbox_clear,
+        "_mark-fired":  cmd_mark_fired,
+        "_write-inbox": cmd_write_inbox,
     }
     if args.command not in dispatch:
         p.print_help()
