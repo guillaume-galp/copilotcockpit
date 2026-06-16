@@ -80,7 +80,7 @@ themes:
       - id: E1
         title: "Core bootstrap shell — dispatcher, shared lib, doctor"
         slug: core-bootstrap-shell
-        status: not_started
+        status: done
         stories:
           - id: TH1-E1-US1
             title: "lib/common.sh shared helpers (logging, OS detection, idempotency, dry-run)"
