@@ -219,3 +219,13 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 ### Epic E5 (Dev skill & test infra) — CEREMONY (small epic, 3 stories)
 - Epic gate `./run-tests.sh all` → EXIT 0 (14 unit + template + 8 skills + 3 integration). All 3 stories APPROVED.
 - Epic E5 status -> done. Changelog entry written.
+
+## THEME TH1 — CEREMONY (Bootstrap Tooling)
+- All 6 epics done (E6, E1, E2, E3, E4, E5); 21/21 stories done; 0 failed/pending/in_progress.
+- Full suite `./run-tests.sh all` → EXIT 0 (14 unit + template + 8 skills + 3 integration).
+- `bash -n` clean across all shell sources; release.yml + ci.yml valid YAML; install surface present (8 skills).
+- Product-owner revalidation vs VP1 → **GO** (all 6 SCs MET, all 8 NFRs addressed, no functional gaps; only minor deferred tech-debt).
+- Release notes written: docs/plan/RELEASE-TH1.md (v0.1.0).
+- Archived .github/ISSUE_TEMPLATE/TH1-*.md → .github/ISSUE_TEMPLATE/archive/.
+- Theme TH1 status -> done (locked: false — awaiting user checkpoint decision; NOT auto-locked).
+- PAUSED for user checkpoint: accept / reject / amend.

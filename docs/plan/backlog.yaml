@@ -52,7 +52,7 @@ themes:
     slug: bootstrap-tooling
     vision: VP1-e2e-bootstrap
     title: "Bootstrap tooling: global skills install + per-project e2e scaffold"
-    status: not_started
+    status: done
     locked: false
     readme: docs/themes/TH1-bootstrap-tooling/README.md
     # Decomposed in Phase 3 (Planning). 6 epics, 21 stories.
