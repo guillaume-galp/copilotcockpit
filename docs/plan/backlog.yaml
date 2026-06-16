@@ -138,7 +138,7 @@ themes:
         stories:
           - id: TH1-E3-US1
             title: "templates/e2e/: Playwright infrastructure + governed runners"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US1-template-playwright-runners.md
             depends_on: [TH1-E6-US1]

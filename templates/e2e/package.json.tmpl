@@ -1,0 +1,21 @@
+{
+  "name": "@@APP_NAME@@-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end test harness for @@APP_NAME@@ (scaffolded by copilotcockpit).",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "test:smoke": "playwright test --grep @smoke",
+    "audit": "./run-audit.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.44.0",
+    "@types/node": "^20.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -153,3 +153,6 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E2-US4** DONE — install.sh + --from-release (commit 6be0446). Reviewer: APPROVED. Tech-debt note: reject `--link` with `--from-release` to avoid dangling symlinks (non-AC hardening, deferred).
 - **EPIC E2** all stories done — running large-epic ceremony (integration + quality check).
 - **EPIC E2 DONE** — integration PASS + quality review APPROVED. Changelog written. Unblocks E2-US4-dependents (E4-US2) and feeds E5 tests. Deferred tech-debt logged.
+
+## 2026-06-16 — Epic E3 (E2E scaffold) begins
+- **TH1-E3-US1** START — templates/e2e/ Playwright infra + governed runners.
