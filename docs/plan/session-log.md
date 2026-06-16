@@ -172,3 +172,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 
 ## 2026-06-16 — Epics E4 (CI/CD) + E5 (test infra) — interleaved by dependency
 - **TH1-E4-US1** START — VERSION + CHANGELOG.md (semver source of truth).
+- **TH1-E4-US1** DONE — VERSION 0.1.0 + CHANGELOG.md (commit b8222e8). XS: self-review.
+- **TH1-E4-US2** START — .github/workflows/release.yml (tag-driven tarball + sha256 + gh release).

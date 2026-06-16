@@ -1,0 +1,164 @@
+name: release
+
+# Tag-driven release pipeline (ADR-007, architecture §8).
+#
+# Triggers ONLY on a push of a semver release tag on the main line. The glob
+# 'v[0-9]+.[0-9]+.[0-9]+' matches v1.2.3 but NOT pre-release tags such as
+# v1.0.0-rc1 (GitHub ref globs are literal beyond the character classes, so the
+# trailing '-rc1' has nothing to match) and NOT branch pushes. A defensive
+# job-level `if` guard re-checks the ref name in case the glob is ever loosened.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write   # gh release create / upload assets
+
+jobs:
+  release:
+    name: Build & publish release
+    runs-on: ubuntu-latest
+    # Defense-in-depth (AC1): never run for a pre-release '-suffix' tag even if
+    # the trigger glob is ever widened. A hyphen in the tag => skip the job.
+    if: ${{ !contains(github.ref_name, '-') }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard — assert strict semver release tag (AC1)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Refusing to release non-release tag: $TAG (expected vX.Y.Z, no pre-release suffix)"
+            exit 1
+          fi
+          printf 'TAG=%s\n' "$TAG" >> "$GITHUB_ENV"
+
+      - name: Assemble install-surface tarball (AC2)
+        run: |
+          set -euo pipefail
+          STAGE="copilotcockpit"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          # Exactly the install surface — nothing else (no docs/, .git/, tests/, .github/).
+          cp -r bootstrap.sh lib skills bin templates README.md "$STAGE"/
+          # Deterministic, sorted archive (reproducible bytes).
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH:-0}" \
+              -czf "copilotcockpit-${TAG}.tar.gz" "$STAGE"
+          rm -rf "$STAGE"
+
+      - name: Verify tarball contents (AC2)
+        run: |
+          set -euo pipefail
+          listing="$(tar -tzf "copilotcockpit-${TAG}.tar.gz")"
+          printf '%s\n' "$listing"
+          # Must contain the install surface under a top-level copilotcockpit/ dir.
+          for want in \
+            'copilotcockpit/bootstrap.sh' \
+            'copilotcockpit/lib/' \
+            'copilotcockpit/skills/' \
+            'copilotcockpit/bin/' \
+            'copilotcockpit/templates/' \
+            'copilotcockpit/README.md'; do
+            if ! printf '%s\n' "$listing" | grep -q "^${want}"; then
+              echo "::error::tarball missing required entry: $want"; exit 1
+            fi
+          done
+          # Must NOT contain excluded trees.
+          for deny in 'copilotcockpit/docs' 'copilotcockpit/.git' 'copilotcockpit/tests' 'copilotcockpit/.github'; do
+            if printf '%s\n' "$listing" | grep -q "^${deny}"; then
+              echo "::error::tarball unexpectedly contains: $deny"; exit 1
+            fi
+          done
+
+      - name: Compute SHA-256 (AC3)
+        run: |
+          set -euo pipefail
+          sha256sum "copilotcockpit-${TAG}.tar.gz" > "copilotcockpit-${TAG}.tar.gz.sha256"
+          cat "copilotcockpit-${TAG}.tar.gz.sha256"
+
+      - name: Create unversioned alias assets (AC5)
+        run: |
+          set -euo pipefail
+          # Same bytes under the stable name the one-liner / install.sh expect at
+          # releases/latest/download/copilotcockpit.tar.gz (no API call needed).
+          cp "copilotcockpit-${TAG}.tar.gz" "copilotcockpit.tar.gz"
+          sha256sum "copilotcockpit.tar.gz" > "copilotcockpit.tar.gz.sha256"
+          cat "copilotcockpit.tar.gz.sha256"
+
+      - name: Build release notes from CHANGELOG (AC4)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          notes="release-notes.md"
+          # Extract the '## vX.Y.Z ...' section up to the next '## ' heading.
+          if [ -f CHANGELOG.md ] && grep -Eq "^## ${TAG}( |$)" CHANGELOG.md; then
+            awk -v tag="$TAG" '
+              $0 ~ "^## " tag "( |$)" { capture=1; print; next }
+              capture && /^## / { exit }
+              capture { print }
+            ' CHANGELOG.md > "$notes"
+          fi
+          if [ ! -s "$notes" ]; then
+            printf '# copilotcockpit %s\n\nBootstrap toolkit release.\n' "$TAG" > "$notes"
+          fi
+          echo "----- release notes -----"
+          cat "$notes"
+
+      - name: Create GitHub Release (AC4/AC5)
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" \
+            --title "copilotcockpit ${TAG}" \
+            --notes-file release-notes.md \
+            --latest \
+            "copilotcockpit-${TAG}.tar.gz" \
+            "copilotcockpit-${TAG}.tar.gz.sha256" \
+            "copilotcockpit.tar.gz" \
+            "copilotcockpit.tar.gz.sha256" \
+            "install.sh"
+
+  validate:
+    name: Category-5 release-asset validation
+    runs-on: ubuntu-latest
+    needs: release
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download published tarball (AC6)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p dl
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir dl \
+            --pattern "copilotcockpit.tar.gz" \
+            --pattern "copilotcockpit.tar.gz.sha256"
+
+      - name: Verify SHA-256 (AC6)
+        working-directory: dl
+        run: |
+          set -euo pipefail
+          sha256sum -c "copilotcockpit.tar.gz.sha256"
+
+      - name: Extract artefact (AC6)
+        working-directory: dl
+        run: |
+          set -euo pipefail
+          tar -xzf "copilotcockpit.tar.gz"
+          test -x copilotcockpit/bootstrap.sh
+
+      - name: Run global --dry-run + doctor from extracted dir (AC6)
+        working-directory: dl
+        run: |
+          set -euo pipefail
+          export HOME="${RUNNER_TEMP}/cc-home"
+          mkdir -p "$HOME"
+          ./copilotcockpit/bootstrap.sh global --dry-run
+          ./copilotcockpit/bootstrap.sh doctor
