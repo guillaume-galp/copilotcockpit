@@ -54,6 +54,7 @@ sleep.
 | **worker-dev** | `worker-dev` | Implements features, fixes, and new Playwright specs. |
 | **worker-fix** | `worker-fix` | Deep-dives bugs. Traces API calls. Root-causes flakiness. |
 | **Setup agents** | `setup-e2e-cockpit` · `setup-e2e-runbook` | One-shot AI agents that discover your app's topology and generate the cockpit scripts + Gherkin test-book. Run once per project. |
+| **cockpit-wake** | `cockpit-wake` | Schedules one-off or recurring messages into any cockpit pane (`at` / `cron`). Wake the overseer at 07:15, trigger a nightly regression, or nudge a worker — all while detached from the session. |
 
 Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 `~/.copilot/skills/<role>/`. Each project adds a thin overlay in
