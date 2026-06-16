@@ -1,0 +1,222 @@
+version: "1.0"
+
+# copilotcockpit backlog — single source of truth for the orchestrator.
+# Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
+# epics and stories; the placeholder below is intentionally not yet detailed.
+
+vision_phases:
+  - id: VP1
+    slug: e2e-bootstrap
+    title: "One-command bootstrap for the Copilot E2E testing harness"
+    status: architecture_complete
+    path: docs/vision_of_product/VP1-e2e-bootstrap/VP1.md
+
+architecture:
+  overview: docs/architecture/overview.md
+  adrs:
+    - id: ADR-001
+      title: "Skills source-of-truth strategy"
+      status: proposed
+      path: docs/ADRs/ADR-001-skills-source-of-truth.md
+    - id: ADR-002
+      title: "e2e/ as a git sub-repo vs. a plain directory"
+      status: proposed
+      path: docs/ADRs/ADR-002-e2e-sub-repo-strategy.md
+    - id: ADR-003
+      title: "Bootstrap entry-point design"
+      status: proposed
+      path: docs/ADRs/ADR-003-bootstrap-entry-point.md
+    - id: ADR-004
+      title: "Template parameterisation mechanism"
+      status: proposed
+      path: docs/ADRs/ADR-004-template-parameterization.md
+    - id: ADR-005
+      title: "cockpit-wake distribution"
+      status: proposed
+      path: docs/ADRs/ADR-005-cockpit-wake-distribution.md
+    - id: ADR-006
+      title: "Template update strategy"
+      status: proposed
+      path: docs/ADRs/ADR-006-template-update-strategy.md
+    - id: ADR-007
+      title: "GitHub release tarball distribution (cold install)"
+      status: proposed
+      path: docs/ADRs/ADR-007-github-release-distribution.md
+    - id: ADR-008
+      title: "copilotcockpit-dev skill & GitOps release flow"
+      status: proposed
+      path: docs/ADRs/ADR-008-copilotcockpit-dev-skill.md
+
+themes:
+  - id: TH1
+    slug: bootstrap-tooling
+    vision: VP1-e2e-bootstrap
+    title: "Bootstrap tooling: global skills install + per-project e2e scaffold"
+    status: not_started
+    locked: false
+    readme: docs/themes/TH1-bootstrap-tooling/README.md
+    # Decomposed in Phase 3 (Planning). 6 epics, 21 stories.
+    # E6 spikes scheduled first; E1 (common.sh + dispatcher) gates E2/E3.
+    epics:
+
+      - id: E6
+        title: "Spikes — portability + manifest classification"
+        slug: spikes
+        status: not_started
+        stories:
+          - id: TH1-E6-US1
+            title: "SPIKE: macOS/BSD portability of bootstrap bash scripts"
+            status: done
+            size: XS
+            path: docs/themes/TH1-bootstrap-tooling/E6-spikes/US1-spike-macos-portability.md
+            depends_on: []
+          - id: TH1-E6-US2
+            title: "SPIKE: MANIFEST.toml glob classification correctness"
+            status: pending
+            size: XS
+            path: docs/themes/TH1-bootstrap-tooling/E6-spikes/US2-spike-manifest-classification.md
+            depends_on: []
+
+      - id: E1
+        title: "Core bootstrap shell — dispatcher, shared lib, doctor"
+        slug: core-bootstrap-shell
+        status: not_started
+        stories:
+          - id: TH1-E1-US1
+            title: "lib/common.sh shared helpers (logging, OS detection, idempotency, dry-run)"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US1-common-lib.md
+            depends_on: [TH1-E6-US1]
+          - id: TH1-E1-US2
+            title: "bootstrap.sh dispatcher"
+            status: pending
+            size: S
+            path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US2-bootstrap-dispatcher.md
+            depends_on: [TH1-E1-US1]
+          - id: TH1-E1-US3
+            title: "lib/cmd-doctor.sh prerequisites + drift detection"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US3-doctor-command.md
+            depends_on: [TH1-E1-US2]
+
+      - id: E2
+        title: "Global skills install — vendor skills + cockpit-wake, cmd-global, cold install"
+        slug: global-skills-install
+        status: not_started
+        stories:
+          - id: TH1-E2-US1
+            title: "Vendor the 7 harness skill source files into skills/"
+            status: pending
+            size: S
+            path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US1-vendor-harness-skills.md
+            depends_on: []
+          - id: TH1-E2-US2
+            title: "Vendor cockpit-wake into bin/"
+            status: pending
+            size: S
+            path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US2-vendor-cockpit-wake.md
+            depends_on: []
+          - id: TH1-E2-US3
+            title: "lib/cmd-global.sh: install/update 8 skills + cockpit-wake"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US3-cmd-global.md
+            depends_on: [TH1-E1-US2, TH1-E2-US1, TH1-E2-US2]
+          - id: TH1-E2-US4
+            title: "Cold install: install.sh wrapper + global --from-release <ref>"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US4-cold-install.md
+            depends_on: [TH1-E2-US3]
+
+      - id: E3
+        title: "E2E scaffold — templates/e2e/, MANIFEST.toml, scaffold + --update"
+        slug: e2e-scaffold
+        status: not_started
+        stories:
+          - id: TH1-E3-US1
+            title: "templates/e2e/: Playwright infrastructure + governed runners"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US1-template-playwright-runners.md
+            depends_on: [TH1-E6-US1]
+          - id: TH1-E3-US2
+            title: "templates/e2e/: governance, test-book, tests & runs skeleton"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US2-template-governance-testbook.md
+            depends_on: []
+          - id: TH1-E3-US3
+            title: "templates/e2e/: context, skill overlays, tmux stubs & env files"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US3-template-overlays-context.md
+            depends_on: []
+          - id: TH1-E3-US4
+            title: "templates/e2e/MANIFEST.toml ownership classification"
+            status: pending
+            size: S
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US4-manifest-ownership.md
+            depends_on: [TH1-E6-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]
+          - id: TH1-E3-US5
+            title: "lib/cmd-e2e.sh scaffold (copy + tokenise + git init + npm install + handoff)"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US5-cmd-e2e-scaffold.md
+            depends_on: [TH1-E1-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]
+          - id: TH1-E3-US6
+            title: "lib/cmd-e2e.sh --update: content-preserving refresh via MANIFEST.toml"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US6-cmd-e2e-update.md
+            depends_on: [TH1-E3-US5, TH1-E3-US4]
+
+      - id: E4
+        title: "CI/CD & releases — VERSION/CHANGELOG, release.yml, ci.yml"
+        slug: cicd-releases
+        status: not_started
+        stories:
+          - id: TH1-E4-US1
+            title: "VERSION + CHANGELOG.md (semver source of truth)"
+            status: pending
+            size: XS
+            path: docs/themes/TH1-bootstrap-tooling/E4-cicd-releases/US1-version-changelog.md
+            depends_on: []
+          - id: TH1-E4-US2
+            title: ".github/workflows/release.yml: tag-driven tarball + sha256 + gh release"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E4-cicd-releases/US2-release-workflow.md
+            depends_on: [TH1-E3-US1, TH1-E3-US2, TH1-E3-US3, TH1-E4-US1, TH1-E2-US4]
+          - id: TH1-E4-US3
+            title: ".github/workflows/ci.yml: PR checks (test categories 1-4)"
+            status: pending
+            size: S
+            path: docs/themes/TH1-bootstrap-tooling/E4-cicd-releases/US3-ci-workflow.md
+            depends_on: [TH1-E5-US1, TH1-E5-US2]
+
+      - id: E5
+        title: "Developer skill & test infra — run-tests.sh, test suites, copilotcockpit-dev"
+        slug: dev-skill-test-infra
+        status: not_started
+        stories:
+          - id: TH1-E5-US1
+            title: "run-tests.sh dispatcher + Category-1 bats unit tests"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US1-run-tests-unit.md
+            depends_on: [TH1-E1-US3, TH1-E2-US3, TH1-E3-US6]
+          - id: TH1-E5-US2
+            title: "Categories 2-4: template integrity, skills lint & integration smoke"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US2-template-skills-integration-tests.md
+            depends_on: [TH1-E2-US1, TH1-E2-US3, TH1-E3-US4, TH1-E3-US5]
+          - id: TH1-E5-US3
+            title: "skills/copilotcockpit-dev/SKILL.md: GitOps delivery runbook"
+            status: pending
+            size: M
+            path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US3-copilotcockpit-dev-skill.md
+            depends_on: [TH1-E4-US2]
