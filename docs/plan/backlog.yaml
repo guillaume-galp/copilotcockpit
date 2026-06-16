@@ -90,7 +90,7 @@ themes:
             depends_on: [TH1-E6-US1]
           - id: TH1-E1-US2
             title: "bootstrap.sh dispatcher"
-            status: pending
+            status: done
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US2-bootstrap-dispatcher.md
             depends_on: [TH1-E1-US1]

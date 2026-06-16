@@ -136,3 +136,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E6-US2** DONE — manifest-classification.md produced (commit 9a15b7f). Fixture kept out of VCS.
 - **EPIC E6 DONE** — both spikes complete. Small-epic ceremony: test suite deferred (none built yet); changelog entry written. E6 unblocks E1-US1, E3-US1, E3-US4, E3-US6.
 - **TH1-E1-US1** START — lib/common.sh shared helpers.
+- **TH1-E1-US1** DONE — lib/common.sh (commit b2e0d58). Reviewer: APPROVED.
+- **TH1-E1-US2** START — bootstrap.sh dispatcher.
