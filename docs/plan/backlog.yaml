@@ -108,13 +108,13 @@ themes:
         stories:
           - id: TH1-E2-US1
             title: "Vendor the 7 harness skill source files into skills/"
-            status: pending
+            status: done
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US1-vendor-harness-skills.md
             depends_on: []
           - id: TH1-E2-US2
             title: "Vendor cockpit-wake into bin/"
-            status: pending
+            status: in_progress
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US2-vendor-cockpit-wake.md
             depends_on: []

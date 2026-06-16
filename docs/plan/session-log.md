@@ -142,3 +142,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E1-US3** START — lib/cmd-doctor.sh prerequisites + drift detection.
 - **TH1-E1-US3** DONE — lib/cmd-doctor.sh (commit 2667aba). Reviewer: APPROVED.
 - **EPIC E1 DONE** — dispatcher + common.sh + doctor. Small-epic ceremony: bash -n all 3 files OK; doctor/usage smoke exit 0; changelog written. Unblocks E2-US3, E3-US5.
+- **TH1-E2-US1** START — vendor 7 harness skills into skills/.
+- **TH1-E2-US2** START — vendor cockpit-wake into bin/.
