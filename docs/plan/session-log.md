@@ -208,3 +208,6 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 ### Epic E4 (CI/CD & releases) — CEREMONY (small epic, 3 stories)
 - Epic smoke: release.yml + ci.yml valid YAML; VERSION=0.1.0; CHANGELOG.md has v0.1.0 section. All 3 stories APPROVED.
 - Epic E4 status -> done. Changelog entry written.
+
+### TH1-E5-US3 — START
+- Dispatching developer: `skills/copilotcockpit-dev/SKILL.md` (GitOps delivery runbook, 8th managed skill).

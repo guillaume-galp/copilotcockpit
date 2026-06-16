@@ -17,11 +17,9 @@ setup() {
 }
 
 # --- global --dry-run lists the 8 managed skills + cockpit-wake --------------
-# Current reality (copilotcockpit-dev source lands in TH1-E5-US3): the dry-run
-# enumerates ALL 8 names — 7 harness skills as "would copy ..." lines and the 8th
-# (copilotcockpit-dev) as a "skill source not yet vendored, skipping" WARNING —
-# plus cockpit-wake. We assert exactly that REAL output (we do NOT assert the
-# post-US3 behaviour where copilotcockpit-dev is installed).
+# Reality since TH1-E5-US3: copilotcockpit-dev's source is now vendored, so the
+# dry-run enumerates ALL 8 names as "would copy ..." lines (no pending warning),
+# plus cockpit-wake. We assert exactly that REAL output.
 @test "global --dry-run lists all 8 managed skills + cockpit-wake" {
 	run "$CC_BOOTSTRAP" global --dry-run
 	[ "$status" -eq 0 ]
@@ -35,9 +33,9 @@ setup() {
 	echo "$output" | grep -q "worker-fix"
 	echo "$output" | grep -q "worker-test"
 
-	# The 8th skill name appears AND is flagged as the known-pending source.
+	# The 8th skill is now vendored: it appears AND is no longer flagged pending.
 	echo "$output" | grep -q "copilotcockpit-dev"
-	echo "$output" | grep -q "not yet vendored, skipping: copilotcockpit-dev"
+	! echo "$output" | grep -q "not yet vendored, skipping: copilotcockpit-dev"
 
 	# cockpit-wake is part of the same managed install pass.
 	echo "$output" | grep -q "cockpit-wake"

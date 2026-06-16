@@ -216,7 +216,7 @@ themes:
             depends_on: [TH1-E2-US1, TH1-E2-US3, TH1-E3-US4, TH1-E3-US5]
           - id: TH1-E5-US3
             title: "skills/copilotcockpit-dev/SKILL.md: GitOps delivery runbook"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US3-copilotcockpit-dev-skill.md
             depends_on: [TH1-E4-US2]

@@ -34,12 +34,13 @@ CC_ROOT="$(cd "$(dirname "$_cc_self")/.." && pwd -P)"
 . "$CC_ROOT/lib/common.sh"
 
 # --- Managed role set (ADR-001 + ADR-008) ------------------------------------
-# The 7 harness skills are REQUIRED sources; copilotcockpit-dev (8th, ADR-008) is
-# a KNOWN-PENDING source delivered by TH1-E5-US3. The loop enumerates all 8 so the
-# 8th installs automatically once its source lands — but its current absence is a
-# warning, not a fatal error (AC2). A missing HARNESS source is fatal (AC9).
-CC_HARNESS_ROLES="e2e-cockpit e2e-operator setup-e2e-cockpit setup-e2e-runbook worker-dev worker-fix worker-test"
-CC_PENDING_ROLES="copilotcockpit-dev"
+# All 8 managed skills are now REQUIRED sources vendored in this repo: the 7
+# harness skills plus copilotcockpit-dev (the 8th, ADR-008), whose source landed
+# in TH1-E5-US3. A missing REQUIRED source is fatal (AC9). CC_PENDING_ROLES is
+# retained (now empty) so the enumeration shape stays stable for any future
+# known-pending source; an empty list contributes nothing to CC_ALL_ROLES.
+CC_HARNESS_ROLES="copilotcockpit-dev e2e-cockpit e2e-operator setup-e2e-cockpit setup-e2e-runbook worker-dev worker-fix worker-test"
+CC_PENDING_ROLES=""
 CC_ALL_ROLES="$CC_HARNESS_ROLES $CC_PENDING_ROLES"
 
 usage() {
@@ -299,7 +300,8 @@ main() {
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
-	# silent install. copilotcockpit-dev (pending) is exempt by design (AC2).
+	# silent install. All 8 managed skills are required (copilotcockpit-dev
+	# included since TH1-E5-US3); CC_PENDING_ROLES is empty.
 	local missing=0 role
 	for role in $CC_HARNESS_ROLES; do
 		if [[ ! -f "$skills_root/$role/SKILL.md" ]]; then
@@ -325,7 +327,9 @@ main() {
 		local src="$skills_root/$role/SKILL.md"
 		local dst="$skills_dst_root/$role/SKILL.md"
 		if [[ ! -f "$src" ]]; then
-			# Only pending roles reach here (harness verified in preflight).
+			# Defensive only: with CC_PENDING_ROLES now empty, every role is a
+			# required source already verified in preflight, so this is dead
+			# code unless a future known-pending source is reintroduced.
 			log_warn "skill source not yet vendored, skipping: $role (expected via TH1-E5-US3)"
 			continue
 		fi
