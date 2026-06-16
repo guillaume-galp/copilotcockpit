@@ -150,3 +150,6 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E2-US3** DONE — lib/cmd-global.sh installs/updates 8 skills + cockpit-wake; all 9 ACs verified against scratch HOME (copy/link/dry-run/drift/idempotent/PATH/AC9-fatal).
 - **TH1-E2-US3** DONE — lib/cmd-global.sh (commit 31c04a1). Reviewer: APPROVED.
 - **TH1-E2-US4** START — install.sh wrapper + global --from-release.
+- **TH1-E2-US4** DONE — install.sh + --from-release (commit 6be0446). Reviewer: APPROVED. Tech-debt note: reject `--link` with `--from-release` to avoid dangling symlinks (non-AC hardening, deferred).
+- **EPIC E2** all stories done — running large-epic ceremony (integration + quality check).
+- **EPIC E2 DONE** — integration PASS + quality review APPROVED. Changelog written. Unblocks E2-US4-dependents (E4-US2) and feeds E5 tests. Deferred tech-debt logged.

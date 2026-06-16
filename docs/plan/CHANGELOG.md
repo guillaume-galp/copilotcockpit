@@ -44,3 +44,33 @@ Per-epic delivery log produced by the Autopilot Orchestrator during TH1 executio
 
 **Ceremony:** Small epic (3 stories). Epic smoke: `bash -n` passes on all 3 files;
 `./bootstrap.sh doctor` exit 0; `./bootstrap.sh` usage exit 0. Full bats suite deferred to E5.
+
+---
+
+## Epic E2 — Global skills install (vendor skills + cockpit-wake, cmd-global, cold install)
+
+**Stories Completed:** TH1-E2-US1, US2, US3, US4 (all reviewer-APPROVED). Large epic → epic-integration test PASS + cross-cutting quality review APPROVED.
+
+**Key Changes:**
+- Vendored the 7 canonical harness skills verbatim into `skills/<role>/SKILL.md`
+  (e2e-cockpit, e2e-operator, setup-e2e-cockpit, setup-e2e-runbook, worker-dev,
+  worker-fix, worker-test) and `cockpit-wake` (stdlib-only Python 3) into `bin/`.
+- `lib/cmd-global.sh` — `bootstrap.sh global`: idempotent install/update of all 8
+  managed skills (7 + pending `copilotcockpit-dev`) + cockpit-wake via `cc_install_file`
+  (backup-before-overwrite, `already current`); `--link` (dev symlinks), `--dry-run`,
+  PATH guidance (no dotfile edits), pre-flight required-source validation (atomic, no
+  partial install), and `--from-release <ref>` (latest|vX.Y.Z) cold-install path with
+  checksum-verified, atomic tarball fetch/extract.
+- `install.sh` — tiny cold-install one-liner wrapper: fetch tarball + `.sha256` from
+  `releases/latest/download/`, verify, extract, exec `bootstrap.sh global`.
+- `lib/common.sh` — added portable `cc_sha256_file` / `cc_sha256_verify`
+  (sha256sum→shasum auto-detect). Test seam: `CC_RELEASE_BASE_URL` / `CC_RELEASE_REPO`.
+
+**Files Modified:** `skills/*/SKILL.md` (×7), `bin/cockpit-wake`, `lib/cmd-global.sh`,
+`install.sh`, `lib/common.sh`.
+
+**Ceremony (large epic):** Integration journey (install→idempotent→doctor→drift→link/dry-run→
+release fetch+tamper-abort) PASS against scratch HOMEs; real `~/.copilot`/`~/.local` untouched.
+Quality review APPROVED. Deferred tech-debt: (a) reject `--link` + `--from-release`
+combination; (b) hoist canonical 8-role list into common.sh (duplicated in cmd-global/cmd-doctor).
+Live network round-trip for `--from-release` to be E2E-validated once E4-US2 publishes a release.
