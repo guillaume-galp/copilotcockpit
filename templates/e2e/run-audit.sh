@@ -181,7 +181,10 @@ for tc in root.iter('testcase'):
     tc_id = m.group(1) if m else 'unmapped'
 
     # Playwright JUnit reporter emits <error>; standard JUnit uses <failure>.
-    failure = tc.find('failure') or tc.find('error')
+    # NOTE: an ElementTree element with no children is falsy, so a
+    # <failure message="…">text</failure> would be wrongly treated as absent
+    # under `or`. Use explicit `is not None` to classify failures correctly.
+    failure = tc.find('failure') if tc.find('failure') is not None else tc.find('error')
     skipped = tc.find('skipped')
 
     if skipped is not None:
@@ -301,7 +304,7 @@ for tc in root.iter('testcase'):
     m = re.search(r'@(TC-[A-Z]+-\d+)', name)
     tc_id = m.group(1) if m else '—'
 
-    failure = tc.find('failure') or tc.find('error')
+    failure = tc.find('failure') if tc.find('failure') is not None else tc.find('error')
     skipped = tc.find('skipped')
 
     if skipped is not None:
@@ -343,9 +346,9 @@ Compact index of all runs → \`runs/INDEX.md\`
 HEADER
 fi
 
-# Insert newest block just under the 4-line header (temp-file + mv; no sed -i).
-DIGEST_HEADER=$(head -n 4 "$DIGEST_FILE")
-DIGEST_BODY=$(tail -n +5 "$DIGEST_FILE")
+# Insert newest block just under the 5-line header (temp-file + mv; no sed -i).
+DIGEST_HEADER=$(head -n 5 "$DIGEST_FILE")
+DIGEST_BODY=$(tail -n +6 "$DIGEST_FILE")
 printf '%s\n%s\n%s\n' "$DIGEST_HEADER" "$DIGEST_BLOCK" "$DIGEST_BODY" > "${DIGEST_FILE}.tmp"
 mv "${DIGEST_FILE}.tmp" "$DIGEST_FILE"
 printf 'Monthly digest updated → %s\n' "$DIGEST_FILE"
