@@ -17,6 +17,14 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.1.2 — 2026-06-16
+
+### Changed
+- **README**: complete rewrite — builder-focused intro with Gherkin user stories,
+  tmux cockpit ASCII layout, full squad/skills/tools survey, step-by-step
+  installation guide, and a new *"Works great with `copilotautopilot`"* section
+  explaining how the two sibling toolkits compound.
+
 ## v0.1.1 — 2026-06-16
 
 ### Fixed
