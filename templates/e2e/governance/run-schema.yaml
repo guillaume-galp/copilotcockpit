@@ -1,0 +1,83 @@
+# Run Record Schema
+#
+# Each run produced by run-audit.sh writes ONE YAML file matching this schema.
+# File path: runs/RUN-{YYYYMMDD}-{HHMMSS}-{env}.yaml
+#
+# This file is DOCUMENTATION — it is not executed. It doubles as a filled-in
+# example of a smoke run. The field set below mirrors EXACTLY what run-audit.sh
+# emits (top-level keys, in order: run_id, timestamp, label, env, project, scope,
+# urls, code, playwright_version, runner, runner_image, duration_s, exit_code,
+# summary, cases).
+
+run_id: RUN-20260616-120000-local          # unique run identifier: RUN-{ts}-{env}
+timestamp: "2026-06-16T12:00:00Z"          # ISO-8601, UTC (Z) — emitted by `date -u`
+label: "pre-merge fix/e2e-scaffold"        # optional free-text label ("" if none)
+
+# ── Environment / scope ──────────────────────────────────────────────────────
+env: local                 # local | remote | <forced --env value>
+project: chromium          # playwright project: chromium | all | <custom>
+scope: "@smoke"            # playwright --grep value; "all" if no filter
+
+urls:
+  frontend: "http://localhost:@@FRONTEND_PORT@@"
+  backend:  "http://localhost:@@BACKEND_PORT@@"
+
+# ── Code Versions ────────────────────────────────────────────────────────────
+# One block per component listed in E2E_COMPONENTS (default: "app:." → a single
+# "app" component tracking the project root). Split repos add one block each, e.g.
+# `frontend:` and `backend:`. Each block carries branch, short SHA and dirty flag.
+code:
+  app:
+    branch: main
+    sha: a1b2c3d                   # short SHA (git rev-parse --short HEAD)
+    dirty: false                   # true = uncommitted changes present at run time
+
+# ── Runner ───────────────────────────────────────────────────────────────────
+playwright_version: "1.60.0"       # version parsed from the Docker image tag
+runner: docker                     # always "docker" (run-playwright.sh delegates to Docker)
+runner_image: "mcr.microsoft.com/playwright:v1.60.0-noble"
+
+# ── Aggregate Results ────────────────────────────────────────────────────────
+duration_s: 12                     # wall-clock seconds for the test phase
+exit_code: 0                       # 0 = all passed; 1 = some failed; 2 = setup/config error
+
+summary:
+  total:   3
+  passed:  3
+  failed:  0
+  skipped: 0
+  flaky:   0
+
+# ── Per-Test Results ─────────────────────────────────────────────────────────
+# id:          TC-ID from @TC-XXX-NNN tag in the test title ("unmapped" if none)
+# title:       full test title from the JUnit XML
+# status:      passed | failed | skipped
+# duration_ms: wall-clock time in milliseconds
+# file:        spec file path (derived from JUnit classname)
+# error:       first line of the failure message (omitted on pass/skip)
+cases:
+  - id: TC-SMOKE-001
+    title: "backend health @TC-SMOKE-001 @smoke"
+    status: passed
+    duration_ms: 85
+    file: tests/smoke.spec.ts
+
+  - id: TC-SMOKE-002
+    title: "frontend SPA loads @TC-SMOKE-002 @smoke"
+    status: passed
+    duration_ms: 340
+    file: tests/smoke.spec.ts
+
+  - id: TC-SMOKE-003
+    title: "key API endpoint accessible @TC-SMOKE-003 @smoke"
+    status: passed
+    duration_ms: 92
+    file: tests/smoke.spec.ts
+
+  # Example failure entry (note: `error` present, no `retry` field is emitted):
+  # - id: TC-SMOKE-002
+  #   title: "frontend SPA loads @TC-SMOKE-002 @smoke"
+  #   status: failed
+  #   duration_ms: 5002
+  #   file: tests/smoke.spec.ts
+  #   error: "TimeoutError: page.goto: net::ERR_CONNECTION_REFUSED"

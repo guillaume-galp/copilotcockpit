@@ -156,3 +156,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 
 ## 2026-06-16 — Epic E3 (E2E scaffold) begins
 - **TH1-E3-US1** START — templates/e2e/ Playwright infra + governed runners.
+- **TH1-E3-US1** DONE — template runners (commit 4de48f0; rework fix 406a298). Reviewer: REQUEST_CHANGES→APPROVED (1 iter; JUnit failure-classification + digest header bugs fixed).
+- **TH1-E3-US2** START — templates/e2e governance, test-book, tests & runs skeleton.

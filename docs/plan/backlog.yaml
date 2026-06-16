@@ -144,7 +144,7 @@ themes:
             depends_on: [TH1-E6-US1]
           - id: TH1-E3-US2
             title: "templates/e2e/: governance, test-book, tests & runs skeleton"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US2-template-governance-testbook.md
             depends_on: []
