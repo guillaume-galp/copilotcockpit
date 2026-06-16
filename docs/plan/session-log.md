@@ -211,3 +211,11 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 
 ### TH1-E5-US3 — START
 - Dispatching developer: `skills/copilotcockpit-dev/SKILL.md` (GitOps delivery runbook, 8th managed skill).
+
+### TH1-E5-US3 — DONE (reviewer APPROVED)
+- `skills/copilotcockpit-dev/SKILL.md` (8th managed skill, ADR-008 GitOps runbook). Promoted copilotcockpit-dev from CC_PENDING_ROLES → CC_HARNESS_ROLES in cmd-global.sh (now required+installed); updated smoke.bats to assert pending-warning absent. Commit 216bc09.
+- DEFERRED (non-blocking): generic-ify the dead pending-skip message in cmd-global.sh:333.
+
+### Epic E5 (Dev skill & test infra) — CEREMONY (small epic, 3 stories)
+- Epic gate `./run-tests.sh all` → EXIT 0 (14 unit + template + 8 skills + 3 integration). All 3 stories APPROVED.
+- Epic E5 status -> done. Changelog entry written.

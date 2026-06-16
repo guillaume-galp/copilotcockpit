@@ -200,7 +200,7 @@ themes:
       - id: E5
         title: "Developer skill & test infra — run-tests.sh, test suites, copilotcockpit-dev"
         slug: dev-skill-test-infra
-        status: not_started
+        status: done
         stories:
           - id: TH1-E5-US1
             title: "run-tests.sh dispatcher + Category-1 bats unit tests"

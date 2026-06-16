@@ -120,3 +120,19 @@ Real Docker/Playwright run validated structurally; full E2E deferred to E5 integ
 **Epic ceremony (small, 3 stories):** both workflows parse as valid YAML; VERSION + CHANGELOG present with a `## v0.1.0` section; release packaging + Category-5 logic and the ci dispatcher job-body were validated locally (live GitHub Actions execution deferred to a real tag push / PR). All 3 stories reviewer-APPROVED.
 
 **Deferred (non-blocking):** sync architecture §7 embedded MANIFEST block; PyYAML install hardening for PEP-668; richer release notes mtime.
+
+## Epic E5 — Developer skill & test infra
+
+**Stories completed:** TH1-E5-US1 (run-tests.sh + Category-1 unit), TH1-E5-US2 (Categories 2–4), TH1-E5-US3 (copilotcockpit-dev skill)
+
+**Key changes:**
+- `run-tests.sh`: portable (bash 3.2-safe) test dispatcher — `unit|template|skills|integration|all`; aggregates exit codes (any failure → non-zero); detects missing `bats` with actionable guidance; existence-checks category scripts so they auto-wire.
+- **Category 1** `tests/unit/{cmd-global,cmd-e2e,cmd-doctor}.bats` (+`helper.bash`): per-command idempotency, dry-run = no-side-effects, and error paths (missing arg / wrong dir / refuse-to-clobber). Hard-guarded fake-HOME isolation (HOME forced under `$BATS_TEST_TMPDIR`, aborts otherwise) so the real `~/.copilot/skills` / `~/.local/bin` are never mutated.
+- **Category 2** `tests/template/check-template.sh`: unresolved-token scan on every `*.tmpl`, `package.json.tmpl` JSON validity post-substitution, MANIFEST.toml full-coverage of `templates/e2e/` (stricter than runtime — orphan = fail), `bash -n` of the runners. Closed two genuine MANIFEST coverage gaps (MANIFEST.toml→framework, governance/flaky-known.md→seed).
+- **Category 3** `tests/skills/lint-skills.sh`: PyYAML frontmatter parse + non-empty name/description for every `skills/*/SKILL.md`.
+- **Category 4** `tests/integration/smoke.bats`: fake-HOME dry-run smoke for `global` (8 skills + cockpit-wake), `e2e` (scaffold list), `doctor`.
+- `skills/copilotcockpit-dev/SKILL.md`: the 8th managed skill — ADR-008 GitOps delivery runbook (branch/commit conventions, commit-type→bump table, five test categories, 12-step/4-phase flow with exact `gh` commands, 3-attempt bounded-autonomy escalation, VERSION/CHANGELOG ownership). Promoted from a pending source to a required harness role in `cmd-global.sh` so `bootstrap.sh global` installs all 8.
+
+**Files modified:** `run-tests.sh`, `tests/unit/*.bats`, `tests/unit/helper.bash`, `tests/template/check-template.sh`, `tests/skills/lint-skills.sh`, `tests/integration/smoke.bats`, `tests/integration/helper.bash`, `skills/copilotcockpit-dev/SKILL.md`, `lib/cmd-global.sh`, `templates/e2e/MANIFEST.toml`.
+
+**Epic ceremony (small, 3 stories):** `./run-tests.sh all` exits 0 — 14 unit + template integrity + 8-skill lint + 3 integration. All 3 stories reviewer-APPROVED.
