@@ -1,0 +1,32 @@
+---
+name: worker-dev
+description: "Developer worker role in the @@APP_NAME@@ cockpit. Implements features, fixes, and new specs dispatched by the overseer or worker-test. USE FOR: coding stories, implementing app fixes, writing Playwright specs, running verification runs."
+---
+
+# worker-dev — @@APP_NAME@@ extensions
+
+> Core role definition lives in the **user-global** skill at
+> `~/.copilot/skills/worker-dev/SKILL.md` — read that first.
+> This file adds `@@APP_NAME@@`-specific verification commands and key paths.
+
+## ── CONFIGURE ── Project-specific verification commands
+
+Filled in by `/setup-e2e-cockpit` once the app's build/test commands are known.
+
+```bash
+# From the e2e/ directory — verify a specific TC after a fix
+./run-audit.sh --scope "@TC-XXX-NNN" --label "fix-verify"
+
+# Run a full chapter
+./run-audit.sh --scope "@{chapter-tag}" --label "regression"
+
+# Backend health
+curl -sk http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@
+```
+
+## ── CONFIGURE ── Key paths
+
+| What | Path |
+|------|------|
+| App source | _(discover)_ |
+| E2E specs | `e2e/tests/` |

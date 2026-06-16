@@ -1,0 +1,46 @@
+---
+name: e2e-operator
+description: "Operate the @@APP_NAME@@ E2E governance layer: run tests, read audit logs, map TC-IDs, triage failures, dispatch fixes. USE FOR: running run-audit.sh, interpreting INDEX.md / RUN-*.yaml, reading the test-book, mapping failing tests to TC-IDs, dispatching fix briefs, reporting to the overseer."
+---
+
+# E2E Operator — @@APP_NAME@@ Project Overlay
+
+> Load the **global** `e2e-operator` skill first for the full operator workflow:
+> `run-audit.sh` usage, audit-trail reading, TC-ID mapping, triage, and report format.
+> This file adds `@@APP_NAME@@`-specific paths, URLs, and chapter references.
+
+---
+
+## Project paths
+
+| Resource | Value |
+|----------|-------|
+| Run commands from | the `e2e/` directory |
+| Test runner | `./run-audit.sh` |
+| Playwright wrapper | `./run-playwright.sh` (ad-hoc only) |
+| Audit trail | `runs/` |
+| Test book | `test-book/` |
+| Governance | `governance/GOVERNANCE.md` |
+
+---
+
+## ── CONFIGURE ── Environment
+
+Filled in by `/setup-e2e-cockpit`. Defaults below assume local development.
+
+| Resource | Value |
+|----------|-------|
+| Health check | `curl -sk http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@` |
+| Frontend URL | `http://localhost:@@FRONTEND_PORT@@` |
+| Backend URL | `http://localhost:@@BACKEND_PORT@@` |
+| `SKIP_DB_RESET` | `true` for UI-mock tests |
+
+---
+
+## ── CONFIGURE ── Chapter → scope-tag quick-ref
+
+Populated by `/setup-e2e-runbook` as feature chapters are added. Seed:
+
+| Chapter | Tag |
+|---------|-----|
+| CH01 Smoke | `@smoke` |

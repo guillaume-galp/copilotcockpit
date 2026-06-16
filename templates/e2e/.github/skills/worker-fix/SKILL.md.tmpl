@@ -1,0 +1,30 @@
+---
+name: worker-fix
+description: "Troubleshooter worker role in the @@APP_NAME@@ cockpit. Deep-dives into non-obvious bugs, traces API calls, root-causes failures, and implements targeted fixes. USE FOR: debugging, root-cause analysis, log diving, auth issues, race conditions."
+---
+
+# worker-fix — @@APP_NAME@@ extensions
+
+> Core role definition lives in the **user-global** skill at
+> `~/.copilot/skills/worker-fix/SKILL.md` — read that first.
+> This file adds `@@APP_NAME@@`-specific investigation commands.
+
+## ── CONFIGURE ── Project-specific investigation commands
+
+Filled in by `/setup-e2e-cockpit` once the app's log/topology is known.
+
+```bash
+# Backend health
+curl -sk http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@
+
+# Replay an API call (adapt path/auth for @@APP_NAME@@)
+curl -sk http://localhost:@@BACKEND_PORT@@/<path>
+
+# Log tails — discover the app's log source (docker logs, kubectl logs, file tail, …)
+```
+
+## ── CONFIGURE ── Key services
+
+| Service | Language | Locator |
+|---------|----------|---------|
+| _(discover)_ | _(discover)_ | _(discover)_ |

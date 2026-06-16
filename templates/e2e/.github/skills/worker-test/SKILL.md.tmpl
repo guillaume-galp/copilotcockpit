@@ -1,0 +1,30 @@
+---
+name: worker-test
+description: "E2E Test Operator worker role in the @@APP_NAME@@ cockpit. Runs governed test suites, reads audit trails, maps failures to TC-IDs, triages root causes, and dispatches fix briefs. USE FOR: running run-audit.sh, reading the audit trail, classifying failures, dispatching to worker-dev or worker-fix."
+---
+
+# worker-test — @@APP_NAME@@ extensions
+
+> Core role definition lives in the **user-global** skill at
+> `~/.copilot/skills/worker-test/SKILL.md` — read that first.
+> Also load the `e2e-operator` skill for TC-ID mapping and audit-trail details.
+> This file adds `@@APP_NAME@@`-specific run commands and key paths.
+
+## ── CONFIGURE ── Project-specific run commands
+
+```bash
+# From the e2e/ directory
+./run-audit.sh --scope "@smoke"          # always first
+./run-audit.sh                           # full suite
+./run-audit.sh --scope "@TC-XXX-NNN"     # single TC verify
+```
+
+## Key paths
+
+| What | Path |
+|------|------|
+| Audit trail | `runs/INDEX.md` |
+| Per-run detail | `runs/RUN-*.yaml` |
+| Test specs | `tests/` |
+| Test book | `test-book/` |
+| Backend health | `curl -sk http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@` |

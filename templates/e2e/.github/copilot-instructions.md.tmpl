@@ -1,0 +1,98 @@
+# E2E — Copilot Instructions (@@APP_NAME@@)
+
+> These instructions apply when working inside the `e2e/` directory or operating the
+> E2E cockpit for **@@APP_NAME@@**. They extend the root
+> `.github/copilot-instructions.md` (if the parent project has one).
+
+---
+
+## Context
+
+You are operating the **E2E cockpit** for `@@APP_NAME@@` — a tmux workspace for running
+Playwright tests against the app. The full cockpit topology, test-runner commands, and
+worker roles are documented in the `e2e-cockpit` skill (if installed) and in
+`e2e/governance/GOVERNANCE.md`.
+
+This harness was scaffolded by **copilotcockpit**. Some files ship as runnable
+placeholders with `# ── CONFIGURE ──` blocks and are completed interactively by the
+`/setup-e2e-cockpit` and `/setup-e2e-runbook` skills once the app topology is known.
+
+---
+
+## Repository topology — `e2e/` is its own git repository (ADR-002)
+
+**`e2e/` is initialised as an independent git repository** (`git init` inside `e2e/`),
+*not* a plain directory committed to the parent project's history. This matches the
+reference harnesses and is a deliberate decision (ADR-002):
+
+- The high-churn audit trail (`runs/RUN-*.yaml`, `runs/INDEX.md`, monthly digests) lives
+  in the `e2e/` repo, keeping the parent app's history clean.
+- The E2E harness can have its **own remote, CI pipeline, and access control**.
+- `run-audit.sh` snapshots the *parent* app's component SHAs via `E2E_COMPONENTS` — it
+  records the app as an **external** component, it does not share the app's git history.
+
+### What this means in practice
+
+- There are **two `git status` contexts** to reason about: the parent app repo and the
+  nested `e2e/` repo. When you `cd e2e && git status`, you are in the E2E repo.
+- The parent repo sees `e2e/` as empty/ignored unless a submodule is configured. The two
+  supported integration options are:
+  1. **Ignore in parent** — add `/e2e/` to the parent `.gitignore` (simplest; the e2e
+     history lives only locally or on its own remote).
+  2. **Submodule** — `git submodule add <e2e-remote> e2e` once an e2e remote exists.
+- **Do not** stage `e2e/` as a bare gitlink in the parent with no remote — it confuses
+  contributors and breaks clones.
+- A `--no-git` scaffold option exists for teams who explicitly want the parent to own the
+  `e2e/` files as a plain directory.
+
+---
+
+## E2E test structure
+
+```
+e2e/
+├── playwright.config.ts       # FRONTEND_URL / BACKEND_URL from .env.local
+├── .env.local                 # gitignored — your app's URLs and tokens
+├── .env.example               # committed template — copy to .env.local
+├── global-setup.ts            # optional DB reset (skipped when SKIP_DB_RESET=true)
+├── run-playwright.sh          # Docker wrapper for the test runner
+├── run-audit.sh               # governed test runner (writes the audit trail)
+├── tmux-cockpit.sh            # remote/k8s cockpit builder (placeholder until configured)
+├── tmux-cockpit-local.sh      # local dev cockpit builder (placeholder until configured)
+├── governance/                # GOVERNANCE.md, run schema, flaky register
+├── test-book/                 # Gherkin chapters + TC-IDs
+└── tests/
+    ├── helpers.ts             # auth mocks / fixtures
+    └── smoke.spec.ts          # @smoke — health + SPA load
+```
+
+---
+
+## Key rules
+
+| # | Rule |
+|---|------|
+| 1 | **Run tests through the runner** — use `./run-audit.sh` (governed) or `./run-playwright.sh` (ad-hoc). |
+| 2 | **Never run DB migrations against a shared/production DB** — set `SKIP_DB_RESET=true`. |
+| 3 | **UI tests mock auth** — auth failures in UI tests mean a broken mock, not a broken auth server. |
+| 4 | **Smoke is the gate** — if `@smoke` fails, fix infrastructure before touching app code. |
+| 5 | **Backend logs first** — check the backend pane/window before opening source files. |
+| 6 | **One fix per turn** — fix one failing test, verify it, then proceed to the next. |
+| 7 | **Always use `run-audit.sh`** for tracked runs — it records the audit trail. |
+
+---
+
+## Running tests
+
+```bash
+# From the e2e/ directory
+./run-audit.sh --scope "@smoke"          # smoke gate
+./run-audit.sh                           # full suite
+./run-audit.sh --scope "@{chapter-tag}"  # single chapter
+```
+
+## Checking backend connectivity
+
+```bash
+curl -sk http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@   # 200 = backend alive
+```

@@ -1,0 +1,44 @@
+---
+name: setup-e2e-runbook
+description: "Explore @@APP_NAME@@'s features and generate the Gherkin test-book chapters and Playwright spec stubs. USE FOR: building the @@APP_NAME@@ test-book from scratch, discovering feature domains, writing TC-IDs and Gherkin scenarios, generating spec stubs, populating SUMMARY.md."
+---
+
+# Setup E2E Runbook — @@APP_NAME@@ Project Overlay
+
+> Load the **global** `setup-e2e-runbook` skill first for the full workflow.
+> This file records `@@APP_NAME@@`-specific paths and the existing test-book state.
+
+---
+
+## ── CONFIGURE ── Existing test-book (do not duplicate)
+
+Update this table as chapters are added. Seed contains only the smoke chapter:
+
+| Chapter | File | Prefix | Last TC |
+|---------|------|--------|---------|
+| CH01 Smoke | `test-book/CH01-smoke.md` | `SMOKE` | 003 |
+
+See `test-book/SUMMARY.md` for the live master index.
+
+---
+
+## Project paths
+
+| Resource | Path |
+|----------|------|
+| Test root | the `e2e/` directory |
+| Test files | `tests/*.spec.ts` |
+| Helpers | `tests/helpers.ts` |
+| Test runner | `./run-audit.sh` |
+| Playwright config | `playwright.config.ts` |
+| `BACKEND_URL` default | `http://localhost:@@BACKEND_PORT@@` |
+| `FRONTEND_URL` default | `http://localhost:@@FRONTEND_PORT@@` |
+
+## Auth helpers
+
+```typescript
+import { loginAs } from './helpers';
+
+// Authenticated test (mocks auth as discovered for @@APP_NAME@@)
+await loginAs(page);
+```

@@ -150,7 +150,7 @@ themes:
             depends_on: []
           - id: TH1-E3-US3
             title: "templates/e2e/: context, skill overlays, tmux stubs & env files"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US3-template-overlays-context.md
             depends_on: []

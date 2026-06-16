@@ -1,0 +1,11 @@
+node_modules/
+playwright-report/
+test-results/
+.env.local
+.env.sandbox
+.env.*
+!.env.example
+!.env.*.example
+runs/*.yaml
+runs/AUDIT-*.md
+runs/INDEX.md

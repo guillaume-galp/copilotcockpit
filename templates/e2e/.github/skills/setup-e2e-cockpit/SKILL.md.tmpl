@@ -1,0 +1,49 @@
+---
+name: setup-e2e-cockpit
+description: "Explore the @@APP_NAME@@ app and generate tmux-cockpit.sh and tmux-cockpit-local.sh from their placeholders. USE FOR: setting up the E2E cockpit for @@APP_NAME@@, configuring cockpit scripts, discovering app topology (ports, health endpoint, k8s namespace, backend start commands)."
+---
+
+# Setup E2E Cockpit — @@APP_NAME@@ Project Overlay
+
+> Load the **global** `setup-e2e-cockpit` skill first for the full setup workflow.
+> This file records `@@APP_NAME@@`-specific discoveries as you make them.
+
+---
+
+## What to generate
+
+This project's cockpit scripts ship as **runnable placeholders** with annotated
+`# ── CONFIGURE ──` blocks. Your job is to explore `@@APP_NAME@@` and fill them in:
+
+| File | Role |
+|------|------|
+| `tmux-cockpit.sh` | remote/k8s cockpit — log windows, port-forward, worker priming |
+| `tmux-cockpit-local.sh` | local dev cockpit — backend window + workers |
+
+Replace the `# ── CONFIGURE ──` defaults with the real values, then regenerate the
+project-specific sections of the `e2e-cockpit` / `e2e-operator` overlays.
+
+---
+
+## ── CONFIGURE ── This project's topology
+
+Fill in as you discover (from `package.json`, build configs, route files, OpenAPI
+specs, k8s manifests, or by asking the user):
+
+| Variable | Value |
+|----------|-------|
+| `APP_NAME` | `@@APP_NAME@@` |
+| `BACKEND_PORT` | `@@BACKEND_PORT@@` |
+| `FRONTEND_PORT` | `@@FRONTEND_PORT@@` |
+| Health endpoint | `http://localhost:@@BACKEND_PORT@@@@HEALTH_PATH@@` |
+| Backend start command | _(discover)_ |
+| `K8S_CONTEXT` | _(discover, if applicable)_ |
+| `NAMESPACE` | _(discover, if applicable)_ |
+| `BACKEND_SVC` | _(discover, if applicable)_ |
+| `BACKEND_LABEL` | _(discover, if applicable)_ |
+| Auth | _(discover)_ |
+
+## Worker skills location
+
+- Global: `~/.copilot/skills/{worker-dev,worker-fix,worker-test}/`
+- Repo overlays: `e2e/.github/skills/{worker-dev,worker-fix,worker-test}/`
