@@ -16,35 +16,35 @@ architecture:
   adrs:
     - id: ADR-001
       title: "Skills source-of-truth strategy"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-001-skills-source-of-truth.md
     - id: ADR-002
       title: "e2e/ as a git sub-repo vs. a plain directory"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-002-e2e-sub-repo-strategy.md
     - id: ADR-003
       title: "Bootstrap entry-point design"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-003-bootstrap-entry-point.md
     - id: ADR-004
       title: "Template parameterisation mechanism"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-004-template-parameterization.md
     - id: ADR-005
       title: "cockpit-wake distribution"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-005-cockpit-wake-distribution.md
     - id: ADR-006
       title: "Template update strategy"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-006-template-update-strategy.md
     - id: ADR-007
       title: "GitHub release tarball distribution (cold install)"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-007-github-release-distribution.md
     - id: ADR-008
       title: "copilotcockpit-dev skill & GitOps release flow"
-      status: proposed
+      status: accepted
       path: docs/ADRs/ADR-008-copilotcockpit-dev-skill.md
 
 themes:
@@ -53,7 +53,7 @@ themes:
     vision: VP1-e2e-bootstrap
     title: "Bootstrap tooling: global skills install + per-project e2e scaffold"
     status: done
-    locked: false
+    locked: true
     readme: docs/themes/TH1-bootstrap-tooling/README.md
     # Decomposed in Phase 3 (Planning). 6 epics, 21 stories.
     # E6 spikes scheduled first; E1 (common.sh + dispatcher) gates E2/E3.

@@ -229,3 +229,9 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - Archived .github/ISSUE_TEMPLATE/TH1-*.md → .github/ISSUE_TEMPLATE/archive/.
 - Theme TH1 status -> done (locked: false — awaiting user checkpoint decision; NOT auto-locked).
 - PAUSED for user checkpoint: accept / reject / amend.
+
+## TH1 — USER CHECKPOINT: ACCEPTED (2026-06-16)
+TH1 accepted by user. Locked. v0.1.0 ready to tag.
+- Set `locked: true` on theme TH1 (freezes VP1, theme dir, story files, ADRs).
+- Promoted all 8 ADRs (ADR-001..008) from `proposed` -> `accepted`.
+- Next manual step (per copilotcockpit-dev runbook): tag `v0.1.0` on `main` to trigger release.yml.
