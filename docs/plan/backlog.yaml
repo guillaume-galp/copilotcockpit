@@ -134,7 +134,7 @@ themes:
       - id: E3
         title: "E2E scaffold — templates/e2e/, MANIFEST.toml, scaffold + --update"
         slug: e2e-scaffold
-        status: not_started
+        status: done
         stories:
           - id: TH1-E3-US1
             title: "templates/e2e/: Playwright infrastructure + governed runners"

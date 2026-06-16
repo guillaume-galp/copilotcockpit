@@ -74,3 +74,33 @@ release fetch+tamper-abort) PASS against scratch HOMEs; real `~/.copilot`/`~/.lo
 Quality review APPROVED. Deferred tech-debt: (a) reject `--link` + `--from-release`
 combination; (b) hoist canonical 8-role list into common.sh (duplicated in cmd-global/cmd-doctor).
 Live network round-trip for `--from-release` to be E2E-validated once E4-US2 publishes a release.
+
+---
+
+## Epic E3 — E2E scaffold (templates/e2e/, MANIFEST.toml, scaffold + --update)
+
+**Stories Completed:** TH1-E3-US1..US6 (all reviewer-APPROVED; US1 required one rework iteration). Large epic → epic-integration PASS (after one blocker fix) + cross-cutting quality review APPROVED.
+
+**Key Changes:**
+- `templates/e2e/` — complete, topology-agnostic harness template: governed `run-audit.sh`
+  (3-tier audit trail: INDEX.md + RUN-*.yaml + monthly digest; portable; correct JUnit
+  failure classification), Docker `run-playwright.sh`, `playwright.config.ts` +
+  `global-setup/teardown.ts` with CONFIGURE blocks, governance (GOVERNANCE.md,
+  run-schema.yaml, flaky-known.md), test-book (SUMMARY, TC-FORMAT, CH01-smoke), tests
+  (helpers.ts, smoke.spec.ts tag-linked to CH01), runs/ skeleton, 7 thin skill overlays,
+  copilot-instructions, tmux cockpit stubs, env files, `.gitignore`, and `MANIFEST.toml`
+  (framework/seed/project ownership; E6-US2-validated matcher; safe project default).
+- `lib/cmd-e2e.sh` — `bootstrap.sh e2e <dir>`: scaffold (copy + tokenise all 4 sanctioned
+  tokens, `.tmpl` stripping, ADR-004 first-hit-wins resolution, atomic staging+move,
+  git init+commit, tolerant npm install, handoff) and `--update` (MANIFEST-driven
+  content-preserving refresh: framework overwrite+backup only on diff, seed create-if-missing,
+  project never-touch, dry-run, idempotent). sed-injection-hardened token substitution.
+
+**Files Modified:** `templates/e2e/**` (29 files), `lib/cmd-e2e.sh`.
+
+**Ceremony (large epic):** Integration journey (scaffold→config-precedence→self-consistency→
+audit-trail→update round-trip→idempotency) PASS against scratch dirs after fixing one blocker
+(commit 4a09371: run-audit.sh INDEX-append aborted under pipefail on an empty index). Quality
+review APPROVED. Deferred tech-debt: MANIFEST.toml ships into scaffold but is unread there
+(drift risk) — classify framework or exclude; flaky-known.md relies on implicit project default.
+Real Docker/Playwright run validated structurally; full E2E deferred to E5 integration.
