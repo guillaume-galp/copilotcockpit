@@ -120,7 +120,7 @@ themes:
             depends_on: []
           - id: TH1-E2-US3
             title: "lib/cmd-global.sh: install/update 8 skills + cockpit-wake"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US3-cmd-global.md
             depends_on: [TH1-E1-US2, TH1-E2-US1, TH1-E2-US2]

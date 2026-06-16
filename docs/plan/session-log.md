@@ -144,3 +144,7 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **EPIC E1 DONE** — dispatcher + common.sh + doctor. Small-epic ceremony: bash -n all 3 files OK; doctor/usage smoke exit 0; changelog written. Unblocks E2-US3, E3-US5.
 - **TH1-E2-US1** START — vendor 7 harness skills into skills/.
 - **TH1-E2-US2** START — vendor cockpit-wake into bin/.
+- **TH1-E2-US1** DONE — 7 skills vendored (commit ba7cce7). Verbatim verified.
+- **TH1-E2-US2** DONE — cockpit-wake vendored (commit 97d26d5). Verbatim verified.
+- **TH1-E2-US3** START — lib/cmd-global.sh install/update 8 skills + cockpit-wake.
+- **TH1-E2-US3** DONE — lib/cmd-global.sh installs/updates 8 skills + cockpit-wake; all 9 ACs verified against scratch HOME (copy/link/dry-run/drift/idempotent/PATH/AC9-fatal).
