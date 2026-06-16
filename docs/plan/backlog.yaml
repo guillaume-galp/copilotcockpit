@@ -72,7 +72,7 @@ themes:
             depends_on: []
           - id: TH1-E6-US2
             title: "SPIKE: MANIFEST.toml glob classification correctness"
-            status: pending
+            status: done
             size: XS
             path: docs/themes/TH1-bootstrap-tooling/E6-spikes/US2-spike-manifest-classification.md
             depends_on: []

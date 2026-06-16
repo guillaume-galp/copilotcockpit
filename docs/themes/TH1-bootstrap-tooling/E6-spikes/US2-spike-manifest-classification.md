@@ -4,7 +4,7 @@
 |-------|-------|
 | Epic | E6 — Spikes |
 | Theme | TH1 — Bootstrap Tooling |
-| Status | pending |
+| Status | done |
 | Size | XS |
 
 ## As a…
@@ -14,19 +14,19 @@ globs, **so that** `e2e --update` provably refreshes the right files and never c
 project-owned content (NFR-5, ADR-006).
 
 ## Acceptance Criteria
-- [ ] AC1: A findings note is produced at
+- [x] AC1: A findings note is produced at
   `docs/themes/TH1-bootstrap-tooling/E6-spikes/findings/manifest-classification.md`.
-- [ ] AC2: A throwaway fixture `e2e/` tree (including `tests/a.spec.ts`,
+- [x] AC2: A throwaway fixture `e2e/` tree (including `tests/a.spec.ts`,
   `test-book/CH01-smoke.md`, `test-book/CH02-foo.md`, `runs/RUN-x.yaml`,
   `run-audit.sh`, `package.json`, `.env.local`, `.github/skills/worker-dev/SKILL.md`)
   is classified by the candidate technique and the result table is recorded.
-- [ ] AC3: The note confirms the chosen matcher correctly resolves the ADR-006 globs:
+- [x] AC3: The note confirms the chosen matcher correctly resolves the ADR-006 globs:
   `tests/**`, `test-book/CH0[2-9]*.md`, `test-book/CH1*.md`, `runs/**`,
   `.github/skills/**`, `.env.*` → `project`; CH01 + smoke spec + helpers → `seed`;
   `run-audit.sh` etc. → `framework`.
-- [ ] AC4: The note states the fallback rule for an **unclassified** path
+- [x] AC4: The note states the fallback rule for an **unclassified** path
   (default to `project` / never-touch — the safe failure mode, ADR-006 Risks).
-- [ ] AC5: The note names the exact bash mechanism chosen (e.g. `case`/`[[ == glob ]]`
+- [x] AC5: The note names the exact bash mechanism chosen (e.g. `case`/`[[ == glob ]]`
   with `shopt -s globstar extglob`, or a `find`-based matcher) and notes any
   portability caveat surfaced by E6-US1.
 

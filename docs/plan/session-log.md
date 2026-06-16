@@ -130,3 +130,6 @@ first theme (no prior-theme issue templates to archive). TH1 remains `locked: fa
 Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 → E4/E5.
 
 - **TH1-E6-US1** START — SPIKE macOS/BSD portability cheat-sheet.
+- **TH1-E6-US1** DONE — portability-cheatsheet.md produced (commit 1ec7015). XS/spike: self-review only.
+- **TH1-E6-US2** START — SPIKE MANIFEST.toml glob classification matcher.
+- **TH1-E6-US2** DONE — manifest-classification.md produced; matcher run against throwaway fixture (outside repo), 11/11 paths classified per ADR-006. Mechanism: bash `[[ == glob ]]` array classifier, seed→framework→project→default-project precedence, macOS bash-3.2-safe (no globstar dependency). XS/spike: self-review only.
