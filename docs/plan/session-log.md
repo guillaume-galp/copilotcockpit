@@ -169,3 +169,6 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E3-US6** DONE — --update content-preserving refresh (commit 493f3be). Reviewer: APPROVED (never-touch + idempotency + scaffold-regression validated).
 - **EPIC E3** all 6 stories done — running large-epic ceremony (integration + quality check).
 - **EPIC E3 DONE** — integration PASS (1 blocker fixed: run-audit INDEX append, commit 4a09371; re-verified PASS) + quality review APPROVED. Changelog written. Unblocks E3-US5/US6-dependents (E4-US2, E5 tests).
+
+## 2026-06-16 — Epics E4 (CI/CD) + E5 (test infra) — interleaved by dependency
+- **TH1-E4-US1** START — VERSION + CHANGELOG.md (semver source of truth).

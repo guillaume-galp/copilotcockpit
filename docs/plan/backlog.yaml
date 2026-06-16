@@ -180,7 +180,7 @@ themes:
         stories:
           - id: TH1-E4-US1
             title: "VERSION + CHANGELOG.md (semver source of truth)"
-            status: pending
+            status: done
             size: XS
             path: docs/themes/TH1-bootstrap-tooling/E4-cicd-releases/US1-version-changelog.md
             depends_on: []
