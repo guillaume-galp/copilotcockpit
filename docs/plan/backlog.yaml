@@ -96,7 +96,7 @@ themes:
             depends_on: [TH1-E1-US1]
           - id: TH1-E1-US3
             title: "lib/cmd-doctor.sh prerequisites + drift detection"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E1-core-bootstrap-shell/US3-doctor-command.md
             depends_on: [TH1-E1-US2]

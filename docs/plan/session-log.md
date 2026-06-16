@@ -138,3 +138,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E1-US1** START — lib/common.sh shared helpers.
 - **TH1-E1-US1** DONE — lib/common.sh (commit b2e0d58). Reviewer: APPROVED.
 - **TH1-E1-US2** START — bootstrap.sh dispatcher.
+- **TH1-E1-US2** DONE — bootstrap.sh dispatcher (commit 44f4507). Reviewer: APPROVED.
+- **TH1-E1-US3** START — lib/cmd-doctor.sh prerequisites + drift detection.
