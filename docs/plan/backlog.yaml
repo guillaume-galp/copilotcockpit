@@ -156,7 +156,7 @@ themes:
             depends_on: []
           - id: TH1-E3-US4
             title: "templates/e2e/MANIFEST.toml ownership classification"
-            status: pending
+            status: done
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E3-e2e-scaffold/US4-manifest-ownership.md
             depends_on: [TH1-E6-US2, TH1-E3-US1, TH1-E3-US2, TH1-E3-US3]

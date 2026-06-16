@@ -160,3 +160,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E3-US2** START — templates/e2e governance, test-book, tests & runs skeleton.
 - **TH1-E3-US2** DONE — governance/test-book/tests skeleton (commit a4792e1). Reviewer: APPROVED.
 - **TH1-E3-US3** START — templates/e2e context, skill overlays, tmux stubs & env files.
+- **TH1-E3-US3** DONE — overlays/context/tmux/env (commit deddd6e). Reviewer: APPROVED.
+- **TH1-E3-US4** START — templates/e2e/MANIFEST.toml ownership classification.

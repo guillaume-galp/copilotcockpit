@@ -1,0 +1,34 @@
+# templates/e2e/MANIFEST.toml — drives `e2e --update` refresh decisions (ADR-006)
+#
+# Ownership classification for every scaffolded e2e/ path (post-tokenisation,
+# i.e. WITHOUT the `.tmpl` suffix). Used by `bootstrap.sh e2e <dir> --update`:
+#   [framework] → overwrite with current template version (backup old copy first)
+#   [seed]      → create only if missing; never overwrite
+#   [project]   → never touch
+#
+# Matcher precedence (E6-US2): seed-literal → framework-literal → project-glob →
+# default `project` (safe failure mode: an unlisted path is never touched).
+
+[framework]            # always refreshed on --update (copilotcockpit owns these)
+paths = [
+  "run-audit.sh", "run-playwright.sh",
+  "playwright.config.ts", "global-setup.ts", "global-teardown.ts",
+  "governance/GOVERNANCE.md", "governance/run-schema.yaml",
+  "test-book/TC-FORMAT.md",
+  ".github/copilot-instructions.md",
+]
+
+[project]              # never overwritten on --update (the project owns these)
+paths = [
+  "tests/**", "test-book/CH0[2-9]*.md", "test-book/CH1*.md",
+  "test-book/SUMMARY.md", "runs/**",
+  "tmux-cockpit.sh", "tmux-cockpit-local.sh",   # AI-generated per project
+  ".github/skills/**",                          # AI-generated overlays
+  ".env.local", ".env.*",
+]
+
+[seed]                 # written on first scaffold, NOT refreshed (safe to edit)
+paths = [
+  "package.json", ".env.example", ".gitignore",
+  "test-book/CH01-smoke.md", "tests/smoke.spec.ts", "tests/helpers.ts",
+]
