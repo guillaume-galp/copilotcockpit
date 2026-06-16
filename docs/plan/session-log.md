@@ -133,3 +133,5 @@ Starting TH1 execution. Dependency-resolved order: E6 spikes → E1 → E2/E3 �
 - **TH1-E6-US1** DONE — portability-cheatsheet.md produced (commit 1ec7015). XS/spike: self-review only.
 - **TH1-E6-US2** START — SPIKE MANIFEST.toml glob classification matcher.
 - **TH1-E6-US2** DONE — manifest-classification.md produced; matcher run against throwaway fixture (outside repo), 11/11 paths classified per ADR-006. Mechanism: bash `[[ == glob ]]` array classifier, seed→framework→project→default-project precedence, macOS bash-3.2-safe (no globstar dependency). XS/spike: self-review only.
+- **TH1-E6-US2** DONE — manifest-classification.md produced (commit 9a15b7f). Fixture kept out of VCS.
+- **EPIC E6 DONE** — both spikes complete. Small-epic ceremony: test suite deferred (none built yet); changelog entry written. E6 unblocks E1-US1, E3-US1, E3-US4, E3-US6.

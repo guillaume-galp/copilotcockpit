@@ -62,7 +62,7 @@ themes:
       - id: E6
         title: "Spikes — portability + manifest classification"
         slug: spikes
-        status: not_started
+        status: done
         stories:
           - id: TH1-E6-US1
             title: "SPIKE: macOS/BSD portability of bootstrap bash scripts"
