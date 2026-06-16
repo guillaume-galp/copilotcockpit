@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""
+cockpit-wake — schedule messages to active tmux cockpit panes.
+
+One-off awakenings use `at`; recurring awakenings use `cron`.
+Works whether attached or detached from the tmux session.
+State is persisted to ~/.config/cockpit-wake/awakenings.json.
+
+Commands:
+  schedule --once "HH:MM [YYYY-MM-DD]"  -s SESSION -w WINDOW -m MESSAGE [--label TEXT]
+  schedule --cron "MIN HR DOM MON DOW"   -s SESSION -w WINDOW -m MESSAGE [--label TEXT]
+  list            — table of all awakenings + status
+  cancel ID       — cancel a pending awakening
+  fire   ID       — fire immediately (ad-hoc, regardless of schedule)
+  status          — summary counts
+  clean           — remove fired/cancelled entries from state
+
+Examples:
+  cockpit-wake schedule --once "07:15" -s ulysses -w overseer \\
+      -m "Good morning! sbx01 is back up. Re-trigger @cli round 3." --label morning-cli
+  cockpit-wake schedule --once "07:15 2026-06-17" -s ulysses -w overseer \\
+      -m "Sprint review reminder" --label sprint-review
+  cockpit-wake schedule --cron "15 7 * * 1-5" -s ulysses -w overseer \\
+      -m "Daily standup: check worker status" --label daily-standup
+  cockpit-wake list
+  cockpit-wake cancel wake-1718492400
+  cockpit-wake fire   wake-1718492400
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+WAKE_DIR   = Path.home() / ".config" / "cockpit-wake"
+STATE_FILE = WAKE_DIR / "awakenings.json"
+JOBS_DIR   = WAKE_DIR / "jobs"
+SELF       = str(Path(sys.argv[0]).resolve())
+
+for d in (WAKE_DIR, JOBS_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+# Resolve binaries at schedule-time so fire scripts work in minimal environments
+def _bin(name):
+    r = subprocess.run(["which", name], capture_output=True, text=True)
+    return r.stdout.strip() or name
+
+TMUX_BIN   = _bin("tmux")
+AT_BIN     = _bin("at")
+PYTHON_BIN = _bin("python3")
+
+# ── State ──────────────────────────────────────────────────────────────────────
+def load_state():
+    if not STATE_FILE.exists():
+        return {"awakenings": []}
+    with open(STATE_FILE) as f:
+        return json.load(f)
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+def get_awakening(state, id_):
+    for a in state["awakenings"]:
+        if a["id"] == id_:
+            return a
+    return None
+
+def gen_id():
+    return f"wake-{int(time.time())}"
+
+# ── Crontab helpers ────────────────────────────────────────────────────────────
+CRON_TAG = "# cockpit-wake:"
+
+def read_crontab():
+    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    return r.stdout.splitlines() if r.returncode == 0 else []
+
+def write_crontab(lines):
+    content = "\n".join(lines) + "\n" if lines else ""
+    subprocess.run(["crontab", "-"], input=content, text=True, check=True)
+
+def add_cron_line(cron_expr, job_script, id_):
+    lines = read_crontab()
+    lines.append(f"{cron_expr} {job_script}  {CRON_TAG}{id_}")
+    write_crontab(lines)
+
+def remove_cron_line(id_):
+    lines = read_crontab()
+    new_lines = [l for l in lines if f"{CRON_TAG}{id_}" not in l]
+    write_crontab(new_lines)
+
+# ── at helpers ─────────────────────────────────────────────────────────────────
+def schedule_at(timespec, job_script):
+    """Submit job_script to `at` at timespec. Returns the at job number."""
+    r = subprocess.run(
+        [AT_BIN, timespec],
+        input=job_script,
+        capture_output=True, text=True
+    )
+    # `at` writes "job N at <datetime>" to stderr
+    for line in r.stderr.splitlines():
+        if line.startswith("job "):
+            return line.split()[1]
+    return None
+
+def remove_at_job(job_number):
+    subprocess.run(["atrm", str(job_number)], capture_output=True)
+
+# ── Time parsing ───────────────────────────────────────────────────────────────
+def parse_once_timespec(once_str):
+    """
+    Parse --once value into (at_timespec, iso_datetime).
+    Accepted formats:
+      "HH:MM"              → today or tomorrow at that time
+      "HH:MM YYYY-MM-DD"   → specific date
+    Returns (at_timespec_str, iso_str) — at_timespec is passed directly to `at`.
+    """
+    parts = once_str.strip().split()
+    time_part = parts[0]
+    hh, mm = [int(x) for x in time_part.split(":")]
+
+    if len(parts) >= 2:
+        date_part = parts[1]
+        target = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M")
+    else:
+        now = datetime.now()
+        candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        target = candidate
+
+    # `at` accepts "HH:MM MMDDYY" or "HH:MM MM/DD/YY" or natural language
+    at_timespec = target.strftime("%H:%M %m/%d/%Y")
+    iso_str     = target.strftime("%Y-%m-%dT%H:%M:00")
+    return at_timespec, iso_str
+
+# ── Fire script ────────────────────────────────────────────────────────────────
+def make_fire_script(id_, session, window, message):
+    """Write a standalone bash fire script. Used by both at and cron."""
+    script = JOBS_DIR / f"{id_}.sh"
+    escaped_msg = message.replace("'", "'\\''")   # single-quote safe
+    content = f"""#!/usr/bin/env bash
+# cockpit-wake fire script — {id_}
+# Auto-generated — do not edit manually.
+
+TMUX="{TMUX_BIN}"
+PYTHON="{PYTHON_BIN}"
+SELF="{SELF}"
+
+# Send message to tmux pane (works attached or detached)
+"$TMUX" send-keys -t "{session}:{window}" '{escaped_msg}' Enter 2>/dev/null || true
+
+# Mark awakening as fired in state
+"$PYTHON" "$SELF" _mark-fired {id_}
+"""
+    script.write_text(content)
+    script.chmod(0o755)
+    return str(script)
+
+# ── Internal sub-commands (called by fire scripts) ─────────────────────────────
+def cmd_mark_fired(args):
+    state = load_state()
+    a = get_awakening(state, args.id)
+    if a:
+        a["status"]   = "fired"
+        a["fired_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    save_state(state)
+
+# ── schedule ───────────────────────────────────────────────────────────────────
+def cmd_schedule(args):
+    state = load_state()
+    id_   = gen_id()
+    once  = args.once is not None
+
+    job_script = make_fire_script(id_, args.s, args.w, args.m)
+
+    if once:
+        at_timespec, iso_dt = parse_once_timespec(args.once)
+        at_job = schedule_at(at_timespec, f"{job_script}\n")
+        cron_expr    = None
+        schedule_desc = f"once @ {iso_dt}"
+        at_job_id    = at_job
+    else:
+        cron_expr = args.cron
+        add_cron_line(cron_expr, job_script, id_)
+        schedule_desc = f"cron: {cron_expr}"
+        iso_dt        = None
+        at_job_id     = None
+
+    entry = {
+        "id":           id_,
+        "label":        args.label or "",
+        "type":         "once" if once else "cron",
+        "cron_expr":    cron_expr,
+        "scheduled_at": iso_dt,
+        "at_job_id":    at_job_id,
+        "session":      args.s,
+        "window":       args.w,
+        "message":      args.m,
+        "status":       "pending",
+        "created_at":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "fired_at":     None,
+    }
+    state["awakenings"].append(entry)
+    save_state(state)
+
+    print(f"✅ Scheduled  id={id_}  {schedule_desc}")
+    print(f"   target : {args.s}:{args.w}")
+    print(f"   message: {args.m[:80]}{'…' if len(args.m) > 80 else ''}")
+    if at_job_id:
+        print(f"   at job : {at_job_id}")
+
+# ── list ───────────────────────────────────────────────────────────────────────
+def cmd_list(args):
+    state = load_state()
+    rows  = state["awakenings"]
+    if not rows:
+        print("No awakenings scheduled.")
+        return
+    fmt = "{:<22}  {:<5}  {:<10}  {:<19}  {:<18}  {}"
+    print(fmt.format("ID", "TYPE", "STATUS", "SCHEDULED AT", "TARGET", "LABEL / MESSAGE"))
+    print("─" * 100)
+    icons = {"pending": "⏳", "fired": "✅", "cancelled": "❌"}
+    for a in rows:
+        target  = f"{a['session']}:{a['window']}"
+        sched   = (a.get("scheduled_at") or a.get("cron_expr") or "")[:19]
+        label   = a.get("label") or a["message"][:30]
+        icon    = icons.get(a["status"], "?")
+        print(fmt.format(
+            a["id"], a["type"],
+            f"{icon} {a['status']}", sched, target, label
+        ))
+
+# ── cancel ─────────────────────────────────────────────────────────────────────
+def cmd_cancel(args):
+    state = load_state()
+    a     = get_awakening(state, args.id)
+    if not a:
+        print(f"❌ Not found: {args.id}")
+        sys.exit(1)
+    if a["status"] != "pending":
+        print(f"⚠️  Already {a['status']}: {args.id}")
+        sys.exit(1)
+
+    if a["type"] == "once" and a.get("at_job_id"):
+        remove_at_job(a["at_job_id"])
+    elif a["type"] == "cron":
+        remove_cron_line(args.id)
+
+    script = JOBS_DIR / f"{args.id}.sh"
+    if script.exists():
+        script.unlink()
+
+    a["status"] = "cancelled"
+    save_state(state)
+    print(f"❌ Cancelled: {args.id}")
+
+# ── fire ───────────────────────────────────────────────────────────────────────
+def cmd_fire(args):
+    state  = load_state()
+    a      = get_awakening(state, args.id)
+    if not a:
+        print(f"❌ Not found: {args.id}")
+        sys.exit(1)
+    script = JOBS_DIR / f"{args.id}.sh"
+    if not script.exists():
+        print(f"❌ Fire script missing: {args.id}")
+        sys.exit(1)
+    subprocess.run([str(script)], check=True)
+    print(f"🔥 Fired: {args.id}")
+
+# ── status ─────────────────────────────────────────────────────────────────────
+def cmd_status(args):
+    from collections import Counter
+    state  = load_state()
+    counts = Counter(a["status"] for a in state["awakenings"])
+    print(f"⏳ pending  : {counts.get('pending', 0)}")
+    print(f"✅ fired    : {counts.get('fired', 0)}")
+    print(f"❌ cancelled: {counts.get('cancelled', 0)}")
+    print(f"   total    : {len(state['awakenings'])}")
+
+# ── clean ──────────────────────────────────────────────────────────────────────
+def cmd_clean(args):
+    state  = load_state()
+    before = len(state["awakenings"])
+    state["awakenings"] = [a for a in state["awakenings"] if a["status"] == "pending"]
+    save_state(state)
+    print(f"🧹 Removed {before - len(state['awakenings'])} entries (fired/cancelled).")
+
+# ── main ───────────────────────────────────────────────────────────────────────
+def main():
+    p = argparse.ArgumentParser(
+        description="cockpit-wake: schedule messages to tmux cockpit panes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    sub = p.add_subparsers(dest="command")
+
+    # schedule
+    ps = sub.add_parser("schedule", help="Schedule a new awakening")
+    grp = ps.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--once", metavar="\"HH:MM [YYYY-MM-DD]\"",
+                     help="One-off: fire once at this time (uses `at`)")
+    grp.add_argument("--cron", metavar="EXPR",
+                     help="Recurring: standard 5-field cron expression")
+    ps.add_argument("-s", required=True, metavar="SESSION", help="tmux session name")
+    ps.add_argument("-w", required=True, metavar="WINDOW",  help="tmux window name")
+    ps.add_argument("-m", required=True, metavar="MESSAGE", help="Message to send to the pane")
+    ps.add_argument("--label", metavar="TEXT", help="Human-readable label")
+
+    sub.add_parser("list",   help="List all awakenings")
+    pc = sub.add_parser("cancel", help="Cancel a pending awakening")
+    pc.add_argument("id")
+    pf = sub.add_parser("fire",   help="Fire an awakening immediately")
+    pf.add_argument("id")
+    sub.add_parser("status", help="Summary counts")
+    sub.add_parser("clean",  help="Remove fired/cancelled entries")
+
+    # Internal — called by fire scripts
+    pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
+
+    args = p.parse_args()
+    dispatch = {
+        "schedule":    cmd_schedule,
+        "list":        cmd_list,
+        "cancel":      cmd_cancel,
+        "fire":        cmd_fire,
+        "status":      cmd_status,
+        "clean":       cmd_clean,
+        "_mark-fired": cmd_mark_fired,
+    }
+    if args.command not in dispatch:
+        p.print_help()
+        sys.exit(1)
+    dispatch[args.command](args)
+
+if __name__ == "__main__":
+    main()

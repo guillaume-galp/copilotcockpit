@@ -114,7 +114,7 @@ themes:
             depends_on: []
           - id: TH1-E2-US2
             title: "Vendor cockpit-wake into bin/"
-            status: in_progress
+            status: done
             size: S
             path: docs/themes/TH1-bootstrap-tooling/E2-global-skills-install/US2-vendor-cockpit-wake.md
             depends_on: []
