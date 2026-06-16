@@ -210,7 +210,7 @@ themes:
             depends_on: [TH1-E1-US3, TH1-E2-US3, TH1-E3-US6]
           - id: TH1-E5-US2
             title: "Categories 2-4: template integrity, skills lint & integration smoke"
-            status: pending
+            status: done
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US2-template-skills-integration-tests.md
             depends_on: [TH1-E2-US1, TH1-E2-US3, TH1-E3-US4, TH1-E3-US5]

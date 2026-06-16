@@ -16,6 +16,7 @@ paths = [
   "governance/GOVERNANCE.md", "governance/run-schema.yaml",
   "test-book/TC-FORMAT.md",
   ".github/copilot-instructions.md",
+  "MANIFEST.toml",                              # copilotcockpit owns the ownership file
 ]
 
 [project]              # never overwritten on --update (the project owns these)
@@ -31,4 +32,5 @@ paths = [
 paths = [
   "package.json", ".env.example", ".gitignore",
   "test-book/CH01-smoke.md", "tests/smoke.spec.ts", "tests/helpers.ts",
+  "governance/flaky-known.md",                  # project-maintained known-flaky registry
 ]
