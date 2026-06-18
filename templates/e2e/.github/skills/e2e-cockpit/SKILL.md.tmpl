@@ -8,6 +8,8 @@ description: "@@APP_NAME@@ Playwright E2E cockpit: project topology overlay — 
 > Load the **global** `e2e-cockpit` skill first for the generic overseer protocol,
 > dispatch patterns, question protocol, and triage workflow.
 > This file adds the `@@APP_NAME@@`-specific topology on top.
+> Use `cockpit-overseer loop` for compact status checks instead of re-capturing
+> full panes in a loop.
 
 > **If you are in `worker-test`** — load the `e2e-operator` skill instead.
 
@@ -50,6 +52,12 @@ windows with a `backend` window running the app locally on `:@@BACKEND_PORT@@`.
 ./run-audit.sh --scope "@smoke"   # smoke gate (always first)
 ./run-audit.sh                    # full suite
 ./run-playwright.sh --grep @smoke # ad-hoc
+```
+
+For overseer status, prefer:
+
+```bash
+cockpit-overseer loop --session "<session>" --window worker-test --window worker-dev --window worker-fix
 ```
 
 Prerequisites:

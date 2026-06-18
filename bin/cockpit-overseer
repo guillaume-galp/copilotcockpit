@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""
+cockpit-overseer — compact overseer helper for delta-only cockpit loops.
+
+Subcommands:
+  loop      Print only changed worker pane tails since the last snapshot.
+  status    Print a one-shot compact snapshot without updating state.
+  dispatch  Paste a mission brief into a worker pane from a reference file.
+  reset     Clear stored pane state for a session or all sessions.
+
+State is stored at ~/.config/cockpit-overseer/state.json.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+STATE_DIR = Path.home() / ".config" / "cockpit-overseer"
+STATE_FILE = STATE_DIR / "state.json"
+DEFAULT_WINDOWS = ["worker-test", "worker-dev", "worker-fix"]
+
+
+def load_state() -> Dict[str, dict]:
+    if not STATE_FILE.exists():
+        return {"panes": {}}
+    try:
+        with STATE_FILE.open() as fh:
+            data = json.load(fh)
+    except (json.JSONDecodeError, ValueError, OSError):
+        return {"panes": {}}
+    if "panes" not in data or not isinstance(data["panes"], dict):
+        data["panes"] = {}
+    return data
+
+
+def save_state(state: Dict[str, dict]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".json.tmp")
+    with tmp.open("w") as fh:
+        json.dump(state, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, STATE_FILE)
+
+
+def tmux(*args: str) -> str:
+    proc = subprocess.run(
+        ["tmux", *args],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "tmux command failed")
+    return proc.stdout
+
+
+def capture(session: str, window: str) -> str:
+    return tmux("capture-pane", "-t", f"{session}:{window}", "-p")
+
+
+def fingerprint(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def tail_lines(text: str, limit: int) -> List[str]:
+    lines = text.splitlines()
+    if limit <= 0:
+        return []
+    return lines[-limit:]
+
+
+def latest_match(text: str, pattern: str) -> str:
+    import re
+
+    for line in reversed(text.splitlines()):
+        match = re.search(pattern, line)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def current_session() -> str:
+    env_session = os.environ.get("TMUX_SESSION", "").strip()
+    if env_session:
+        return env_session
+    try:
+        return tmux("display-message", "-p", "#S").strip()
+    except RuntimeError:
+        return ""
+
+
+def status_label(text: str) -> str:
+    if "● Working" in text:
+        return "working"
+    if "❯" in text or "ready" in text.lower():
+        return "available"
+    if "BLOCKED" in text or "ESCALATE" in text:
+        return "stuck"
+    return "idle"
+
+
+def format_preview(lines: List[str]) -> str:
+    return "\n".join(f"  {line}" for line in lines)
+
+
+def summarize_pane(session: str, window: str, text: str, lines: int, mode: str) -> Tuple[str, dict]:
+    import re
+
+    run_id = latest_match(text, r"(RUN-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9._-]+)?)")
+    worker_state = latest_match(text, r"(WORKER-[A-Z-]+)")
+    aic_used = latest_match(text, r"(AIC used[: ]+[0-9]+)")
+    label = status_label(text)
+    tail = tail_lines(text, lines)
+    if mode == "minimal":
+        tail = []
+
+    summary_bits = []
+    if run_id:
+        summary_bits.append(run_id)
+    if worker_state:
+        summary_bits.append(worker_state)
+    summary_bits.append(label)
+    if aic_used:
+        summary_bits.append(aic_used)
+
+    summary = " | ".join(summary_bits) if summary_bits else label
+    meta = {
+        "hash": fingerprint(text),
+        "run_id": run_id,
+        "status": label,
+        "line_count": len(text.splitlines()),
+    }
+
+    lines_out = [f"[{window}] {summary}"]
+    if tail:
+        lines_out.append(format_preview(tail))
+    elif mode != "minimal":
+        lines_out.append("  (no new tail)")
+    return "\n".join(lines_out), meta
+
+
+def cmd_loop(args: argparse.Namespace) -> int:
+    args.session = args.session or current_session()
+    if not args.session:
+        raise SystemExit("loop requires --session or an active tmux session")
+    state = load_state()
+    panes = state.setdefault("panes", {})
+    emitted: List[str] = []
+    for window in args.window:
+        try:
+            text = capture(args.session, window)
+        except RuntimeError as exc:
+            emitted.append(f"[{window}] error: {exc}")
+            continue
+        summary, meta = summarize_pane(args.session, window, text, args.lines, args.mode)
+        key = f"{args.session}:{window}"
+        prev = panes.get(key, {})
+        if prev.get("hash") == meta["hash"]:
+            emitted.append(f"[{window}] steady")
+        else:
+            emitted.append(summary)
+            panes[key] = meta
+    save_state(state)
+    print("\n".join(emitted))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    args.session = args.session or current_session()
+    if not args.session:
+        raise SystemExit("status requires --session or an active tmux session")
+    emitted: List[str] = []
+    for window in args.window:
+        try:
+            text = capture(args.session, window)
+        except RuntimeError as exc:
+            emitted.append(f"[{window}] error: {exc}")
+            continue
+        summary, _ = summarize_pane(args.session, window, text, args.lines, args.mode)
+        emitted.append(summary)
+    print("\n".join(emitted))
+    return 0
+
+
+def cmd_reset(args: argparse.Namespace) -> int:
+    state = load_state()
+    panes = state.setdefault("panes", {})
+    if args.session:
+        prefix = f"{args.session}:"
+        for key in list(panes.keys()):
+            if key.startswith(prefix):
+                del panes[key]
+    else:
+        panes.clear()
+    save_state(state)
+    print("cockpit-overseer state cleared")
+    return 0
+
+
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    args.session = args.session or current_session()
+    if not args.session:
+        raise SystemExit("dispatch requires --session or an active tmux session")
+    if not args.ref and not args.message:
+        raise SystemExit("dispatch requires --ref or --message")
+
+    if args.ref:
+        brief = Path(args.ref).read_text()
+    else:
+        brief = args.message or ""
+
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
+        fh.write(brief)
+        brief_path = fh.name
+
+    try:
+        tmux("load-buffer", brief_path)
+        tmux("paste-buffer", "-t", f"{args.session}:{args.window}")
+        time.sleep(1)
+        subprocess.run(
+            ["tmux", "send-keys", "-t", f"{args.session}:{args.window}", "", "Enter"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    finally:
+        try:
+            os.unlink(brief_path)
+        except FileNotFoundError:
+            pass
+
+    if args.label:
+        print(f"dispatched {args.label} -> {args.session}:{args.window}")
+    else:
+        print(f"dispatched -> {args.session}:{args.window}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="cockpit-overseer")
+    sub = parser.add_subparsers(dest="cmd")
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-s", "--session", default=os.environ.get("TMUX_SESSION"))
+    common.add_argument(
+        "-w",
+        "--window",
+        action="append",
+        default=[],
+        help="tmux window to inspect; repeatable",
+    )
+    common.add_argument("-n", "--lines", type=int, default=5)
+    common.add_argument("--mode", choices=["normal", "minimal"], default="normal")
+
+    loop = sub.add_parser("loop", parents=[common], help="delta-only loop snapshot")
+    loop.set_defaults(func=cmd_loop)
+
+    status = sub.add_parser("status", parents=[common], help="one-shot snapshot")
+    status.set_defaults(func=cmd_status)
+
+    reset = sub.add_parser("reset", help="clear stored snapshot state")
+    reset.add_argument("-s", "--session", default="")
+    reset.set_defaults(func=cmd_reset)
+
+    dispatch = sub.add_parser("dispatch", help="send a mission brief to a worker")
+    dispatch.add_argument("-s", "--session", required=True)
+    dispatch.add_argument("-w", "--window", required=True)
+    dispatch.add_argument("-r", "--ref", help="mission brief file to send")
+    dispatch.add_argument("-m", "--message", help="inline mission brief")
+    dispatch.add_argument("--label", help="short mission label for logs")
+    dispatch.set_defaults(func=cmd_dispatch)
+
+    return parser
+
+
+def main(argv: List[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "cmd", None):
+        parser.print_help()
+        return 0
+
+    if args.cmd in {"loop", "status"} and not args.window:
+        args.window = list(DEFAULT_WINDOWS)
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

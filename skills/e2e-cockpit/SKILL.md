@@ -38,10 +38,29 @@ project-specific topology (URLs, k8s context, service names, port numbers).
 Background agents (`task` tool) are a last resort — only when all worker panes
 are busy AND the task cannot wait.
 
+### Operate in short-trigger mode
+
+Use the local helper for the loop. Do not paste the full overseer playbook on every
+cycle.
+
+```bash
+cockpit-overseer loop --session "<session>" --window worker-test --window worker-dev --window worker-fix
+cockpit-overseer status --session "<session>" --mode minimal
+cockpit-overseer reset --session "<session>"
+```
+
+Use a short trigger in the pane:
+
+```text
+run loop
+```
+
+That trigger should expand into the local helper/skill, not a repeated prose brief.
+
 ### Hand-off Checklist (complete in < 1 minute)
 
 Before sending to a worker, provide only:
-1. **What** — one-paragraph mission statement
+1. **What** — one mission ID + one sentence
 2. **Where** — repo path(s), relevant files (3–5 max, names only)
 3. **Constraints** — hard rules the worker must not violate
 4. **Report-back format** — what to send to overseer when done
@@ -60,8 +79,9 @@ and requires a second Enter. Always use the file-based pattern:
 ```bash
 # Step 1 — write mission to temp file
 cat > /tmp/worker-mission.txt << 'MISSION'
-Your mission text here.
-Multi-line is fine inside the heredoc.
+MISSION-ID: M-123
+REF: docs/missions/M-123.txt
+TASK: one-line summary only
 MISSION
 
 # Step 2 — load into tmux paste buffer and paste
@@ -92,6 +112,7 @@ tmux send-keys -t "<session>:<window>" "git status" Enter
 | `sleep 1` between paste and Enter | Gives CLI time to render pasted text |
 | `sleep 4` before capture-pane check | Agent takes 2–3s to start processing |
 | Check for `● Working` | Confirms agent started, not just received |
+| `cockpit-overseer dispatch --ref ...` | Keeps mission briefs by reference instead of repeated prose |
 
 ### When to Use Each Worker
 
@@ -103,63 +124,27 @@ tmux send-keys -t "<session>:<window>" "git status" Enter
 
 ---
 
-### Worker Session Health — Clear Before Dispatch?
+### Worker Session Health — Minimal mode by default
 
-Before handing off a **new, long-running task** to a worker, assess whether its
-Copilot session is worth clearing. A stale high-AIC session risks hitting context
-limits mid-task, causing silent degraded output or a hard cutoff.
-
-#### Step 1 — Read the AIC gauge
+Before a long task, use the helper to read only the current tail and the latest run
+ID. Do not keep re-capturing the full pane.
 
 ```bash
-tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
+cockpit-overseer loop --session "<session>" --mode normal
 ```
 
-The status bar shows `Session: NNN AIC used`.
-
-#### Step 2 — Apply the decision matrix
-
-| AIC used | Previous task | Incoming task | Decision |
-|----------|--------------|---------------|----------|
-| < 100    | Any          | Any           | ✅ dispatch as-is |
-| 100–300  | Short / done | Short fix     | ✅ dispatch as-is |
-| 100–300  | Long / done  | Long (autopilot, multi-story) | ⚠️ clear + re-prime |
-| > 300    | Any          | Any           | 🔴 always clear + re-prime |
-| Any      | **In progress** | — | 🚫 never clear — worker is busy |
-
-#### Step 3 — Safety gate before clearing
-
-Only clear when **all** of the following are true:
-1. The pane shows the idle prompt (`❯`) — **not** `● Working`
-2. The previous task is fully reported (overseer received the done message)
-3. No pending worker question files: `ls /tmp/worker-*-question.txt 2>/dev/null`
-
-If any condition fails → **do not clear**. Wait or dispatch to a different worker.
-
-#### Step 4 — Clear + re-prime pattern
+If the session is stale or over budget, switch to minimal mode:
 
 ```bash
-# 1. Clear session context
-tmux send-keys -t "<session>:<window>" "/clear" Enter
-sleep 3
-
-# 2. Verify AIC reset
-tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
-# expect: Session: 0 AIC used
-
-# 3. Re-prime with role skill (essential — /clear wipes all loaded skills)
-PRIME="Please invoke the worker-dev skill and the e2e-cockpit skill to reload your role context."
-tmux set-buffer -t <session> "$PRIME"
-tmux paste-buffer -t "<session>:<window>"
-sleep 1 && tmux send-keys -t "<session>:<window>" "" Enter
-
-# 4. Wait for prime to settle, then dispatch mission
-sleep 15 && tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
-# expect: Session: ~10–20 AIC used (skills loaded, ready)
+cockpit-overseer loop --session "<session>" --mode minimal
 ```
 
-**Never dispatch the mission brief before the re-prime completes** — the worker
-will have no role context and produce generic output.
+Minimal mode means status-only: no deep triage, no repeated tail reads, no extra
+context loading. Clear/re-prime only when the worker is truly stale and idle.
+
+If a worker session has been cleared, re-prime it once and then keep the next
+mission brief short. Do not replay the full cockpit protocol unless the worker lost
+role context.
 
 ---
 
@@ -228,11 +213,15 @@ failure found →
 ## Staying Available
 
 - After dispatching: **end your response**. Do not keep investigating.
-- Poll workers via pane capture, not by doing the work yourself:
-  ```bash
-  tmux capture-pane -t "<session>:<window>" -p | tail -20
-  ```
-- Track active missions: one sentence per worker, updated in your head or SQL.
+- Poll workers via `cockpit-overseer loop`; avoid repeated full `capture-pane` tails.
+- Track active missions with short IDs, not pasted briefs.
+
+### Budget guardrail
+
+Stay in normal mode only while overseer overhead is marginal. If the loop starts
+approaching parity with workers, switch to minimal mode immediately.
+
+Target: overseer <= 20–30% of total worker AIC. Desired operating ratio: 1:5.
 
 ## Scheduling Awakenings
 
@@ -257,6 +246,8 @@ The session name is: `tmux display-message -p '#S'`
 4. **Port-forward is fragile** — sudden all-fail → restart port-forward first
 5. **SKIP_DB_RESET=true is mandatory** — never run migrations against a shared DB
 6. **Auth failures in UI tests** = broken mock/intercept, not broken auth server
+7. **Cadence throttles when env is down** — pause loops entirely instead of polling
+8. **Model split** — keep overseer on the cheapest workable tier; reserve heavier models for worker-dev / worker-fix when needed
 
 ---
 

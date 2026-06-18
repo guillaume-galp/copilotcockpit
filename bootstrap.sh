@@ -24,7 +24,7 @@ Usage: bootstrap.sh <command> [options]
 
 Commands:
   global [--link] [--dry-run] [--from-release <ref>]
-                          Install/update skills + cockpit-wake into your home.
+                          Install/update skills + cockpit tools into your home.
   e2e <dir> [--update] [--no-git] [--yes] [--dry-run]
                           Scaffold or refresh an e2e/ sub-repo in <dir>.
   doctor                  Verify prerequisites and report install/drift state.

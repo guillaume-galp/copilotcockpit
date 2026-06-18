@@ -59,7 +59,7 @@ Five categories, dispatched by `./run-tests.sh <category>`:
 | 1 | **Script unit** | `bats` (`tests/unit/cmd-*.bats`) | each `lib/cmd-*.sh`: idempotency (run twice = same), dry-run = no side-effects, error paths exit with correct code+message | local + CI-on-PR | must pass |
 | 2 | **Template integrity** | `tests/template/check-template.sh` | `*.tmpl` have no unresolved tokens after substitution; `package.json.tmpl` is valid JSON; `MANIFEST.toml` accounts for every file in `templates/e2e/`; `run-audit.sh` & `run-playwright.sh` pass `bash -n` | CI-on-PR | must pass |
 | 3 | **Skills lint** | `tests/skills/lint-skills.sh` (+ `python3 -c "import yaml"`) | every `skills/*/SKILL.md` is valid Markdown with parseable frontmatter; `name:`/`description:` non-empty | CI-on-PR | must pass |
-| 4 | **Integration smoke** | `bats` (`tests/integration/smoke.bats`) | `global --dry-run` enumerates all 8 skills + cockpit-wake; `e2e <tmp> --dry-run` prints the scaffold file list; `doctor` exits 0 | CI-on-PR + post-release | must pass |
+| 4 | **Integration smoke** | `bats` (`tests/integration/smoke.bats`) | `global --dry-run` enumerates all 8 skills + cockpit-wake + cockpit-overseer; `e2e <tmp> --dry-run` prints the scaffold file list; `doctor` exits 0 | CI-on-PR + post-release | must pass |
 | 5 | **Release asset validation** | post-publish CI job (`release.yml`) | download the published tarball, verify SHA-256, extract, run `global --dry-run` + `doctor` from the extracted dir | CI post-release only | must pass (else fail the release) |
 
 **Local pre-commit gate = categories 1–4:**
