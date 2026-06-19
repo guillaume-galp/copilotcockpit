@@ -223,6 +223,8 @@ Stay in normal mode only while overseer overhead is marginal. If the loop starts
 approaching parity with workers, switch to minimal mode immediately.
 
 Target: overseer <= 20–30% of total worker AIC. Desired operating ratio: 1:5.
+Use `aic-tracker` when available to measure the real spend ratio instead of
+guessing from pane feel.
 
 ### Trace archive
 

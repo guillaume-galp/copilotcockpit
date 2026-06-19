@@ -67,6 +67,17 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 `~/.copilot/skills/<role>/`. Each project adds a thin overlay in
 `.github/skills/<role>/` with its own ports, paths, and start commands.
 
+## The tools
+
+| Tool | Purpose | Managed here? |
+|------|---------|---------------|
+| `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
+| `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
+| `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
+| `aic-tracker` | Measure token/AIC spend and compare comms efficiency across sessions. | no (companion tool) |
+| `run-tests.sh` | Repo test dispatcher (unit/template/skills/integration/all). | yes |
+| `bootstrap.sh` | Install/scaffold entry point. | yes |
+
 ---
 
 ## The E2E harness

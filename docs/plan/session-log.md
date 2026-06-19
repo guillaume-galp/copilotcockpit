@@ -26,6 +26,16 @@ then trim deadweight from the default overseer protocol.
 
 ---
 
+## 2026-06-19 — Docs follow-up: tools table for trace + AIC analysis
+
+Added a structured tools table to the README so `cockpit-trace` and the
+companion `aic-tracker` tool are visible alongside the cockpit harness, instead
+of being buried in prose. Also aligned the overseer skill and repo instructions
+to treat `cockpit-trace` as the comms replay tool and `aic-tracker` as the
+budget-analysis tool.
+
+---
+
 ## 2026-06-16 — Phase 2: Architecture (Architect Agent)
 
 **Input:** VP1 vision brief for `copilotcockpit` — the canonical one-command

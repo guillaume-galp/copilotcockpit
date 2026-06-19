@@ -58,5 +58,6 @@ CI/release split:
 - **Use `lib/common.sh` helpers instead of duplicating behavior** (`cc_install_file`, `cc_run`, `cc_realpath`, checksum helpers, log helpers).
 - **Logging contract**: operational logs go to stderr with `cc:` prefix; keep stdout for command payload/handoff text.
 - **Skill set is explicit and managed**: global install manages exactly the enumerated roles in `cmd-global.sh` plus `cockpit-wake`.
+- **Trace and budget analysis**: use `cockpit-trace` for comms replay/stitching and `aic-tracker` for token-spend analysis when measuring cockpit efficiency.
 - **Token model is fixed and ordered**: `@@APP_NAME@@`, `@@BACKEND_PORT@@`, `@@FRONTEND_PORT@@`, `@@HEALTH_PATH@@`, resolved via `.e2e-config.yaml -> prompt -> default`.
 - **Safe update default**: unclassified files are treated as `project` (preserve, do not overwrite).
