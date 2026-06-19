@@ -4,6 +4,28 @@ A running log of lifecycle ceremonies and significant decisions.
 
 ---
 
+## 2026-06-19 — Mission kickoff: overseer/worker AIC slimming
+
+Started a follow-on mission to reduce overseer-worker communication spend by
+making tmux comms traceable after the fact.
+
+**Initial changes:**
+- `bin/cockpit-overseer` now emits UUID `TRACE-ID` headers on dispatch, archives
+  `loop` / `status` / `dispatch` / `reset` events as append-only JSONL, and
+  records `trace_id` + `parent_trace_id` for stitching.
+- `bin/cockpit-trace` was added to read the archive and stitch dialogs by trace
+  UUID or trace family.
+- `README.md`, `.github/copilot-instructions.md`, `skills/e2e-cockpit/SKILL.md`,
+  and the worker skills now surface the trace protocol and preserve the UUID in
+  completion reports.
+- Unit and smoke coverage was extended for dispatch UUIDs, trace lookup, and the
+  new managed binary.
+
+**Goal:** use the archive to replay prompts, worker snapshots, and AIC signals,
+then trim deadweight from the default overseer protocol.
+
+---
+
 ## 2026-06-16 — Phase 2: Architecture (Architect Agent)
 
 **Input:** VP1 vision brief for `copilotcockpit` — the canonical one-command

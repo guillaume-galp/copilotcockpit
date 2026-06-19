@@ -43,6 +43,9 @@ Please invoke the worker-test skill and the e2e-cockpit skill.
 ```
 Then proceed with the test run as dispatched.
 
+If the mission includes a `TRACE-ID` header, keep it intact and echo the same
+UUID in your final report so the overseer can stitch the dialog.
+
 ```bash
 cd /home/guillaume/git/ulysses-index
 
@@ -128,6 +131,7 @@ rm -f /tmp/worker-test-question.txt /tmp/worker-test-answer.txt
 WORKER-TEST RESULT
   run: <RUN-id or AUDIT.md entry>
   scope: <@tag or "full">
+  trace_id: <uuid>
   passed: N  failed: M  skipped: K
   failures:
     - TC: <id>  class: <infra|app|spec|flaky>  dispatched-to: <worker-dev|worker-fix|overseer>

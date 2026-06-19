@@ -43,13 +43,20 @@ tmux is the glue: it keeps every pane alive, lets you attach/detach freely, and
 enables the `cockpit-wake` scheduler to fire messages into any pane — even while you
 sleep.
 
+`cockpit-overseer` also writes an append-only communication archive under
+`~/.config/cockpit-overseer/archive/` so you can replay a mission's prompts,
+worker snapshots, and AIC signals after the fact.
+
+Use `cockpit-trace show <trace-id>` or `cockpit-trace tree <trace-id>` to stitch
+the dialog back together.
+
 ---
 
 ## The squad
 
 | Role | Skill | Does |
 |------|-------|------|
-| **Overseer** | `e2e-cockpit` | Orchestrates the workers. Reads results. Never gets buried in code. |
+| **Overseer** | `e2e-cockpit` | Orchestrates the workers. Reads results. Uses `cockpit-overseer` for compact loop/status checks and append-only trace archives. |
 | **worker-test** | `e2e-operator` | Runs governed E2E suites via `run-audit.sh`. Reads the audit trail. Triages failures. |
 | **worker-dev** | `worker-dev` | Implements features, fixes, and new Playwright specs. |
 | **worker-fix** | `worker-fix` | Deep-dives bugs. Traces API calls. Root-causes flakiness. |
@@ -104,7 +111,7 @@ This installs into `~/.copilot/skills/`:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·
 `worker-dev` · `worker-fix` · `worker-test` · `copilotcockpit-dev`
 
-…and `cockpit-wake` into `~/.local/bin/`.
+…and `cockpit-wake` + `cockpit-overseer` + `cockpit-trace` into `~/.local/bin/`.
 
 Or from a clone (no network call):
 
@@ -148,7 +155,7 @@ Re-run `bootstrap.sh global` at any time — it is fully idempotent. Already-cur
 skills are skipped; changed files are backed up before overwrite.
 
 ```bash
-# Update skills + cockpit-wake from latest release
+# Update skills + cockpit tools from latest release
 ./bootstrap.sh global --from-release latest
 
 # Refresh framework files in an existing e2e/ (project content is never touched)

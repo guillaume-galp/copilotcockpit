@@ -14,11 +14,13 @@ setup() {
 }
 
 # --- idempotency (BDD: "cmd-global idempotency is asserted") ------------------
-@test "global: first run installs the managed skills + cockpit-wake" {
+@test "global: first run installs the managed skills + cockpit tools" {
 	run "$CC_BOOTSTRAP" global
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
+	[ -f "$HOME/.local/bin/cockpit-overseer" ]
+	[ -f "$HOME/.local/bin/cockpit-trace" ]
 }
 
 @test "global: second run reports already-current and writes no backup" {
@@ -27,7 +29,7 @@ setup() {
 
 	run "$CC_BOOTSTRAP" global
 	[ "$status" -eq 0 ]
-	# Every managed artefact (7 harness skills + cockpit-wake) is already current.
+	# Every managed artefact (7 harness skills + cockpit tools) is already current.
 	echo "$output" | grep -q "already current"
 	# Idempotent: no backups were created on the second pass.
 	[ "$(cc_count_backups "$HOME")" -eq 0 ]
