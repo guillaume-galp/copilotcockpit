@@ -64,6 +64,7 @@ EOF
 
 @test "cockpit-overseer loop prints a compact delta and then steadies" {
 	local pane_file="$BATS_TEST_TMPDIR/tmux-stub/ulysses__worker-test.txt"
+	local archive_dir="$HOME/.config/cockpit-overseer/archive"
 	mkdir -p "$(dirname "$pane_file")"
 	cat > "$pane_file" <<'EOF'
 ● Working
@@ -76,6 +77,8 @@ EOF
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "RUN-20260618-222040"
 	echo "$output" | grep -q "working"
+	grep -q '"action": "loop"' "$archive_dir/index.jsonl"
+	grep -q 'RUN-20260618-222040' "$archive_dir/sessions/ulysses.jsonl"
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-overseer" loop --session ulysses --window worker-test
 	[ "$status" -eq 0 ]
@@ -84,6 +87,7 @@ EOF
 
 @test "cockpit-overseer dispatch sends the referenced brief" {
 	local brief="$BATS_TEST_TMPDIR/mission.txt"
+	local archive_dir="$HOME/.config/cockpit-overseer/archive"
 	cat > "$brief" <<'EOF'
 MISSION-ID: M-123
 TASK: trim loop traffic
@@ -92,5 +96,10 @@ EOF
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-overseer" dispatch --session ulysses --window worker-dev --ref "$brief" --label M-123
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "dispatched M-123"
-	cmp -s "$brief" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	echo "$output" | grep -q "trace="
+	head -1 "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" | grep -Eq '^TRACE-ID: [0-9a-f-]{36}$'
+	grep -q "TASK: trim loop traffic" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -q '"action": "dispatch"' "$archive_dir/index.jsonl"
+	grep -q '"trace_id":' "$archive_dir/index.jsonl"
+	grep -q 'trim loop traffic' "$archive_dir/sessions/ulysses.jsonl"
 }

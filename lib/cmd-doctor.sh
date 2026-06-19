@@ -7,6 +7,7 @@
 #   * Skills        — install state / drift for each of the 8 skills (AC4).
 #   * cockpit-wake  — install state / drift for the bin/cockpit-wake artefact (AC4).
 #   * cockpit-overseer — install state / drift for the bin/cockpit-overseer artefact (AC4).
+#   * cockpit-trace    — install state / drift for the bin/cockpit-trace artefact (AC4).
 #
 # Exit code (AC5): 0 when every HARD prerequisite (bash, git, node, python3) is
 # present; non-zero ONLY when a hard prerequisite is missing. Missing optional
@@ -178,6 +179,11 @@ main() {
 	_section "cockpit-overseer"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-overseer" "$home_bin/cockpit-overseer")"
 	_row "cockpit-overseer" "$state"
+
+	# --- cockpit-trace (AC4) -------------------------------------------------
+	_section "cockpit-trace"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-trace" "$home_bin/cockpit-trace")"
+	_row "cockpit-trace" "$state"
 
 	# --- Verdict (AC5) -------------------------------------------------------
 	_section "Result"

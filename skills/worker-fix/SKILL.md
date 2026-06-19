@@ -42,6 +42,9 @@ Please invoke the worker-fix skill and the e2e-cockpit skill.
 ```
 Then proceed with the investigation as dispatched.
 
+If the mission includes a `TRACE-ID` header, keep it intact and echo the same
+UUID in your completion report.
+
 ```bash
 # 1. Check k8s logs for the relevant service
 kubectl logs -f -n ulysses-index -l app=frontend --tail=100
@@ -96,6 +99,7 @@ rm -f /tmp/worker-fix-question.txt /tmp/worker-fix-answer.txt
 ```
 WORKER-FIX DONE
   root cause: <one-line diagnosis>
+  trace_id: <uuid>
   fix applied: <file(s) changed, what changed>
   verified: <TC or curl command used to verify>
   commit: <hash or "pending overseer approval">

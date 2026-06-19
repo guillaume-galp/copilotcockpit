@@ -7,7 +7,7 @@
 #
 # Proves (AC3):
 #   * `global --dry-run` enumerates all 8 managed skills + cockpit-wake +
-#     cockpit-overseer;
+#     cockpit-overseer + cockpit-trace;
 #   * `e2e <tmp> --dry-run` prints the expected scaffold file list;
 #   * `doctor` exits 0 and reports each prerequisite found/missing.
 
@@ -20,7 +20,8 @@ setup() {
 # --- global --dry-run lists the 8 managed skills + cockpit tools --------------
 # Reality since TH1-E5-US3: copilotcockpit-dev's source is now vendored, so the
 # dry-run enumerates ALL 8 names as "would copy ..." lines (no pending warning),
-# plus cockpit-wake and cockpit-overseer. We assert exactly that REAL output.
+# plus cockpit-wake, cockpit-overseer, and cockpit-trace. We assert exactly that
+# REAL output.
 @test "global --dry-run lists all 8 managed skills + cockpit tools" {
 	run "$CC_BOOTSTRAP" global --dry-run
 	[ "$status" -eq 0 ]
@@ -41,11 +42,13 @@ setup() {
 	# cockpit-wake and cockpit-overseer are part of the same managed install pass.
 	echo "$output" | grep -q "cockpit-wake"
 	echo "$output" | grep -q "cockpit-overseer"
+	echo "$output" | grep -q "cockpit-trace"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
 	[ ! -e "$HOME/.local/bin/cockpit-overseer" ]
+	[ ! -e "$HOME/.local/bin/cockpit-trace" ]
 }
 
 # --- e2e <tmp> --dry-run prints the expected scaffold file list --------------

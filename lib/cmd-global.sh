@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/cmd-global.sh — `bootstrap.sh global`: install/update the 8 skills + cockpit-wake + cockpit-overseer.
+# lib/cmd-global.sh — `bootstrap.sh global`: install/update the 8 skills + cockpit-wake + cockpit-overseer + cockpit-trace.
 #
 # Installs (and idempotently updates) the repo's managed artefacts into the
 # user's home so one command makes a machine able to operate a cockpit
@@ -8,6 +8,7 @@
 #   * skills/<role>/SKILL.md -> ~/.copilot/skills/<role>/SKILL.md   (8 roles)
 #   * bin/cockpit-wake       -> ~/.local/bin/cockpit-wake (+x)
 #   * bin/cockpit-overseer   -> ~/.local/bin/cockpit-overseer (+x)
+#   * bin/cockpit-trace      -> ~/.local/bin/cockpit-trace (+x)
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -52,6 +53,7 @@ Install/update the managed skills and cockpit tools into your home:
   ~/.copilot/skills/<role>/SKILL.md   (8 managed roles)
   ~/.local/bin/cockpit-wake           (+x)
   ~/.local/bin/cockpit-overseer       (+x)
+  ~/.local/bin/cockpit-trace          (+x)
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -297,10 +299,12 @@ main() {
 	local skills_root="$CC_ROOT/skills"
 	local cw_src="$CC_ROOT/bin/cockpit-wake"
 	local co_src="$CC_ROOT/bin/cockpit-overseer"
+	local ct_src="$CC_ROOT/bin/cockpit-trace"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
 	local co_dst="$home_bin/cockpit-overseer"
+	local ct_dst="$home_bin/cockpit-trace"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -319,6 +323,10 @@ main() {
 	fi
 	if [[ ! -f "$co_src" ]]; then
 		log_error "required source missing: $co_src"
+		missing=1
+	fi
+	if [[ ! -f "$ct_src" ]]; then
+		log_error "required source missing: $ct_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -344,7 +352,7 @@ main() {
 		cc_place "$src" "$dst" || return 1
 	done
 
-	# --- Install cockpit-wake / cockpit-overseer in the same idempotent pass --
+	# --- Install cockpit-wake / cockpit-overseer / cockpit-trace -------------
 	cc_place "$cw_src" "$cw_dst" || return 1
 	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
 		# Copy mode: ensure the installed copy is executable (cc_run honours dry-run).
@@ -353,6 +361,10 @@ main() {
 	cc_place "$co_src" "$co_dst" || return 1
 	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
 		cc_run chmod +x "$co_dst" || return 1
+	fi
+	cc_place "$ct_src" "$ct_dst" || return 1
+	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
+		cc_run chmod +x "$ct_dst" || return 1
 	fi
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------

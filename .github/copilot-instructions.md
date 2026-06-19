@@ -40,7 +40,7 @@ Useful command-level smoke checks while editing scripts:
 
 The product has two bootstrap phases:
 
-1. `bootstrap.sh global` syncs the canonical global skills from `skills/*/SKILL.md` into `~/.copilot/skills/*` and installs `bin/cockpit-wake` plus `bin/cockpit-overseer` to `~/.local/bin`.
+1. `bootstrap.sh global` syncs the canonical global skills from `skills/*/SKILL.md` into `~/.copilot/skills/*` and installs `bin/cockpit-wake`, `bin/cockpit-overseer`, and `bin/cockpit-trace` to `~/.local/bin`.
 2. `bootstrap.sh e2e <dir>` scaffolds `templates/e2e/` into `<dir>/e2e`, resolves Tier-1 tokens, initializes `e2e/` as its own git repo, and prints AI handoff (`/setup-e2e-cockpit`, `/setup-e2e-runbook`).
 
 `--update` behavior for existing `e2e/` is driven by `templates/e2e/MANIFEST.toml` ownership classes (`framework`, `seed`, `project`) to preserve project-owned content while refreshing framework-owned files.

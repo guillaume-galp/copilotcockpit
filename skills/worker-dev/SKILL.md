@@ -44,6 +44,9 @@ Please invoke the worker-dev skill and the e2e-cockpit skill.
 ```
 Then proceed with the mission as dispatched.
 
+If the mission includes a `TRACE-ID` header, keep it intact and echo the same
+UUID in your completion report.
+
 If you are blocked and need user input before proceeding:
 
 ```bash
@@ -81,6 +84,7 @@ When your mission is complete, output this block so the overseer can read it:
 ```
 WORKER-DEV DONE
   story/task: <what you implemented>
+  trace_id: <uuid>
   files changed: <list>
   tests: <pass/fail count or "no tests">
   commit: <hash or "uncommitted">

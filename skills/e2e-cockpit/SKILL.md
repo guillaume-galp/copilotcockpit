@@ -64,6 +64,7 @@ Before sending to a worker, provide only:
 2. **Where** — repo path(s), relevant files (3–5 max, names only)
 3. **Constraints** — hard rules the worker must not violate
 4. **Report-back format** — what to send to overseer when done
+5. **Trace** — include a `TRACE-ID` header; reuse the current one only when you are explicitly continuing the same dialog.
 
 Do **NOT**:
 - Read source files deeply before dispatching — the worker does the research
@@ -112,7 +113,7 @@ tmux send-keys -t "<session>:<window>" "git status" Enter
 | `sleep 1` between paste and Enter | Gives CLI time to render pasted text |
 | `sleep 4` before capture-pane check | Agent takes 2–3s to start processing |
 | Check for `● Working` | Confirms agent started, not just received |
-| `cockpit-overseer dispatch --ref ...` | Keeps mission briefs by reference instead of repeated prose |
+| `cockpit-overseer dispatch --ref ...` | Keeps mission briefs by reference instead of repeated prose; injects a UUID `TRACE-ID` header |
 
 ### When to Use Each Worker
 
@@ -222,6 +223,18 @@ Stay in normal mode only while overseer overhead is marginal. If the loop starts
 approaching parity with workers, switch to minimal mode immediately.
 
 Target: overseer <= 20–30% of total worker AIC. Desired operating ratio: 1:5.
+
+### Trace archive
+
+`cockpit-overseer` appends a per-session and global JSONL trace under
+`~/.config/cockpit-overseer/archive/`. Each record captures the tmux session,
+window, action, UUID trace, parent trace, summary, pane hash, estimated tokens,
+and the raw brief or pane snapshot so you can reconstruct a mission after the
+fact.
+
+Use `cockpit-trace show <trace-id>` for one dialog or `cockpit-trace tree
+<trace-id>` for a stitched family. If the same mission can be explained from the
+trace, do not burn extra tokens to rediscover it.
 
 ## Scheduling Awakenings
 

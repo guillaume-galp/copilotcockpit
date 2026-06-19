@@ -20,6 +20,7 @@ setup() {
 	[ -f "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
 	[ -f "$HOME/.local/bin/cockpit-overseer" ]
+	[ -f "$HOME/.local/bin/cockpit-trace" ]
 }
 
 @test "global: second run reports already-current and writes no backup" {

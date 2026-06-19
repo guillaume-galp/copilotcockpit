@@ -17,16 +17,24 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
 
 STATE_DIR = Path.home() / ".config" / "cockpit-overseer"
 STATE_FILE = STATE_DIR / "state.json"
+ARCHIVE_DIR = STATE_DIR / "archive"
+ARCHIVE_INDEX = ARCHIVE_DIR / "index.jsonl"
+ARCHIVE_SESSIONS = ARCHIVE_DIR / "sessions"
 DEFAULT_WINDOWS = ["worker-test", "worker-dev", "worker-fix"]
+TRACE_ID_PATTERN = r"(?:TRACE-ID|TRACE_ID):\s*([0-9a-fA-F-]{36})"
+PARENT_TRACE_ID_PATTERN = r"(?:PARENT-TRACE-ID|PARENT_TRACE_ID):\s*([0-9a-fA-F-]{36})"
 
 
 def load_state() -> Dict[str, dict]:
@@ -72,6 +80,40 @@ def fingerprint(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def estimated_tokens(text: str) -> int:
+    if not text:
+        return 0
+    return max(1, (len(text) + 3) // 4)
+
+
+def generate_trace_id() -> str:
+    return str(uuid4())
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def safe_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return cleaned or "default"
+
+
+def archive_paths(session: str) -> List[Path]:
+    safe_session = safe_component(session)
+    return [ARCHIVE_INDEX, ARCHIVE_SESSIONS / f"{safe_session}.jsonl"]
+
+
+def archive_event(record: dict) -> None:
+    payload = json.dumps(record, ensure_ascii=True, sort_keys=True)
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    for path in archive_paths(record["session"]):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            fh.write(payload)
+            fh.write("\n")
+
+
 def tail_lines(text: str, limit: int) -> List[str]:
     lines = text.splitlines()
     if limit <= 0:
@@ -87,6 +129,25 @@ def latest_match(text: str, pattern: str) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def latest_trace_id(text: str) -> str:
+    return latest_match(text, TRACE_ID_PATTERN)
+
+
+def latest_parent_trace_id(text: str) -> str:
+    return latest_match(text, PARENT_TRACE_ID_PATTERN)
+
+
+def decorate_dispatch_brief(trace_id: str, parent_trace_id: str, brief: str) -> str:
+    lines = [f"TRACE-ID: {trace_id}"]
+    if parent_trace_id:
+        lines.append(f"PARENT-TRACE-ID: {parent_trace_id}")
+    lines.append("")
+    body = brief.rstrip("\n")
+    if body:
+        lines.append(body)
+    return "\n".join(lines) + "\n"
 
 
 def current_session() -> str:
@@ -114,11 +175,11 @@ def format_preview(lines: List[str]) -> str:
 
 
 def summarize_pane(session: str, window: str, text: str, lines: int, mode: str) -> Tuple[str, dict]:
-    import re
-
     run_id = latest_match(text, r"(RUN-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9._-]+)?)")
     worker_state = latest_match(text, r"(WORKER-[A-Z-]+)")
     aic_used = latest_match(text, r"(AIC used[: ]+[0-9]+)")
+    trace_id = latest_trace_id(text)
+    parent_trace_id = latest_parent_trace_id(text)
     label = status_label(text)
     tail = tail_lines(text, lines)
     if mode == "minimal":
@@ -129,6 +190,8 @@ def summarize_pane(session: str, window: str, text: str, lines: int, mode: str) 
         summary_bits.append(run_id)
     if worker_state:
         summary_bits.append(worker_state)
+    if trace_id:
+        summary_bits.append(f"trace:{trace_id[:8]}")
     summary_bits.append(label)
     if aic_used:
         summary_bits.append(aic_used)
@@ -139,6 +202,10 @@ def summarize_pane(session: str, window: str, text: str, lines: int, mode: str) 
         "run_id": run_id,
         "status": label,
         "line_count": len(text.splitlines()),
+        "estimated_tokens": estimated_tokens(text),
+        "aic_used": aic_used,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
     }
 
     lines_out = [f"[{window}] {summary}"]
@@ -147,6 +214,29 @@ def summarize_pane(session: str, window: str, text: str, lines: int, mode: str) 
     elif mode != "minimal":
         lines_out.append("  (no new tail)")
     return "\n".join(lines_out), meta
+
+
+def archive_snapshot(session: str, window: str, action: str, text: str, meta: dict, mode: str, extra: Optional[dict] = None) -> None:
+    record = {
+        "timestamp": utc_timestamp(),
+        "tool": "cockpit-overseer",
+        "session": session,
+        "window": window,
+        "action": action,
+        "mode": mode,
+        "summary": meta.get("status", ""),
+        "pane_hash": meta.get("hash", ""),
+        "run_id": meta.get("run_id", ""),
+        "line_count": meta.get("line_count", 0),
+        "estimated_tokens": meta.get("estimated_tokens", 0),
+        "aic_used": meta.get("aic_used", ""),
+        "trace_id": meta.get("trace_id", ""),
+        "parent_trace_id": meta.get("parent_trace_id", ""),
+        "text": text,
+    }
+    if extra:
+        record.update(extra)
+    archive_event(record)
 
 
 def cmd_loop(args: argparse.Namespace) -> int:
@@ -170,6 +260,7 @@ def cmd_loop(args: argparse.Namespace) -> int:
         else:
             emitted.append(summary)
             panes[key] = meta
+        archive_snapshot(args.session, window, "loop", text, meta, args.mode)
     save_state(state)
     print("\n".join(emitted))
     return 0
@@ -186,13 +277,15 @@ def cmd_status(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             emitted.append(f"[{window}] error: {exc}")
             continue
-        summary, _ = summarize_pane(args.session, window, text, args.lines, args.mode)
+        summary, meta = summarize_pane(args.session, window, text, args.lines, args.mode)
         emitted.append(summary)
+        archive_snapshot(args.session, window, "status", text, meta, args.mode)
     print("\n".join(emitted))
     return 0
 
 
 def cmd_reset(args: argparse.Namespace) -> int:
+    session = args.session or current_session() or "all"
     state = load_state()
     panes = state.setdefault("panes", {})
     if args.session:
@@ -203,6 +296,23 @@ def cmd_reset(args: argparse.Namespace) -> int:
     else:
         panes.clear()
     save_state(state)
+    archive_event(
+        {
+            "timestamp": utc_timestamp(),
+            "tool": "cockpit-overseer",
+            "session": session,
+            "window": "",
+            "action": "reset",
+            "mode": "n/a",
+            "summary": "state cleared",
+            "pane_hash": "",
+            "run_id": "",
+            "line_count": 0,
+            "estimated_tokens": 0,
+            "aic_used": "",
+            "text": "",
+        }
+    )
     print("cockpit-overseer state cleared")
     return 0
 
@@ -219,8 +329,17 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     else:
         brief = args.message or ""
 
+    trace_id = args.trace_id or generate_trace_id()
+    before = ""
+    try:
+        before = capture(args.session, args.window)
+    except RuntimeError:
+        before = ""
+    parent_trace_id = args.parent_trace_id or latest_trace_id(before)
+    dispatch_payload = decorate_dispatch_brief(trace_id, parent_trace_id, brief)
+
     with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
-        fh.write(brief)
+        fh.write(dispatch_payload)
         brief_path = fh.name
 
     try:
@@ -240,10 +359,39 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         except FileNotFoundError:
             pass
 
+    archive_snapshot(
+        args.session,
+        args.window,
+        "dispatch",
+        dispatch_payload,
+        {
+            "hash": fingerprint(dispatch_payload),
+            "run_id": latest_match(before, r"(RUN-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9._-]+)?)"),
+            "status": "dispatch",
+            "line_count": len(dispatch_payload.splitlines()),
+            "estimated_tokens": estimated_tokens(dispatch_payload),
+            "aic_used": latest_match(before, r"(AIC used[: ]+[0-9]+)"),
+            "trace_id": trace_id,
+            "parent_trace_id": parent_trace_id,
+        },
+        "n/a",
+        {
+            "brief_raw": brief,
+            "brief_bytes": len(dispatch_payload.encode("utf-8")),
+            "brief_lines": len(dispatch_payload.splitlines()),
+            "brief_tokens_est": estimated_tokens(dispatch_payload),
+            "pane_before": before,
+            "pane_before_hash": fingerprint(before),
+            "pane_before_lines": len(before.splitlines()),
+            "ref": args.ref or "",
+            "label": args.label or "",
+        },
+    )
+
     if args.label:
-        print(f"dispatched {args.label} -> {args.session}:{args.window}")
+        print(f"dispatched {args.label} -> {args.session}:{args.window} [trace={trace_id}]")
     else:
-        print(f"dispatched -> {args.session}:{args.window}")
+        print(f"dispatched -> {args.session}:{args.window} [trace={trace_id}]")
     return 0
 
 
@@ -278,6 +426,8 @@ def build_parser() -> argparse.ArgumentParser:
     dispatch.add_argument("-w", "--window", required=True)
     dispatch.add_argument("-r", "--ref", help="mission brief file to send")
     dispatch.add_argument("-m", "--message", help="inline mission brief")
+    dispatch.add_argument("--trace-id", help="reuse or override the mission trace UUID")
+    dispatch.add_argument("--parent-trace-id", help="explicit parent trace UUID for stitched follow-ups")
     dispatch.add_argument("--label", help="short mission label for logs")
     dispatch.set_defaults(func=cmd_dispatch)
 
