@@ -1,0 +1,26 @@
+# AGENTS.md (e2e)
+
+This repository's `e2e/` subtree is scaffolded by `copilotcockpit`.
+
+`e2e/` may be an independent Git repository (default scaffold behavior), or be
+owned by the parent project when `bootstrap.sh e2e <dir> --no-git` is used.
+
+## Runtime rules
+
+- Tests are expected to run through `./run-audit.sh` for tracked executions.
+- Smoke runs are first-class: `./run-audit.sh --scope "@smoke"`.
+- Set `SKIP_DB_RESET=true` for shared databases.
+- `./run-audit.sh` and governance files are the source of audit truth.
+
+## Project overlays
+
+- Project-specific Codex overlays live in `e2e/.agents/skills`.
+- Legacy Copilot overlays may live in `e2e/.github/skills`.
+
+## Key paths
+
+- `e2e/run-audit.sh` — governed test runner
+- `e2e/run-playwright.sh` — ad-hoc test runner
+- `e2e/.env.local` — local runtime config
+- `e2e/.agents/skills` — Codex overlays
+- `e2e/.github/skills` — Copilot overlays

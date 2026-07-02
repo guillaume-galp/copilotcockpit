@@ -1,0 +1,32 @@
+---
+name: worker-test
+description: "@@APP_NAME@@ Codex test operator overlay. Load the global role skill first, then apply project-specific tags, failure triage paths, and runner scope."
+---
+
+# worker-test — @@APP_NAME@@ Codex overlay
+
+Load the global role skill `$worker-test` first, then apply this project extension.
+
+## Repo layout
+
+- Root: `@@APP_NAME@@`
+- Test runner: `e2e/run-audit.sh`
+- Audit trail: `e2e/runs/`
+
+## Test runner
+
+```bash
+./run-audit.sh --scope "@smoke"
+./run-audit.sh
+./run-audit.sh --scope "@chapter-tag"
+./run-audit.sh --scope "@TC-ID"
+```
+
+## Important paths
+
+- Audit index: `e2e/runs/INDEX.md`
+- Per-run results: `e2e/runs/RUN-*.yaml`
+
+## Worker question file
+
+- Question file: `/tmp/worker-worker-test-question.txt`

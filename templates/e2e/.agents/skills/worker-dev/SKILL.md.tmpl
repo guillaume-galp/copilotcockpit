@@ -1,0 +1,30 @@
+---
+name: worker-dev
+description: "@@APP_NAME@@ Codex developer overlay. Load the global role skill first, then apply project-specific commands and repo paths."
+---
+
+# worker-dev — @@APP_NAME@@ Codex overlay
+
+Load the global role skill `$worker-dev` first, then apply this project extension.
+
+## Repo layout
+
+- Root: `@@APP_NAME@@`
+- Tests: `e2e/tests/`
+- Runbook: `e2e/test-book/`
+
+## Test runner
+
+```bash
+./run-audit.sh --scope "@smoke"
+./run-audit.sh --scope "@TC-ID"
+```
+
+## Important paths
+
+- Working tree: `.`
+- Harness scripts: `e2e/run-audit.sh`, `e2e/run-playwright.sh`
+
+## Worker question file
+
+- Question file: `/tmp/worker-worker-dev-question.txt`

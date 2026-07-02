@@ -1,0 +1,28 @@
+---
+name: worker-fix
+description: "@@APP_NAME@@ Codex troubleshooter overlay. Load the global role skill first, then apply project-specific investigation commands."
+---
+
+# worker-fix — @@APP_NAME@@ Codex overlay
+
+Load the global role skill `$worker-fix` first, then apply this project extension.
+
+## Repo layout
+
+- Root: `@@APP_NAME@@`
+- Logs and artifacts: `e2e/`, `e2e/runs/`, `e2e/governance/`
+
+## Test runner
+
+```bash
+./run-audit.sh --scope "@smoke"
+```
+
+## Health and services
+
+- Health: `<health-url>`
+- Namespace: `<k8s-namespace>`
+
+## Worker question file
+
+- Question file: `/tmp/worker-worker-fix-question.txt`

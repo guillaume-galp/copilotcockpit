@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # run-tests.sh — copilotcockpit developer test dispatcher (ADR-008, architecture §9).
 #
-# Usage: ./run-tests.sh <unit|template|skills|integration|all>
+# Usage: ./run-tests.sh <unit|template|skills|integration|codex|all>
 #
 # Categories (architecture §9):
 #   1 unit        — bats per-command unit tests   tests/unit/*.bats
 #   2 template    — template integrity            tests/template/check-template.sh
 #   3 skills      — SKILL.md lint                  tests/skills/lint-skills.sh
 #   4 integration — dry-run smoke (bats)           tests/integration/smoke.bats
+#   5 codex       — Codex compatibility checks   tests/codex/check-codex.sh
 #
 # Only Category 1 (unit) exists today; categories 2-4 arrive in TH1-E5-US2. The
 # dispatcher is designed so those suites *auto-wire* the moment their files land:
@@ -30,16 +31,18 @@ UNIT_DIR="$ROOT/tests/unit"
 TEMPLATE_SCRIPT="$ROOT/tests/template/check-template.sh"
 SKILLS_SCRIPT="$ROOT/tests/skills/lint-skills.sh"
 INTEGRATION_SUITE="$ROOT/tests/integration/smoke.bats"
+CODEX_CHECK="$ROOT/tests/codex/check-codex.sh"
 
 usage() {
 	cat <<'EOF'
-Usage: ./run-tests.sh <unit|template|skills|integration|all>
+Usage: ./run-tests.sh <unit|template|skills|integration|codex|all>
 
 Developer test categories (ADR-008, architecture §9):
   unit         Category 1 — bats unit tests for each lib/cmd-*.sh (tests/unit/)
   template     Category 2 — template integrity   (tests/template/check-template.sh)
   skills       Category 3 — SKILL.md lint         (tests/skills/lint-skills.sh)
   integration  Category 4 — dry-run smoke (bats)  (tests/integration/smoke.bats)
+  codex        Category 5 — Codex compatibility  (tests/codex/check-codex.sh)
   all          Run every category that is present; skip (loudly) any not yet built.
 
 Contributor-only: `bats` is required for the unit and integration categories.
@@ -113,6 +116,16 @@ run_integration() {
 	bats "$INTEGRATION_SUITE"
 }
 
+# run_codex — Category 5. Auto-wires when tests/codex/check-codex.sh lands.
+run_codex() {
+	if [[ ! -f "$CODEX_CHECK" ]]; then
+		log "== Category 5: codex — SKIPPED (not yet implemented; arrives in TH1-E5-US3) =="
+		return 0
+	fi
+	log "== Category 5: codex compatibility =="
+	bash "$CODEX_CHECK"
+}
+
 main() {
 	local category="${1:-}"
 	case "$category" in
@@ -126,6 +139,7 @@ main() {
 	template) run_template ;;
 	skills) run_skills ;;
 	integration) run_integration ;;
+	codex) run_codex ;;
 	all)
 		# Run every category; a single failure makes the whole run non-zero, but
 		# we run them all first so the developer sees every result in one pass.
@@ -134,6 +148,7 @@ main() {
 		run_template || rc=1
 		run_skills || rc=1
 		run_integration || rc=1
+		run_codex || rc=1
 		if [[ "$rc" -eq 0 ]]; then
 			log "== all present categories passed =="
 		else

@@ -1,0 +1,37 @@
+---
+name: e2e-cockpit
+description: "@@APP_NAME@@ Codex cockpit overseer extension. Load the global role skill first, then apply project-specific topology and runner details."
+---
+
+# e2e-cockpit — @@APP_NAME@@ Codex overlay
+
+Load the global role skill `$e2e-cockpit` first for the full overseer protocol, then read this file.
+
+## Repo layout
+
+- `e2e/` — project smoke-test harness.
+- `e2e/tests/` — Playwright specs.
+- `e2e/test-book/` — Gherkin chapters.
+- `e2e/runs/` — audit trail and run artifacts.
+
+## Test runner
+
+```bash
+./run-audit.sh
+```
+
+## Important paths
+
+- Test runner: `e2e/run-audit.sh`
+- Global setup: `e2e/tmux-cockpit.sh` or `e2e/tmux-cockpit-local.sh`
+
+## Health
+
+- `BACKEND URL`: `http://localhost:<backend-port>`
+- `HEALTH URL`: `<health-url>`
+
+## Worker questions
+
+- Worker question file: `/tmp/worker-<role>-question.txt`
+
+Before running the worker panes, confirm this overlay has been applied after the matching global skill.
