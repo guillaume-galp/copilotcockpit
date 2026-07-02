@@ -1,0 +1,1 @@
+../../../skills/setup-e2e-cockpit/SKILL.md

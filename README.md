@@ -158,6 +158,20 @@ skills are skipped; changed files are backed up before overwrite.
 ./bootstrap.sh doctor
 ```
 
+## Codex compatibility
+
+Copilot and Codex are both supported. Use these safe check commands as needed:
+
+```bash
+./bootstrap.sh codex-repo --dry-run
+./bootstrap.sh codex-global --dry-run
+./run-tests.sh codex
+```
+
+`skills/` remains the canonical source for all 8 managed skills.
+`.agents/skills` exposes those skills to Codex in the repo.
+`.github/skills` remains available for the legacy Copilot cockpit flow.
+
 ---
 
 ## Works great with `copilotautopilot`

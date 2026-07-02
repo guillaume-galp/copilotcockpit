@@ -1,0 +1,1 @@
+../../../skills/copilotcockpit-dev/SKILL.md

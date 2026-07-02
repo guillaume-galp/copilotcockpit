@@ -1,0 +1,1 @@
+../../../skills/worker-dev/SKILL.md

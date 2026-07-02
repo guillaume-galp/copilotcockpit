@@ -30,6 +30,7 @@ CC_ROOT="$(cd "$(dirname "$_cc_self")/.." && pwd -P)"
 # --- output helpers (stdout: human-readable report) --------------------------
 _section() { printf '\n== %s ==\n' "$1"; }
 _row() { printf '  %-16s %s\n' "$1" "$2"; }
+_kv() { printf '  %-24s %s\n' "$1" "$2"; }
 
 # Track whether any HARD prerequisite is missing (drives the exit code, AC5).
 _HARD_MISSING=0
@@ -167,6 +168,39 @@ main() {
 		state="$(cc_drift_state "$skills_root/$role/SKILL.md" "$installed_root/$role/SKILL.md")"
 		_row "$role" "$state"
 	done
+
+	# --- Codex skills (repo) ------------------------------------------------
+	_section "Codex skills (repo)"
+	local repo_installed_root="$CC_ROOT/.agents/skills"
+	for role in \
+		e2e-cockpit e2e-operator setup-e2e-cockpit setup-e2e-runbook \
+		worker-dev worker-fix worker-test copilotcockpit-dev; do
+		state="$(cc_drift_state "$skills_root/$role/SKILL.md" "$repo_installed_root/$role/SKILL.md")"
+		_row "$role" "$state"
+	done
+
+	# --- Codex skills (user) ------------------------------------------------
+	_section "Codex skills (user)"
+	local user_root="$HOME/.agents/skills"
+	for role in \
+		e2e-cockpit e2e-operator setup-e2e-cockpit setup-e2e-runbook \
+		worker-dev worker-fix worker-test copilotcockpit-dev; do
+		state="$(cc_drift_state "$skills_root/$role/SKILL.md" "$user_root/$role/SKILL.md")"
+		_row "$role" "$state"
+	done
+
+	# --- Codex config ------------------------------------------------------
+	_section "Codex config"
+	if [[ -f "$CC_ROOT/AGENTS.md" ]]; then
+		_kv "AGENTS.md" "present"
+	else
+		_row "AGENTS.md" "missing (warning)"
+	fi
+	if [[ -f "$CC_ROOT/.codex/config.toml" ]]; then
+		_kv ".codex/config.toml" "present"
+	else
+		_row ".codex/config.toml" "missing (warning)"
+	fi
 
 	# --- cockpit-wake (AC4) --------------------------------------------------
 	_section "cockpit-wake"

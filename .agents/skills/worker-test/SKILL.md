@@ -1,0 +1,1 @@
+../../../skills/worker-test/SKILL.md

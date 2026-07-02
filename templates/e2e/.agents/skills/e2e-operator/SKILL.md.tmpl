@@ -1,0 +1,34 @@
+---
+name: e2e-operator
+description: "@@APP_NAME@@ Codex operator extension. Load the global role skill first, then apply project-specific tags, chapters, and paths."
+---
+
+# e2e-operator — @@APP_NAME@@ Codex overlay
+
+Load the global role skill `$e2e-operator` first, then apply this project extension.
+
+## Repo layout
+
+- Repo root: `@@APP_NAME@@`
+- Harness: `e2e/`
+- Test runner: `e2e/run-audit.sh`
+- Test book: `e2e/test-book/`
+
+## Test runner
+
+```bash
+./run-audit.sh --scope "@smoke"
+./run-audit.sh
+```
+
+## Important paths
+
+- Audit trail index: `e2e/runs/INDEX.md`
+- Last run details: `e2e/runs/RUN-*.yaml`
+- Test specs: `e2e/tests/*.spec.ts`
+
+## Worker question file
+
+- Worker question file: `/tmp/worker-<role>-question.txt`
+
+Prefer this file over assumptions from global defaults.

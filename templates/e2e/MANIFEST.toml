@@ -16,6 +16,8 @@ paths = [
   "governance/GOVERNANCE.md", "governance/run-schema.yaml",
   "test-book/TC-FORMAT.md",
   ".github/copilot-instructions.md",
+  "AGENTS.md",
+  ".codex/config.toml",
   "MANIFEST.toml",                              # copilotcockpit owns the ownership file
 ]
 
@@ -24,6 +26,8 @@ paths = [
   "tests/**", "test-book/CH0[2-9]*.md", "test-book/CH1*.md",
   "test-book/SUMMARY.md", "runs/**",
   "tmux-cockpit.sh", "tmux-cockpit-local.sh",   # AI-generated per project
+  ".agents/skills/**",                          # Codex project overlays
+  ".codex/local.env", ".codex/secrets.example",
   ".github/skills/**",                          # AI-generated overlays
   ".env.local", ".env.*",
 ]

@@ -1,6 +1,6 @@
 ---
 name: setup-e2e-cockpit
-description: "Guide the user to explore a target app and generate tmux-cockpit.sh and tmux-cockpit-local.sh from the e2e-template. USE FOR: setting up the E2E cockpit for a new app, configuring cockpit scripts, discovering app topology (ports, health endpoint, k8s namespace, backend start commands), installing cockpit-wake."
+description: "Guide the user to explore a target app and generate tmux-cockpit.sh and tmux-cockpit-local.sh from the e2e-template. USE FOR: setting up the E2E cockpit for a new app, configuring cockpit scripts, discovering app topology (ports, health endpoint, k8s namespace), and configuring worker overlays."
 ---
 
 # Setup E2E Cockpit
@@ -19,22 +19,29 @@ so workers know their role in this project.
 | `e2e/tmux-cockpit.sh` | k8s / remote cockpit launcher |
 | `e2e/tmux-cockpit-local.sh` | local dev cockpit launcher |
 | `e2e/.env.example` | updated with correct URL defaults |
-| `.github/skills/e2e-cockpit/SKILL.md` | repo topology overlay (thin) |
-| `.github/skills/e2e-operator/SKILL.md` | operator project overlay (thin) |
-| `.github/skills/worker-dev/SKILL.md` | developer role overlay (thin) |
-| `.github/skills/worker-fix/SKILL.md` | troubleshooter role overlay (thin) |
-| `.github/skills/worker-test/SKILL.md` | test operator role overlay (thin) |
+| `.github/skills/e2e-cockpit/SKILL.md` | Copilot repo topology overlay (thin) |
+| `.github/skills/e2e-operator/SKILL.md` | Copilot operator project overlay (thin) |
+| `.github/skills/worker-dev/SKILL.md` | Copilot developer overlay (thin) |
+| `.github/skills/worker-fix/SKILL.md` | Copilot troubleshooter overlay (thin) |
+| `.github/skills/worker-test/SKILL.md` | Copilot test operator overlay (thin) |
+| `.codex/config.toml` | Codex project configuration |
+| `.agents/skills/e2e-cockpit/SKILL.md` | Codex Cockpit project overlay (thin) |
+| `.agents/skills/e2e-operator/SKILL.md` | Codex operator project overlay (thin) |
+| `.agents/skills/worker-dev/SKILL.md` | Codex developer overlay (thin) |
+| `.agents/skills/worker-fix/SKILL.md` | Codex troubleshooter overlay (thin) |
+| `.agents/skills/worker-test/SKILL.md` | Codex test operator overlay (thin) |
 
-The `tmux-cockpit.sh` / `tmux-cockpit-local.sh` scripts must prime each worker
-pane with both the global skill (from `~/.copilot/skills/<role>/`) and the
-repo overlay (from `.github/skills/<role>/`).
+The scripts must prime each worker pane for the selected runtime:
+
+- Copilot: global from `$HOME/.copilot/skills/<role>/SKILL.md`, project extension from `.github/skills/<role>/SKILL.md`
+- Codex: global from `$HOME/.agents/skills/<role>/SKILL.md`, project extension from `.agents/skills/<role>/SKILL.md`
 
 ---
 
 ## Phase 1 — Explore the target app
 
 Discover the following by reading files, checking running processes, and asking
-the user for anything you cannot determine automatically:
+user for anything you cannot determine automatically:
 
 | Property | How to discover |
 |----------|----------------|
@@ -111,26 +118,36 @@ The script must:
 prime_worker() {
   local pane="$1"   # e.g. "1:worker-dev"
   local role="$2"   # e.g. "worker-dev"
-  local global_skill="$HOME/.copilot/skills/${role}/SKILL.md"
-  local repo_skill=".github/skills/${role}/SKILL.md"
 
-  # Wait for Copilot CLI to be ready
+  # Try Copilot and Codex global+project overlay stacks.
+  local runtime_global=""
+  local runtime_repo=""
+  if [ -f "$HOME/.agents/skills/${role}/SKILL.md" ]; then
+    runtime_global="$HOME/.agents/skills/${role}/SKILL.md"
+  else
+    runtime_global="$HOME/.copilot/skills/${role}/SKILL.md"
+  fi
+  if [ -f ".agents/skills/${role}/SKILL.md" ]; then
+    runtime_repo=".agents/skills/${role}/SKILL.md"
+  else
+    runtime_repo=".github/skills/${role}/SKILL.md"
+  fi
+
   for i in $(seq 1 10); do
     local output
     output=$(tmux capture-pane -t "$pane" -p 2>/dev/null)
-    if echo "$output" | grep -qE "Claude|commands|help"; then break; fi
+    if echo "$output" | grep -qE "agent|copilot|commands|help"; then break; fi
     sleep 2
   done
 
-  # Build priming message
   cat > /tmp/prime_${role}.txt << PRIME
 You are the ${role} in the $(basename "$(pwd)") E2E cockpit.
 
-Load your skills in order:
-1. Global role: ${global_skill}
-2. Project extension: ${repo_skill}
+Load the runtime skills in order:
+1. Runtime role: ${runtime_global}
+2. Project extension: ${runtime_repo}
 
-After reading both skills, confirm: "I am ${role} for $(basename "$(pwd)"), ready."
+After reading your skills, confirm: "I am ${role} for $(basename "$(pwd)"), ready."
 PRIME
 
   tmux load-buffer /tmp/prime_${role}.txt
@@ -145,13 +162,17 @@ PRIME
 
 ## Phase 3 — Write worker skill overlays
 
-Create thin project overlays in `.github/skills/<role>/SKILL.md` for each worker.
+Create thin project overlays for each worker role in both Copilot and Codex trees:
+
+- Copilot: `.github/skills/<role>/SKILL.md`
+- Codex: `.agents/skills/<role>/SKILL.md`
+
 Each overlay should contain only what is project-specific:
 
 ```markdown
 ---
 name: <role>
-description: "Project extension for <role> in <AppName>. Load after global ~./copilot/skills/<role>/SKILL.md."
+description: "Project extension for <role> in <AppName>."
 ---
 
 # <Role> — <AppName> Project Extension
@@ -174,6 +195,8 @@ description: "Project extension for <role> in <AppName>. Load after global ~./co
 - Audit trail: e2e/runs/
 - Worker question inbox: /tmp/worker-<role>-question.txt
 ```
+
+Use `$skill-name` to refer to the runtime skill when writing project-specific prompts.
 
 ---
 
@@ -225,11 +248,15 @@ K8s cockpit:     e2e/tmux-cockpit.sh
   namespace: {NAMESPACE}
   backend:   {BACKEND_SVC} → localhost:{BACKEND_PORT}
 
-Worker skills:   .github/skills/{worker-dev,worker-fix,worker-test}/SKILL.md ✓
+Worker skills (Copilot): .github/skills/{worker-dev,worker-fix,worker-test}/SKILL.md ✓
+Worker skills (Codex):   .agents/skills/{worker-dev,worker-fix,worker-test}/SKILL.md ✓
 Cockpit overlay: .github/skills/e2e-cockpit/SKILL.md ✓
+Cockpit overlay: .agents/skills/e2e-cockpit/SKILL.md ✓
 Operator overlay: .github/skills/e2e-operator/SKILL.md ✓
+Operator overlay: .agents/skills/e2e-operator/SKILL.md ✓
+Codex config: .codex/config.toml ✓
 
-Next step: run /setup-e2e-runbook to generate the Gherkin test-book and spec stubs.
+Next step: invoke the setup for runbook generation to create the Gherkin test-book and spec stubs.
 ```
 
 ---
