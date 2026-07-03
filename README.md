@@ -80,37 +80,48 @@ Each project's `e2e/` directory (its own git repo) gives you:
 
 ## Installation
 
-> *"As an agentic builder, I want to set up the cockpit and the skills for my project
-> in under 10 minutes, so that I can open a terminal, say 'run the smoke suite', and
-> have a worker do it while I watch the logs."*
-
 ```
 Given  I have a terminal with bash, git, node, docker, and tmux
-When   I run the one-liner below
-Then   my global skills are installed in ~/.copilot/skills/
+When   I run the install command below
+Then   Copilot skills are installed in ~/.copilot/skills/
+And    Codex skills are installed in ~/.agents/skills/
+And    cockpit-wake is installed in ~/.local/bin/
+When   I run the scaffold command below for my project
 And    my project has a wired e2e/ harness
 And    ./e2e/run-audit.sh --scope "@smoke" passes green
 ```
 
 ### Step 1 — Install global skills (once per machine)
 
-No clone needed. The checksum-verified one-liner pulls the latest release:
+Install from the latest release:
 
 ```bash
 bash <(curl -fsSL https://github.com/guillaume-galp/copilotcockpit/releases/latest/download/install.sh)
 ```
 
-This installs into `~/.copilot/skills/`:
+Installed user-scoped files:
+
+- `~/.copilot/skills/<role>/SKILL.md` for GitHub Copilot
+- `~/.agents/skills/<role>/SKILL.md` for Codex
+- `~/.local/bin/cockpit-wake`
+
+Managed roles:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·
 `worker-dev` · `worker-fix` · `worker-test` · `copilotcockpit-dev`
 
-…and `cockpit-wake` into `~/.local/bin/`.
-
-Or from a clone (no network call):
+Install from a clone:
 
 ```bash
 git clone https://github.com/guillaume-galp/copilotcockpit.git
-cd copilotcockpit && ./bootstrap.sh global
+cd copilotcockpit
+./bootstrap.sh global
+./bootstrap.sh codex-global
+```
+
+Remove managed user-scoped files:
+
+```bash
+./uninstall.sh
 ```
 
 ### Step 2 — Scaffold your project's `e2e/` (once per project)
@@ -142,14 +153,15 @@ with `# ── CONFIGURE ──` blocks, and all `.github/skills/` overlay stubs
 
 ---
 
-## Staying up to date
+## Updates
 
-Re-run `bootstrap.sh global` at any time — it is fully idempotent. Already-current
-skills are skipped; changed files are backed up before overwrite.
+Re-run the install commands to update. Already-current files are skipped. Changed
+files are backed up before overwrite.
 
 ```bash
 # Update skills + cockpit-wake from latest release
 ./bootstrap.sh global --from-release latest
+./bootstrap.sh codex-global
 
 # Refresh framework files in an existing e2e/ (project content is never touched)
 ./bootstrap.sh e2e ~/git/my-project --update
@@ -158,13 +170,16 @@ skills are skipped; changed files are backed up before overwrite.
 ./bootstrap.sh doctor
 ```
 
-## Codex compatibility
+## Codex
 
-Copilot and Codex are both supported. Use these safe check commands as needed:
+Codex support has two install targets:
+
+- User-scoped skills: `~/.agents/skills/<role>/SKILL.md`
+- Repo overlay skills: `.agents/skills/<role>/SKILL.md`
 
 ```bash
-./bootstrap.sh codex-repo --dry-run
-./bootstrap.sh codex-global --dry-run
+./bootstrap.sh codex-global
+./bootstrap.sh codex-repo
 ./run-tests.sh codex
 ```
 

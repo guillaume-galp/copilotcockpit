@@ -45,7 +45,7 @@ jobs:
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
           # Exactly the install surface — nothing else (no docs/, .git/, tests/, .github/).
-          cp -r bootstrap.sh lib skills bin templates README.md "$STAGE"/
+          cp -r bootstrap.sh uninstall.sh lib skills bin templates README.md "$STAGE"/
           # Deterministic, sorted archive (reproducible bytes).
           tar --sort=name --owner=0 --group=0 --numeric-owner \
               --mtime="@${SOURCE_DATE_EPOCH:-0}" \
@@ -60,6 +60,7 @@ jobs:
           # Must contain the install surface under a top-level copilotcockpit/ dir.
           for want in \
             'copilotcockpit/bootstrap.sh' \
+            'copilotcockpit/uninstall.sh' \
             'copilotcockpit/lib/' \
             'copilotcockpit/skills/' \
             'copilotcockpit/bin/' \
@@ -121,7 +122,8 @@ jobs:
             "copilotcockpit-${TAG}.tar.gz.sha256" \
             "copilotcockpit.tar.gz" \
             "copilotcockpit.tar.gz.sha256" \
-            "install.sh"
+            "install.sh" \
+            "uninstall.sh"
 
   validate:
     name: Category-5 release-asset validation
@@ -153,12 +155,15 @@ jobs:
           set -euo pipefail
           tar -xzf "copilotcockpit.tar.gz"
           test -x copilotcockpit/bootstrap.sh
+          test -x copilotcockpit/uninstall.sh
 
-      - name: Run global --dry-run + doctor from extracted dir (AC6)
+      - name: Run install/uninstall dry-runs + doctor from extracted dir (AC6)
         working-directory: dl
         run: |
           set -euo pipefail
           export HOME="${RUNNER_TEMP}/cc-home"
           mkdir -p "$HOME"
           ./copilotcockpit/bootstrap.sh global --dry-run
+          ./copilotcockpit/bootstrap.sh codex-global --dry-run
+          ./copilotcockpit/uninstall.sh --dry-run
           ./copilotcockpit/bootstrap.sh doctor

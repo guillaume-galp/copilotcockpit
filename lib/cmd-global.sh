@@ -161,7 +161,7 @@ cc_install_from_release() {
 	local ref="$1"
 	shift
 
-	local repo="${CC_RELEASE_REPO:-copilotcockpit/copilotcockpit}"
+	local repo="${CC_RELEASE_REPO:-guillaume-galp/copilotcockpit}"
 	local tarball base
 	case "$ref" in
 	latest)
