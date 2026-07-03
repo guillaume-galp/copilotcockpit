@@ -19,7 +19,7 @@ set -euo pipefail
 # CC_RELEASE_BASE_URL to a base URL — including `file://<dir>` — to fetch from a
 # local fixture instead of the live GitHub Releases CDN. CC_RELEASE_REPO
 # overrides the `<org>/<repo>` slug. Neither is part of the documented one-liner.
-cc_repo="${CC_RELEASE_REPO:-copilotcockpit/copilotcockpit}"
+cc_repo="${CC_RELEASE_REPO:-guillaume-galp/copilotcockpit}"
 cc_base="${CC_RELEASE_BASE_URL:-https://github.com/${cc_repo}/releases/latest/download}"
 cc_tarball="copilotcockpit.tar.gz"
 
@@ -67,9 +67,12 @@ fi
 tar -xzf "$cc_tmp/$cc_tarball" -C .
 [[ -x ./copilotcockpit/bootstrap.sh ]] ||
 	{ cc_err "tarball missing copilotcockpit/bootstrap.sh"; exit 1; }
+chmod +x ./copilotcockpit/bootstrap.sh ./copilotcockpit/lib/cmd-*.sh 2>/dev/null || true
 
-# Clean the temp dir now and clear the trap so it does not fire after exec.
+# Clean the temp dir now and clear the trap so it does not fire after the install
+# commands below.
 rm -rf "$cc_tmp"
 trap - EXIT
 
-exec ./copilotcockpit/bootstrap.sh global "$@"
+./copilotcockpit/bootstrap.sh global "$@"
+./copilotcockpit/bootstrap.sh codex-global "$@"

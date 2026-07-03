@@ -335,7 +335,7 @@ on:
 1. Checkout repo (actions/checkout)
 2. Assemble the install-surface tarball:
        copilotcockpit-${TAG}.tar.gz
-   containing exactly:  bootstrap.sh  lib/  skills/  bin/  templates/  README.md
+   containing exactly:  bootstrap.sh  uninstall.sh  lib/  skills/  bin/  templates/  README.md
    (no docs/, no .git/, no CI — the install surface only, per ADR-007)
 3. Compute SHA-256:
        sha256sum copilotcockpit-${TAG}.tar.gz > copilotcockpit-${TAG}.tar.gz.sha256
@@ -346,18 +346,21 @@ on:
          --latest \
          copilotcockpit-${TAG}.tar.gz \
          copilotcockpit-${TAG}.tar.gz.sha256 \
-         install.sh
+         copilotcockpit.tar.gz \
+         copilotcockpit.tar.gz.sha256 \
+         install.sh \
+         uninstall.sh
    - Body: the CHANGELOG.md section for ${TAG} if present, else a default
      "Bootstrap toolkit release" note.
    - `--latest` makes this the release that the stable
      `releases/latest/download/<asset>` redirect resolves to (no API call needed
      by the one-liner).
-5. Publish install.sh as an asset (the minimal curl-extract-run wrapper).
+5. Publish `install.sh` and `uninstall.sh` as release assets.
 ```
 
-A post-publish smoke job (recommended) extracts the freshly-built tarball into a
-temp dir and runs `./copilotcockpit/bootstrap.sh global --dry-run` to prove the
-artefact is self-sufficient before the release is announced.
+A post-publish validation job extracts the published tarball into a temp dir and
+runs `global --dry-run`, `codex-global --dry-run`, `uninstall.sh --dry-run`, and
+`doctor`.
 
 ### Tarball assembly (sketch)
 
@@ -365,7 +368,7 @@ artefact is self-sufficient before the release is announced.
 TAG="${GITHUB_REF_NAME}"               # e.g. v1.2.3
 STAGE="copilotcockpit"
 mkdir -p "$STAGE"
-cp -r bootstrap.sh lib skills bin templates README.md "$STAGE"/
+cp -r bootstrap.sh uninstall.sh lib skills bin templates README.md "$STAGE"/
 tar -czf "copilotcockpit-${TAG}.tar.gz" "$STAGE"
 ```
 
@@ -381,20 +384,28 @@ bash <(curl -fsSL https://github.com/<org>/copilotcockpit/releases/latest/downlo
 # Explicit form (what install.sh does under the hood)
 curl -fsSL https://github.com/<org>/copilotcockpit/releases/latest/download/copilotcockpit.tar.gz | tar -xz
 ./copilotcockpit/bootstrap.sh global
+./copilotcockpit/bootstrap.sh codex-global
 ```
 
 `install.sh` is a tiny, auditable wrapper: download the tarball + its `.sha256`,
-**verify the checksum**, extract, then exec `bootstrap.sh global "$@"`. It performs no
-logic of its own beyond fetch-verify-extract-run, so the trusted code path stays in
-`bootstrap.sh`.
+**verify the checksum**, extract, then run `bootstrap.sh global "$@"` and
+`bootstrap.sh codex-global "$@"`. It performs no install logic of its own beyond
+fetch-verify-extract-run.
+
+`uninstall.sh` removes only managed user-scoped artefacts:
+
+- `~/.copilot/skills/<managed-role>/SKILL.md`
+- `~/.agents/skills/<managed-role>/SKILL.md`
+- `~/.local/bin/cockpit-wake`
 
 > **Boundary note.** This workflow releases *`copilotcockpit` itself*. Generating a CI
 > pipeline **for a scaffolded project's `e2e/`** is out of scope for VP1 (§12) — the
 > harness merely exposes `run-audit.sh --scope @smoke` for a project's own CI to call.
 
 The post-publish validation referenced above is **test Category 5** (§9): it downloads
-the published tarball, verifies its `.sha256`, extracts, and runs `global --dry-run` +
-`doctor` from the extracted dir — failing the release if the artefact is broken.
+the published tarball, verifies its `.sha256`, extracts, and runs `global --dry-run`,
+`codex-global --dry-run`, `uninstall.sh --dry-run`, and `doctor` from the extracted
+dir.
 
 ---
 
@@ -409,9 +420,9 @@ repo-managed skill (§2, §4).
 ### The `copilotcockpit-dev` skill
 
 `skills/copilotcockpit-dev/SKILL.md` is the canonical, in-repo runbook for delivering a
-change. It is installed globally by `bootstrap.sh global` alongside the seven harness
-skills, but unlike them it is **not bound to a cockpit pane** — an agent working inside
-this repo loads it to own the full feature → release pipeline autonomously, with a
+change. It is installed with the managed skills, but unlike the harness roles it is
+**not bound to a cockpit pane** — an agent working inside this repo loads it to own the
+full feature → release pipeline autonomously, with a
 bounded escalation policy (3 auto-fix attempts at any gate, then raise to the human).
 Full design, the 12-step flow, and the commit→bump mapping live in
 [ADR-008](../ADRs/ADR-008-copilotcockpit-dev-skill.md).
@@ -437,8 +448,8 @@ harness need none of them — `bootstrap.sh` stays dependency-light (P5).
 | 1 | Script unit | `bats` (`tests/unit/`) | each `lib/cmd-*.sh`: idempotency, dry-run = no side-effects, error paths exit right | local + CI-on-PR |
 | 2 | Template integrity | `tests/template/check-template.sh` | `*.tmpl` fully substituted, `package.json.tmpl` valid JSON, `MANIFEST.toml` covers every template file, runners pass `bash -n` | CI-on-PR |
 | 3 | Skills lint | `tests/skills/lint-skills.sh` | every `SKILL.md` valid Markdown + parseable frontmatter (`name`/`description` non-empty) | CI-on-PR |
-| 4 | Integration smoke | `bats` (`tests/integration/`) | `global --dry-run` lists 8 skills + cockpit-wake; `e2e <tmp> --dry-run` lists scaffold; `doctor` exits 0 | CI-on-PR + post-release |
-| 5 | Release asset validation | post-publish CI job | download published tarball, verify SHA-256, extract, `global --dry-run` + `doctor` | CI post-release (release.yml) |
+| 4 | Integration smoke | `bats` (`tests/integration/`) | `global --dry-run` lists Copilot skills + cockpit-wake; `codex-global --dry-run` lists Codex user skills; `uninstall.sh --dry-run` lists managed removals; `e2e <tmp> --dry-run` lists scaffold; `doctor` exits 0 | CI-on-PR + post-release |
+| 5 | Release asset validation | post-publish CI job | download published tarball, verify SHA-256, extract, `global --dry-run`, `codex-global --dry-run`, `uninstall.sh --dry-run`, `doctor` | CI post-release (release.yml) |
 
 `ci.yml` runs categories 1–4 on every PR push; `release.yml` runs category 5 after
 publishing (§8). Local pre-commit gate = categories 1–4 via `run-tests.sh`.
@@ -510,7 +521,7 @@ escalation policy, and alternatives.
 | `MANIFEST.toml` glob semantics in bash are fiddly (NFR-5 correctness). | **Spike (TH1):** prove the framework/project/seed classification with a fixture project before relying on `--update`. |
 | Drift between `copilotcockpit/skills/*` and a teammate's hand-edited `~/.copilot/skills/*`. | `global` backs up before overwrite; `doctor` reports drift; `--link` mode for skill authors. |
 | `cockpit-wake` depends on `at`/`cron` being installed. | `doctor` checks for `at`/`cron`; the skill already documents the dependency. |
-| Cold-install tarball drifts from the repo layout / is missing a file (ADR-007). | Post-publish CI smoke job extracts the tarball and runs `global --dry-run`; `install.sh` verifies the `.sha256` before extracting. |
+| Cold-install tarball drifts from the repo layout / is missing a file (ADR-007). | Post-publish CI extracts the tarball and runs `global --dry-run`, `codex-global --dry-run`, `uninstall.sh --dry-run`, and `doctor`; `install.sh` verifies the `.sha256` before extracting. |
 | `copilotcockpit-dev` agent misclassifies the version bump (wrong release size) (ADR-008). | Bump table is explicit; PR body states "Merging triggers release vX.Y.Z" for human review before squash-merge. |
 
 ---

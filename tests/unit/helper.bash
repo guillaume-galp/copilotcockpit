@@ -11,6 +11,7 @@
 # Resolve the repo root from this helper's location (tests/unit/ -> repo root).
 CC_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CC_BOOTSTRAP="$CC_REPO_ROOT/bootstrap.sh"
+CC_UNINSTALL="$CC_REPO_ROOT/uninstall.sh"
 
 # cc_setup_fake_home — point HOME at an isolated, writable dir inside the test's
 # private tmp dir, and assert the override actually took effect (defence in depth).

@@ -30,7 +30,7 @@ ADR-001…ADR-008. Every VP1 success criterion (SC-1…SC-6) and all eight NFRs 
 ## Capabilities
 
 - **One-command bootstrap** — `bootstrap.sh {global|e2e <dir>|doctor}` (ADR-003).
-- **Cold install** — `install.sh` fetches the release tarball, verifies its sha256, extracts, and runs `global` (no `git clone` needed).
+- **Cold install** — `install.sh` fetches the release tarball, verifies its sha256, extracts, and runs Copilot plus Codex user installs (no `git clone` needed).
 - **Doctor** — prerequisite probing (bash/git/node/npm/python3/docker/tmux/bats) + 4-state skills/cockpit-wake drift detection.
 - **Global skills install** — 8 managed skills + `cockpit-wake`; idempotent re-run ("already current"); `--link` dev mode; `--from-release vX.Y.Z`.
 - **E2E scaffold** — copies `templates/e2e/` with 4-token substitution (ADR-004), `git init`, `npm install`; `--update` refreshes only `framework` files (MANIFEST-driven), preserving `seed`/`project` content (ADR-006).
@@ -44,7 +44,7 @@ ADR-001…ADR-008. Every VP1 success criterion (SC-1…SC-6) and all eight NFRs 
 - `./run-tests.sh all` → **EXIT 0** (14 unit + template integrity + 8-skill lint + 3 integration).
 - `bash -n` clean across all shell sources (bootstrap/install/run-tests/lib/templates/tests).
 - `release.yml` + `ci.yml` parse as valid YAML; packaging + Category-5 logic + the CI job-body validated locally.
-- Install surface present: `bootstrap.sh README.md VERSION CHANGELOG.md install.sh lib/ skills/(8) bin/ templates/`.
+- Install surface present: `bootstrap.sh README.md VERSION CHANGELOG.md install.sh uninstall.sh lib/ skills/(8) bin/ templates/`.
 - No `failed`/`pending`/`in_progress` stories.
 
 ## Breaking Changes
@@ -56,10 +56,10 @@ None — this is the initial `0.1.0` foundation release.
 None — first release. Cold install (once a `v0.1.0` release is published):
 
 ```sh
-curl -fsSL https://github.com/copilotcockpit/copilotcockpit/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/guillaume-galp/copilotcockpit/releases/latest/download/install.sh | bash
 ```
 
-Or from a clone: `./bootstrap.sh global`.
+Or from a clone: `./bootstrap.sh global && ./bootstrap.sh codex-global`.
 
 ## Deferred (non-blocking tech-debt)
 

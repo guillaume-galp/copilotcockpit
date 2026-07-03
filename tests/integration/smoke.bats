@@ -7,6 +7,8 @@
 #
 # Proves (AC3):
 #   * `global --dry-run` enumerates all 8 managed skills + cockpit-wake;
+#   * `codex-global --dry-run` enumerates all 8 managed user skills;
+#   * `uninstall.sh --dry-run` enumerates both user-scoped removals;
 #   * `e2e <tmp> --dry-run` prints the expected scaffold file list;
 #   * `doctor` exits 0 and reports each prerequisite found/missing.
 
@@ -43,6 +45,34 @@ setup() {
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
+}
+
+@test "codex-global --dry-run lists all 8 managed skills" {
+	run "$CC_BOOTSTRAP" codex-global --dry-run
+	[ "$status" -eq 0 ]
+
+	echo "$output" | grep -q "e2e-cockpit"
+	echo "$output" | grep -q "e2e-operator"
+	echo "$output" | grep -q "setup-e2e-cockpit"
+	echo "$output" | grep -q "setup-e2e-runbook"
+	echo "$output" | grep -q "worker-dev"
+	echo "$output" | grep -q "worker-fix"
+	echo "$output" | grep -q "worker-test"
+	echo "$output" | grep -q "copilotcockpit-dev"
+
+	[ ! -e "$HOME/.agents" ]
+}
+
+@test "uninstall --dry-run lists Copilot and Codex removals without side effects" {
+	run "$CC_UNINSTALL" --dry-run
+	[ "$status" -eq 0 ]
+
+	echo "$output" | grep -q "$HOME/.copilot/skills/worker-dev/SKILL.md"
+	echo "$output" | grep -q "$HOME/.agents/skills/worker-dev/SKILL.md"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit-wake"
+	[ ! -e "$HOME/.copilot" ]
+	[ ! -e "$HOME/.agents" ]
+	[ ! -e "$HOME/.local" ]
 }
 
 # --- e2e <tmp> --dry-run prints the expected scaffold file list --------------
