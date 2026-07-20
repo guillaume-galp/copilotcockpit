@@ -11,6 +11,7 @@ You were started in the `worker-test` pane.
 Also load the `e2e-operator` role for the full run-audit workflow and TC-ID mapping.
 
 Wait for a mission from the overseer. Do not start a test run unprompted.
+Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
 ---
 
@@ -85,6 +86,10 @@ Fix brief from worker-test:
   classification: app bug | spec bug
   action: <what needs to change>
 MISSION
+
+cockpit-protocol dispatch \
+  --target "<session>:worker-dev" \
+  --message-file /tmp/worker-mission.txt
 ```
 
 ---
@@ -92,14 +97,11 @@ MISSION
 ## Ask Questions
 
 ```bash
-cat > /tmp/worker-test-question.txt << 'Q'
-WORKER: worker-test
-BLOCKED ON: <description>
-QUESTION: <question>
-OPTIONS (if applicable):
-  A) ...
-  B) ...
-Q
+cockpit-protocol ask \
+  --worker worker-test \
+  --blocked-on "<description>" \
+  --question "<question>" \
+  --options "A) ...|B) ..."
 ```
 
 Project overlay references:

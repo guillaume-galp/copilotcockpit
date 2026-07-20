@@ -10,6 +10,7 @@ You were started in the `worker-fix` pane.
 
 You are escalated to when worker-dev or worker-test is blocked on a non-obvious
 failure. Wait for a mission. Do not start work until one arrives.
+Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
 ---
 
@@ -60,14 +61,11 @@ kubectl logs -f -n <k8s-namespace> -l app=<service> --tail=100
 If you are blocked and need user input before proceeding:
 
 ```bash
-cat > /tmp/worker-fix-question.txt << 'Q'
-WORKER: worker-fix
-BLOCKED ON: <brief description>
-QUESTION: <question>
-OPTIONS (if applicable):
-  A) ...
-  B) ...
-Q
+cockpit-protocol ask \
+  --worker worker-fix \
+  --blocked-on "<brief description>" \
+  --question "<question>" \
+  --options "A) ...|B) ..."
 
 for i in $(seq 1 120); do
   [ -f /tmp/worker-fix-answer.txt ] && break

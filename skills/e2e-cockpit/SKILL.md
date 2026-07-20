@@ -38,6 +38,21 @@ project-specific topology (URLs, k8s context, service names, port numbers).
 Background agents (`task` tool) are a last resort — only when all worker panes
 are busy AND the task cannot wait.
 
+### Required Tooling (no raw tmux commands)
+
+Use `cockpit-protocol` for all pane communication and pane observability.
+Do not improvise raw `tmux send-keys` / `tmux capture-pane` commands.
+
+Protocol verbs:
+
+| Verb | Purpose |
+|------|---------|
+| `dispatch` | Multi-line mission to a worker pane + start confirmation |
+| `send` | Single-line command/message to a pane |
+| `tail` | Read latest pane output |
+| `watch` | Poll pane output for live observability / log tails |
+| `pending` / `read-question` / `reply` | Worker question exchange |
+
 ### Hand-off Checklist (complete in < 1 minute)
 
 Before sending to a worker, provide only:
@@ -54,44 +69,23 @@ Do **NOT**:
 
 ### Dispatch — Reliable Pattern
 
-**Never inline multi-line text in `send-keys`** — it lands as a paste block
-and requires a second Enter. Always use the file-based pattern:
-
 ```bash
-# Step 1 — write mission to temp file
-cat > /tmp/worker-mission.txt << 'MISSION'
-Your mission text here.
-Multi-line is fine inside the heredoc.
-MISSION
+# Multi-line mission brief
+cockpit-protocol dispatch \
+  --target "<session>:<window>" \
+  --message-file /tmp/worker-mission.txt
 
-# Step 2 — load into tmux paste buffer and paste
-tmux load-buffer /tmp/worker-mission.txt
-tmux paste-buffer -t "<session>:<window>"
-
-# Step 3 — submit (separate send-keys so timing is clean)
-sleep 1 && tmux send-keys -t "<session>:<window>" "" Enter
-
-# Step 4 — confirm worker started
-sleep 4 && tmux capture-pane -t "<session>:<window>" -p | tail -5
-# look for "● Working"
-
-# Step 5 — clean up
-rm /tmp/worker-mission.txt
-```
-
-**Short single-line commands** are fine with inline send-keys:
-```bash
-tmux send-keys -t "<session>:<window>" "git status" Enter
+# Single-line command
+cockpit-protocol send --target "<session>:<window>" --text "git status"
 ```
 
 ### Dispatch Rules
 
 | Rule | Why |
 |------|-----|
-| `load-buffer` + `paste-buffer` for multi-line | Avoids paste-block-needs-Enter problem |
-| `sleep 1` between paste and Enter | Gives CLI time to render pasted text |
-| `sleep 4` before capture-pane check | Agent takes 2–3s to start processing |
-| Check for `● Working` | Confirms agent started, not just received |
+| `cockpit-protocol dispatch` for multi-line | Uses paste-buffer safely and confirms worker start |
+| `cockpit-protocol send` for one-liners | Clean semantic command for simple pane input |
+| `cockpit-protocol tail/watch` for observability | Uniform read path for workers and log panes |
 
 ### When to Use Each Worker
 
@@ -112,7 +106,7 @@ limits mid-task, causing silent degraded output or a hard cutoff.
 #### Step 1 — Read the AIC gauge
 
 ```bash
-tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
+cockpit-protocol tail --target "<session>:<window>" --lines 120 | grep "AIC used"
 ```
 
 The status bar shows `Session: NNN AIC used`.
@@ -140,21 +134,19 @@ If any condition fails → **do not clear**. Wait or dispatch to a different wor
 
 ```bash
 # 1. Clear session context
-tmux send-keys -t "<session>:<window>" "/clear" Enter
+cockpit-protocol send --target "<session>:<window>" --text "/clear"
 sleep 3
 
 # 2. Verify AIC reset
-tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
+cockpit-protocol tail --target "<session>:<window>" --lines 120 | grep "AIC used"
 # expect: Session: 0 AIC used
 
 # 3. Re-prime with role skill (essential — /clear wipes all loaded skills)
 PRIME="Please invoke the worker-dev skill and the e2e-cockpit skill to reload your role context."
-tmux set-buffer -t <session> "$PRIME"
-tmux paste-buffer -t "<session>:<window>"
-sleep 1 && tmux send-keys -t "<session>:<window>" "" Enter
+cockpit-protocol send --target "<session>:<window>" --text "$PRIME"
 
 # 4. Wait for prime to settle, then dispatch mission
-sleep 15 && tmux capture-pane -t "<session>:<window>" -p | grep "AIC used"
+sleep 15 && cockpit-protocol tail --target "<session>:<window>" --lines 120 | grep "AIC used"
 # expect: Session: ~10–20 AIC used (skills loaded, ready)
 ```
 
@@ -168,13 +160,13 @@ will have no role context and produce generic output.
 **On every user interaction, check for pending worker questions first:**
 
 ```bash
-ls /tmp/worker-*-question.txt 2>/dev/null
+cockpit-protocol pending
 ```
 
 If any exist:
-1. Read: `cat /tmp/worker-<name>-question.txt`
+1. Read: `cockpit-protocol read-question --worker worker-<name>`
 2. Relay to user via `ask_user` tool (or inline if trivial)
-3. Write answer: `echo "<answer>" > /tmp/worker-<name>-answer.txt`
+3. Write answer: `cockpit-protocol reply --worker worker-<name> --answer "<answer>"`
 
 Workers block waiting for the answer file — never leave them hanging.
 
@@ -230,7 +222,7 @@ failure found →
 - After dispatching: **end your response**. Do not keep investigating.
 - Poll workers via pane capture, not by doing the work yourself:
   ```bash
-  tmux capture-pane -t "<session>:<window>" -p | tail -20
+  cockpit-protocol tail --target "<session>:<window>" --lines 20
   ```
 - Track active missions: one sentence per worker, updated in your head or SQL.
 

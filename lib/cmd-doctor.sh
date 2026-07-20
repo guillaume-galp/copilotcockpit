@@ -5,7 +5,8 @@
 #   * Prerequisites — each tool found/missing with a resolved version (AC2).
 #   * PATH          — whether ~/.local/bin is on PATH, with exact remediation (AC3).
 #   * Skills        — install state / drift for each of the 8 skills (AC4).
-#   * cockpit-wake  — install state / drift for the bin/cockpit-wake artefact (AC4).
+#   * cockpit tools — install state / drift for bin/cockpit-wake and
+#                     bin/cockpit-protocol artefacts (AC4).
 #
 # Exit code (AC5): 0 when every HARD prerequisite (bash, git, node, python3) is
 # present; non-zero ONLY when a hard prerequisite is missing. Missing optional
@@ -133,6 +134,7 @@ main() {
 	cc_check_tool node node hard
 	cc_check_tool npm npm optional
 	cc_check_tool python3 python3 hard
+	cc_check_tool go go optional
 	cc_check_tool docker docker optional
 	cc_check_tool tmux tmux optional
 	# cockpit-wake runtime deps (ADR-005). `cron` may surface as crontab/crond/cron.
@@ -202,10 +204,14 @@ main() {
 		_row ".codex/config.toml" "missing (warning)"
 	fi
 
-	# --- cockpit-wake (AC4) --------------------------------------------------
-	_section "cockpit-wake"
+	# --- cockpit tools (AC4) -------------------------------------------------
+	_section "cockpit tools"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-wake" "$home_bin/cockpit-wake")"
 	_row "cockpit-wake" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-protocol" "$home_bin/cockpit-protocol")"
+	_row "cockpit-protocol" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-protocol.go" "$home_bin/cockpit-protocol.go")"
+	_row "cockpit-protocol.go" "$state"
 
 	# --- Verdict (AC5) -------------------------------------------------------
 	_section "Result"

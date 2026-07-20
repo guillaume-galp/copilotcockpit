@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/cmd-global.sh — `bootstrap.sh global`: install/update the 8 skills + cockpit-wake.
+# lib/cmd-global.sh — `bootstrap.sh global`: install/update skills + cockpit CLI tools.
 #
 # Installs (and idempotently updates) the repo's managed artefacts into the
 # user's home so one command makes a machine able to operate a cockpit
@@ -7,6 +7,8 @@
 #
 #   * skills/<role>/SKILL.md -> ~/.copilot/skills/<role>/SKILL.md   (8 roles)
 #   * bin/cockpit-wake       -> ~/.local/bin/cockpit-wake (+x)
+#   * bin/cockpit-protocol   -> ~/.local/bin/cockpit-protocol (+x)
+#   * bin/cockpit-protocol.go -> ~/.local/bin/cockpit-protocol.go
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -47,9 +49,11 @@ usage() {
 	cat <<'EOF'
 Usage: bootstrap.sh global [--link] [--dry-run] [--from-release <ref>]
 
-Install/update the managed skills and cockpit-wake into your home:
+Install/update the managed skills and cockpit CLI tools into your home:
   ~/.copilot/skills/<role>/SKILL.md   (8 managed roles)
   ~/.local/bin/cockpit-wake           (+x)
+  ~/.local/bin/cockpit-protocol       (+x)
+  ~/.local/bin/cockpit-protocol.go
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -294,9 +298,13 @@ main() {
 
 	local skills_root="$CC_ROOT/skills"
 	local cw_src="$CC_ROOT/bin/cockpit-wake"
+	local cp_src="$CC_ROOT/bin/cockpit-protocol"
+	local cpg_src="$CC_ROOT/bin/cockpit-protocol.go"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
+	local cp_dst="$home_bin/cockpit-protocol"
+	local cpg_dst="$home_bin/cockpit-protocol.go"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -311,6 +319,14 @@ main() {
 	done
 	if [[ ! -f "$cw_src" ]]; then
 		log_error "required source missing: $cw_src"
+		missing=1
+	fi
+	if [[ ! -f "$cp_src" ]]; then
+		log_error "required source missing: $cp_src"
+		missing=1
+	fi
+	if [[ ! -f "$cpg_src" ]]; then
+		log_error "required source missing: $cpg_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -336,11 +352,14 @@ main() {
 		cc_place "$src" "$dst" || return 1
 	done
 
-	# --- Install cockpit-wake in the same idempotent pass (AC3) --------------
+	# --- Install cockpit CLI tools in the same idempotent pass (AC3) ----------
 	cc_place "$cw_src" "$cw_dst" || return 1
+	cc_place "$cp_src" "$cp_dst" || return 1
+	cc_place "$cpg_src" "$cpg_dst" || return 1
 	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
-		# Copy mode: ensure the installed copy is executable (cc_run honours dry-run).
+		# Copy mode: ensure installed wrappers are executable (cc_run honours dry-run).
 		cc_run chmod +x "$cw_dst" || return 1
+		cc_run chmod +x "$cp_dst" || return 1
 	fi
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
