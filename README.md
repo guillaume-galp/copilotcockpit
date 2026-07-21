@@ -177,10 +177,18 @@ with `# ── CONFIGURE ──` blocks, and all `.github/skills/` overlay stubs
 
 ## Updates
 
-Re-run the install commands to update. Already-current files are skipped. Changed
-files are backed up before overwrite.
+Re-run install commands at any time to update. Managed files are idempotent:
+already-current files are skipped and changed files are backed up before
+overwrite.
+
+You can also safely re-run the cold installer one-liner for updates; it now
+stages extraction in a temporary directory and does not leave `./copilotcockpit`
+behind in your current folder.
 
 ```bash
+# Re-run the cold installer from latest release (safe to run repeatedly)
+bash <(curl -fsSL https://github.com/guillaume-galp/copilotcockpit/releases/latest/download/install.sh)
+
 # Update skills + cockpit tools from latest release
 ./bootstrap.sh global --from-release latest
 ./bootstrap.sh codex-global

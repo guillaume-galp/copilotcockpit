@@ -46,7 +46,9 @@ cc_fetch() {
 }
 
 # Download + verify happen inside a temp dir; on any failure it is wiped, leaving
-# nothing installed (AC6 atomic). On success we extract into the CWD and exec.
+# nothing installed (AC6 atomic). On success we extract into that same temp area
+# and execute from there so reruns are idempotent and do not mutate the caller's
+# working directory.
 cc_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cc-install.XXXXXX")"
 trap 'rm -rf "$cc_tmp"' EXIT
 
@@ -64,15 +66,12 @@ if [[ -z "$cc_expected" || "$cc_expected" != "$cc_actual" ]]; then
 	exit 1
 fi
 
-tar -xzf "$cc_tmp/$cc_tarball" -C .
-[[ -x ./copilotcockpit/bootstrap.sh ]] ||
+cc_stage="$cc_tmp/stage"
+mkdir -p "$cc_stage"
+tar -xzf "$cc_tmp/$cc_tarball" -C "$cc_stage"
+[[ -x "$cc_stage/copilotcockpit/bootstrap.sh" ]] ||
 	{ cc_err "tarball missing copilotcockpit/bootstrap.sh"; exit 1; }
-chmod +x ./copilotcockpit/bootstrap.sh ./copilotcockpit/lib/cmd-*.sh 2>/dev/null || true
+chmod +x "$cc_stage/copilotcockpit/bootstrap.sh" "$cc_stage"/copilotcockpit/lib/cmd-*.sh 2>/dev/null || true
 
-# Clean the temp dir now and clear the trap so it does not fire after the install
-# commands below.
-rm -rf "$cc_tmp"
-trap - EXIT
-
-./copilotcockpit/bootstrap.sh global "$@"
-./copilotcockpit/bootstrap.sh codex-global "$@"
+"$cc_stage/copilotcockpit/bootstrap.sh" global "$@"
+"$cc_stage/copilotcockpit/bootstrap.sh" codex-global "$@"
