@@ -21,6 +21,8 @@ set -euo pipefail
 # overrides the `<org>/<repo>` slug. Neither is part of the documented one-liner.
 cc_repo="${CC_RELEASE_REPO:-guillaume-galp/copilotcockpit}"
 cc_base="${CC_RELEASE_BASE_URL:-https://github.com/${cc_repo}/releases/latest/download}"
+cc_api="${CC_RELEASE_API_URL:-https://api.github.com/repos/${cc_repo}/releases/latest}"
+cc_source_base="${CC_RELEASE_SOURCE_BASE_URL:-https://github.com/${cc_repo}/archive/refs/tags}"
 cc_tarball="copilotcockpit.tar.gz"
 
 cc_err() { printf 'install.sh: %s\n' "$*" >&2; }
@@ -45,6 +47,12 @@ cc_fetch() {
 	fi
 }
 
+cc_latest_tag() {
+	curl -fsSL "$cc_api" |
+		sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+		awk 'NF { print; exit }'
+}
+
 # Download + verify happen inside a temp dir; on any failure it is wiped, leaving
 # nothing installed (AC6 atomic). On success we extract into that same temp area
 # and execute from there so reruns are idempotent and do not mutate the caller's
@@ -52,26 +60,56 @@ cc_fetch() {
 cc_tmp="$(mktemp -d "${TMPDIR:-/tmp}/cc-install.XXXXXX")"
 trap 'rm -rf "$cc_tmp"' EXIT
 
-cc_fetch "$cc_base/$cc_tarball" "$cc_tmp/$cc_tarball" ||
-	{ cc_err "download failed: $cc_base/$cc_tarball"; exit 1; }
-cc_fetch "$cc_base/$cc_tarball.sha256" "$cc_tmp/$cc_tarball.sha256" ||
-	{ cc_err "download failed: $cc_base/$cc_tarball.sha256"; exit 1; }
+cc_verify_download=1
+if ! cc_fetch "$cc_base/$cc_tarball" "$cc_tmp/$cc_tarball"; then
+	if [[ -n "${CC_RELEASE_BASE_URL:-}" && "${CC_RELEASE_ALLOW_SOURCE_FALLBACK:-0}" != "1" ]]; then
+		cc_err "download failed: $cc_base/$cc_tarball"
+		exit 1
+	fi
+	cc_tag="$(cc_latest_tag || true)"
+	if [[ -z "$cc_tag" ]]; then
+		cc_err "download failed: $cc_base/$cc_tarball"
+		cc_err "could not resolve latest release tag from $cc_api"
+		exit 1
+	fi
+	cc_err "release asset unavailable: $cc_base/$cc_tarball"
+	cc_err "falling back to tagged source archive: $cc_tag"
+	cc_tarball="copilotcockpit-${cc_tag}-source.tar.gz"
+	cc_fetch "$cc_source_base/$cc_tag.tar.gz" "$cc_tmp/$cc_tarball" ||
+		{ cc_err "download failed: $cc_source_base/$cc_tag.tar.gz"; exit 1; }
+	cc_verify_download=0
+fi
 
-cc_expected="$(awk '{print $1; exit}' "$cc_tmp/$cc_tarball.sha256")"
-cc_actual="$(cc_sha256_of "$cc_tmp/$cc_tarball")"
-if [[ -z "$cc_expected" || "$cc_expected" != "$cc_actual" ]]; then
-	cc_err "checksum verification failed — aborting (nothing installed)"
-	cc_err "  expected: $cc_expected"
-	cc_err "  actual:   $cc_actual"
-	exit 1
+if [[ "$cc_verify_download" -eq 1 ]]; then
+	cc_fetch "$cc_base/$cc_tarball.sha256" "$cc_tmp/$cc_tarball.sha256" ||
+		{ cc_err "download failed: $cc_base/$cc_tarball.sha256"; exit 1; }
+
+	cc_expected="$(awk '{print $1; exit}' "$cc_tmp/$cc_tarball.sha256")"
+	cc_actual="$(cc_sha256_of "$cc_tmp/$cc_tarball")"
+	if [[ -z "$cc_expected" || "$cc_expected" != "$cc_actual" ]]; then
+		cc_err "checksum verification failed — aborting (nothing installed)"
+		cc_err "  expected: $cc_expected"
+		cc_err "  actual:   $cc_actual"
+		exit 1
+	fi
 fi
 
 cc_stage="$cc_tmp/stage"
 mkdir -p "$cc_stage"
 tar -xzf "$cc_tmp/$cc_tarball" -C "$cc_stage"
-[[ -x "$cc_stage/copilotcockpit/bootstrap.sh" ]] ||
-	{ cc_err "tarball missing copilotcockpit/bootstrap.sh"; exit 1; }
-chmod +x "$cc_stage/copilotcockpit/bootstrap.sh" "$cc_stage"/copilotcockpit/lib/cmd-*.sh 2>/dev/null || true
+cc_extracted="$cc_stage/copilotcockpit"
+if [[ ! -f "$cc_extracted/bootstrap.sh" ]]; then
+	cc_extracted=""
+	for cc_candidate in "$cc_stage"/*; do
+		if [[ -f "$cc_candidate/bootstrap.sh" ]]; then
+			cc_extracted="$cc_candidate"
+			break
+		fi
+	done
+fi
+[[ -n "$cc_extracted" && -f "$cc_extracted/bootstrap.sh" ]] ||
+	{ cc_err "tarball missing bootstrap.sh"; exit 1; }
+chmod +x "$cc_extracted/bootstrap.sh" "$cc_extracted"/lib/cmd-*.sh 2>/dev/null || true
 
-"$cc_stage/copilotcockpit/bootstrap.sh" global "$@"
-"$cc_stage/copilotcockpit/bootstrap.sh" codex-global "$@"
+"$cc_extracted/bootstrap.sh" global "$@"
+"$cc_extracted/bootstrap.sh" codex-global "$@"

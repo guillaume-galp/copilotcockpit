@@ -170,6 +170,8 @@ cc_install_from_release() {
 	shift
 
 	local repo="${CC_RELEASE_REPO:-guillaume-galp/copilotcockpit}"
+	local api="${CC_RELEASE_API_URL:-https://api.github.com/repos/${repo}/releases/latest}"
+	local source_base="${CC_RELEASE_SOURCE_BASE_URL:-https://github.com/${repo}/archive/refs/tags}"
 	local tarball base
 	case "$ref" in
 	latest)
@@ -203,35 +205,72 @@ cc_install_from_release() {
 	trap 'rm -rf "${_CC_RELEASE_TMP:-}"' EXIT
 
 	local tb="$tmp/$tarball" sha="$tmp/$tarball.sha256"
+	local verify_download=1
 
 	log_info "fetching release '$ref' from $base"
 	if ! cc_curl_download "$base/$tarball" "$tb"; then
-		log_error "global: download failed: $base/$tarball"
-		return 1
-	fi
-	if ! cc_curl_download "$base/$tarball.sha256" "$sha"; then
-		log_error "global: download failed: $base/$tarball.sha256"
-		return 1
+		if [[ "$ref" != "latest" || ( -n "${CC_RELEASE_BASE_URL:-}" && "${CC_RELEASE_ALLOW_SOURCE_FALLBACK:-0}" != "1" ) ]]; then
+			log_error "global: download failed: $base/$tarball"
+			return 1
+		fi
+		local latest_json="$tmp/latest.json" latest_tag
+		if ! cc_curl_download "$api" "$latest_json"; then
+			log_error "global: download failed: $base/$tarball"
+			log_error "global: could not resolve latest release tag from $api"
+			return 1
+		fi
+		latest_tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$latest_json" | awk 'NF { print; exit }')"
+		if [[ -z "$latest_tag" ]]; then
+			log_error "global: download failed: $base/$tarball"
+			log_error "global: latest release response did not include tag_name"
+			return 1
+		fi
+		log_info "stable release asset unavailable; falling back to tagged source archive: $latest_tag"
+		tarball="copilotcockpit-${latest_tag}-source.tar.gz"
+		tb="$tmp/$tarball"
+		if ! cc_curl_download "$source_base/$latest_tag.tar.gz" "$tb"; then
+			log_error "global: download failed: $source_base/$latest_tag.tar.gz"
+			return 1
+		fi
+		verify_download=0
 	fi
 
-	# Verify BEFORE extracting (AC3/AC6) — tamper-evident, abort on mismatch.
-	local expected
-	expected="$(awk '{print $1; exit}' "$sha")"
-	if ! cc_sha256_verify "$tb" "$expected"; then
-		log_error "global: checksum verification failed — nothing was installed"
-		return 1
+	if [[ "$verify_download" -eq 1 ]]; then
+		if ! cc_curl_download "$base/$tarball.sha256" "$sha"; then
+			log_error "global: download failed: $base/$tarball.sha256"
+			return 1
+		fi
+
+		# Verify BEFORE extracting (AC3/AC6) — tamper-evident, abort on mismatch.
+		local expected
+		expected="$(awk '{print $1; exit}' "$sha")"
+		if ! cc_sha256_verify "$tb" "$expected"; then
+			log_error "global: checksum verification failed — nothing was installed"
+			return 1
+		fi
+		log_ok "checksum verified: $tarball"
 	fi
-	log_ok "checksum verified: $tarball"
 
 	if ! tar -xzf "$tb" -C "$tmp"; then
 		log_error "global: failed to extract $tb"
 		return 1
 	fi
 	local extracted="$tmp/copilotcockpit"
-	if [[ ! -x "$extracted/bootstrap.sh" ]]; then
-		log_error "global: extracted tarball missing copilotcockpit/bootstrap.sh"
+	if [[ ! -f "$extracted/bootstrap.sh" ]]; then
+		extracted=""
+		local candidate
+		for candidate in "$tmp"/*; do
+			if [[ -f "$candidate/bootstrap.sh" ]]; then
+				extracted="$candidate"
+				break
+			fi
+		done
+	fi
+	if [[ -z "$extracted" || ! -f "$extracted/bootstrap.sh" ]]; then
+		log_error "global: extracted tarball missing bootstrap.sh"
 		return 1
 	fi
+	chmod +x "$extracted/bootstrap.sh" "$extracted"/lib/cmd-*.sh 2>/dev/null || true
 
 	# AC4: run the ordinary local install pass from the extracted dir. We run
 	# (not exec) so the EXIT trap above still cleans the temp dir afterwards.
