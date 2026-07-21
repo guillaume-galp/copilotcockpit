@@ -43,13 +43,20 @@ tmux is the glue: it keeps every pane alive, lets you attach/detach freely, and
 enables the `cockpit-wake` scheduler to fire messages into any pane — even while you
 sleep.
 
+`cockpit-overseer` also writes an append-only communication archive under
+`~/.config/cockpit-overseer/archive/` so you can replay a mission's prompts,
+worker snapshots, and AIC signals after the fact.
+
+Use `cockpit-trace show <trace-id>` or `cockpit-trace tree <trace-id>` to stitch
+the dialog back together.
+
 ---
 
 ## The squad
 
 | Role | Skill | Does |
 |------|-------|------|
-| **Overseer** | `e2e-cockpit` | Orchestrates the workers. Reads results. Never gets buried in code. |
+| **Overseer** | `e2e-cockpit` | Orchestrates the workers. Reads results. Uses `cockpit-overseer` for compact loop/status checks and append-only trace archives. |
 | **worker-test** | `e2e-operator` | Runs governed E2E suites via `run-audit.sh`. Reads the audit trail. Triages failures. |
 | **worker-dev** | `worker-dev` | Implements features, fixes, and new Playwright specs. |
 | **worker-fix** | `worker-fix` | Deep-dives bugs. Traces API calls. Root-causes flakiness. |
@@ -59,6 +66,17 @@ sleep.
 Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 `~/.copilot/skills/<role>/`. Each project adds a thin overlay in
 `.github/skills/<role>/` with its own ports, paths, and start commands.
+
+## The tools
+
+| Tool | Purpose | Managed here? |
+|------|---------|---------------|
+| `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
+| `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
+| `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
+| `aic-tracker` | Measure token/AIC spend and compare comms efficiency across sessions. | no (companion tool) |
+| `run-tests.sh` | Repo test dispatcher (unit/template/skills/integration/all). | yes |
+| `bootstrap.sh` | Install/scaffold entry point. | yes |
 
 ---
 
@@ -109,7 +127,9 @@ Managed roles:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·
 `worker-dev` · `worker-fix` · `worker-test` · `copilotcockpit-dev`
 
-Install from a clone:
+…and `cockpit-wake` + `cockpit-overseer` + `cockpit-trace` into `~/.local/bin/`.
+
+Or from a clone (no network call):
 
 ```bash
 git clone https://github.com/guillaume-galp/copilotcockpit.git
@@ -159,7 +179,7 @@ Re-run the install commands to update. Already-current files are skipped. Change
 files are backed up before overwrite.
 
 ```bash
-# Update skills + cockpit-wake from latest release
+# Update skills + cockpit tools from latest release
 ./bootstrap.sh global --from-release latest
 ./bootstrap.sh codex-global
 

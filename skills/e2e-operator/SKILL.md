@@ -116,6 +116,7 @@ If unhealthy → cockpit problem. Check port-forward window. Do not dispatch.
 ```bash
 cat > /tmp/worker-mission.txt << 'MISSION'
 Fix brief from worker-test:
+  TRACE-ID: <uuid>
   TC: <TC-ID>
   spec: e2e/tests/<file>.spec.ts
   failure: <error excerpt ≤ 200 chars>
@@ -136,6 +137,7 @@ rm /tmp/worker-mission.txt
 - **Check worker is idle before dispatching** — capture-pane the target window first; if it shows `● Working`, queue the brief and wait
 - **Never chain briefs inline** — do not write "fix TC-001, then fix TC-002"; send TC-001, wait for DONE, then send TC-002
 - **Separate app-bug briefs by root cause** — if two TCs share a root cause, send one brief covering both; if they have different root causes, send two separate briefs in separate turns
+- **Carry the trace UUID forward** — every follow-up brief or answer should keep the same `TRACE-ID` unless you intentionally start a new dialog; use `cockpit-trace show <uuid>` to inspect the thread
 
 ---
 
