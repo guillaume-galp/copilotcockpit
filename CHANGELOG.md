@@ -13,6 +13,15 @@ architecture §9).
 > `## vX.Y.Z — YYYY-MM-DD` (newest first) and stage unreleased notes under
 > `## Unreleased`.
 
+## v0.5.1 — 2026-07-21
+
+### Fixed
+- **install.sh**: recover when the latest GitHub Release is missing the stable
+  `copilotcockpit.tar.gz` asset by resolving the latest tag and falling back to
+  GitHub's tagged source archive.
+- **bootstrap.sh global --from-release latest**: apply the same source-archive
+  fallback so release installs keep working even for legacy assetless releases.
+
 ## Unreleased
 
 ### Changed
