@@ -62,6 +62,7 @@ the dialog back together.
 | **worker-fix** | `worker-fix` | Deep-dives bugs. Traces API calls. Root-causes flakiness. |
 | **Setup agents** | `setup-e2e-cockpit` · `setup-e2e-runbook` | One-shot AI agents that discover your app's topology and generate the cockpit scripts + Gherkin test-book. Run once per project. |
 | **cockpit-wake** | `cockpit-wake` | Schedules one-off or recurring messages into any cockpit pane (`at` / `cron`). Wake the overseer at 07:15, trigger a nightly regression, or nudge a worker — all while detached from the session. |
+| **cockpit-protocol** | `cockpit-protocol` | Semantic tmux communication protocol CLI (`dispatch`, `send`, `tail`, `watch`, `ask`, `pending`, `read-question`, `reply`) for overseer↔worker messaging and pane observability. |
 
 Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 `~/.copilot/skills/<role>/`. Each project adds a thin overlay in
@@ -99,11 +100,11 @@ Each project's `e2e/` directory (its own git repo) gives you:
 ## Installation
 
 ```
-Given  I have a terminal with bash, git, node, docker, and tmux
+Given  I have a terminal with bash, git, node, go, docker, and tmux
 When   I run the install command below
 Then   Copilot skills are installed in ~/.copilot/skills/
 And    Codex skills are installed in ~/.agents/skills/
-And    cockpit-wake is installed in ~/.local/bin/
+And    cockpit-wake + cockpit-protocol are installed in ~/.local/bin/
 When   I run the scaffold command below for my project
 And    my project has a wired e2e/ harness
 And    ./e2e/run-audit.sh --scope "@smoke" passes green
@@ -122,6 +123,7 @@ Installed user-scoped files:
 - `~/.copilot/skills/<role>/SKILL.md` for GitHub Copilot
 - `~/.agents/skills/<role>/SKILL.md` for Codex
 - `~/.local/bin/cockpit-wake`
+- `~/.local/bin/cockpit-protocol` + `~/.local/bin/cockpit-protocol.go`
 
 Managed roles:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·

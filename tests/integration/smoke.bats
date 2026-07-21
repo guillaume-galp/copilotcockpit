@@ -6,8 +6,7 @@
 # ~/.local/bin (AC3 safety invariant — enforced by cc_setup_fake_home).
 #
 # Proves (AC3):
-#   * `global --dry-run` enumerates all 8 managed skills + cockpit-wake +
-#     cockpit-overseer + cockpit-trace;
+#   * `global --dry-run` enumerates all 8 managed skills + cockpit tools;
 #   * `codex-global --dry-run` enumerates all 8 managed user skills;
 #   * `uninstall.sh --dry-run` enumerates both user-scoped removals;
 #   * `e2e <tmp> --dry-run` prints the expected scaffold file list;
@@ -19,11 +18,10 @@ setup() {
 	cc_setup_fake_home
 }
 
-# --- global --dry-run lists the 8 managed skills + cockpit tools --------------
+# --- global --dry-run lists the 8 managed skills + cockpit tools -------------
 # Reality since TH1-E5-US3: copilotcockpit-dev's source is now vendored, so the
 # dry-run enumerates ALL 8 names as "would copy ..." lines (no pending warning),
-# plus cockpit-wake, cockpit-overseer, and cockpit-trace. We assert exactly that
-# REAL output.
+# plus cockpit tools. We assert exactly that REAL output.
 @test "global --dry-run lists all 8 managed skills + cockpit tools" {
 	run "$CC_BOOTSTRAP" global --dry-run
 	[ "$status" -eq 0 ]
@@ -41,14 +39,16 @@ setup() {
 	echo "$output" | grep -q "copilotcockpit-dev"
 	! echo "$output" | grep -q "not yet vendored, skipping: copilotcockpit-dev"
 
-	# cockpit-wake and cockpit-overseer are part of the same managed install pass.
+	# cockpit tools are part of the same managed install pass.
 	echo "$output" | grep -q "cockpit-wake"
+	echo "$output" | grep -q "cockpit-protocol"
 	echo "$output" | grep -q "cockpit-overseer"
 	echo "$output" | grep -q "cockpit-trace"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
+	[ ! -e "$HOME/.local/bin/cockpit-protocol" ]
 	[ ! -e "$HOME/.local/bin/cockpit-overseer" ]
 	[ ! -e "$HOME/.local/bin/cockpit-trace" ]
 }
@@ -76,6 +76,7 @@ setup() {
 	echo "$output" | grep -q "$HOME/.copilot/skills/worker-dev/SKILL.md"
 	echo "$output" | grep -q "$HOME/.agents/skills/worker-dev/SKILL.md"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-wake"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit-protocol"
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.agents" ]
 	[ ! -e "$HOME/.local" ]

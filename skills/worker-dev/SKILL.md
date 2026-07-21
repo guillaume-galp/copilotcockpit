@@ -10,6 +10,7 @@ You were started in the `worker-dev` pane.
 
 Your overseer is in the `overseer` tmux window and will send you missions.
 Wait for a mission. Do not start work until one arrives.
+Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
 ---
 
@@ -46,18 +47,15 @@ UUID in your completion report.
 If you are blocked and need user input before proceeding:
 
 ```bash
-# 1. Write your question to the shared question file
-cat > /tmp/worker-dev-question.txt << 'Q'
-WORKER: worker-dev
-BLOCKED ON: <brief description of what you're working on>
-QUESTION: <your specific question>
-OPTIONS (if applicable):
-  A) ...
-  B) ...
-Q
+# 1. Write your question via the cockpit protocol tool
+cockpit-protocol ask \
+  --worker worker-dev \
+  --blocked-on "<brief description of what you're working on>" \
+  --question "<your specific question>" \
+  --options "A) ...|B) ..."
 
 # 2. Signal the overseer in your pane output
-echo "❓ BLOCKED — question written to /tmp/worker-dev-question.txt"
+echo "❓ BLOCKED — question written via cockpit-protocol"
 echo "   Waiting for overseer to relay answer to /tmp/worker-dev-answer.txt"
 
 # 3. Wait for the answer (max 10 min)

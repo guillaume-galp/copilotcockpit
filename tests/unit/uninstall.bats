@@ -7,7 +7,7 @@ setup() {
 	cc_setup_fake_home
 }
 
-@test "uninstall: removes managed Copilot and Codex skills plus cockpit-wake" {
+@test "uninstall: removes managed Copilot and Codex skills plus cockpit tools" {
 	run "$CC_BOOTSTRAP" global
 	[ "$status" -eq 0 ]
 	run "$CC_BOOTSTRAP" codex-global
@@ -23,6 +23,8 @@ setup() {
 	[ ! -e "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ ! -e "$HOME/.agents/skills/worker-dev/SKILL.md" ]
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
+	[ ! -e "$HOME/.local/bin/cockpit-protocol" ]
+	[ ! -e "$HOME/.local/bin/cockpit-protocol.go" ]
 	[ -f "$HOME/.copilot/skills/unrelated/SKILL.md" ]
 	[ -f "$HOME/.agents/skills/unrelated/SKILL.md" ]
 }
@@ -40,9 +42,11 @@ setup() {
 	[ -f "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.agents/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
 }
 
-@test "uninstall --codex-only leaves Copilot skills and cockpit-wake" {
+@test "uninstall --codex-only leaves Copilot skills and cockpit tools" {
 	run "$CC_BOOTSTRAP" global
 	[ "$status" -eq 0 ]
 	run "$CC_BOOTSTRAP" codex-global
@@ -54,6 +58,8 @@ setup() {
 	[ -f "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ ! -e "$HOME/.agents/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
 }
 
 @test "uninstall: unknown option exits 2" {

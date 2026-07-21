@@ -19,6 +19,8 @@ setup() {
 	[ "$status" -eq 0 ]
 	[ -f "$HOME/.copilot/skills/worker-dev/SKILL.md" ]
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol" ]
+	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
 	[ -f "$HOME/.local/bin/cockpit-overseer" ]
 	[ -f "$HOME/.local/bin/cockpit-trace" ]
 }
@@ -29,7 +31,7 @@ setup() {
 
 	run "$CC_BOOTSTRAP" global
 	[ "$status" -eq 0 ]
-	# Every managed artefact (7 harness skills + cockpit tools) is already current.
+	# Every managed artefact (8 skills + cockpit tools) is already current.
 	echo "$output" | grep -q "already current"
 	# Idempotent: no backups were created on the second pass.
 	[ "$(cc_count_backups "$HOME")" -eq 0 ]

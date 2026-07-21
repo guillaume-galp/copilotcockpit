@@ -5,6 +5,8 @@
 #   * ~/.copilot/skills/<managed-role>/SKILL.md and empty role dirs
 #   * ~/.agents/skills/<managed-role>/SKILL.md and empty role dirs
 #   * ~/.local/bin/cockpit-wake
+#   * ~/.local/bin/cockpit-protocol
+#   * ~/.local/bin/cockpit-protocol.go
 #
 # It never removes unrelated skills, backup files, parent skills directories, or
 # repository-scoped Codex overlays under a checkout.
@@ -20,18 +22,20 @@ cc_log() { printf 'uninstall.sh: %s\n' "$*" >&2; }
 
 usage() {
 	cat <<'EOF'
-Usage: uninstall.sh [--dry-run] [--copilot-only] [--codex-only] [--keep-cockpit-wake]
+Usage: uninstall.sh [--dry-run] [--copilot-only] [--codex-only] [--keep-cockpit-tools]
 
 Remove copilotcockpit's managed user-scoped install:
   ~/.copilot/skills/<role>/SKILL.md
   ~/.agents/skills/<role>/SKILL.md
   ~/.local/bin/cockpit-wake
+  ~/.local/bin/cockpit-protocol
+  ~/.local/bin/cockpit-protocol.go
 
 Options:
   --dry-run             Describe removals; change nothing.
-  --copilot-only        Remove only legacy Copilot skills and cockpit-wake.
+  --copilot-only        Remove only legacy Copilot skills and cockpit tools.
   --codex-only          Remove only Codex user skills.
-  --keep-cockpit-wake   Leave ~/.local/bin/cockpit-wake in place.
+  --keep-cockpit-tools  Leave ~/.local/bin/cockpit-wake, cockpit-protocol, and cockpit-protocol.go in place.
   -h, --help            Show this help and exit.
 EOF
 }
@@ -88,7 +92,7 @@ while [[ $# -gt 0 ]]; do
 		cc_target_bin=0
 		shift
 		;;
-	--keep-cockpit-wake)
+	--keep-cockpit-tools|--keep-cockpit-wake)
 		cc_target_bin=0
 		shift
 		;;
@@ -116,6 +120,8 @@ fi
 
 if [[ "$cc_target_bin" -ne 0 ]]; then
 	cc_remove_file "$HOME/.local/bin/cockpit-wake"
+	cc_remove_file "$HOME/.local/bin/cockpit-protocol"
+	cc_remove_file "$HOME/.local/bin/cockpit-protocol.go"
 fi
 
 cc_log "uninstall complete"

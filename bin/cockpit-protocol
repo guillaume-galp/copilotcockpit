@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+exec go run "$SELF_DIR/cockpit-protocol.go" "$@"
