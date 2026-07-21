@@ -15,7 +15,13 @@ architecture §9).
 
 ## Unreleased
 
-_Nothing yet._
+### Changed
+- **install.sh**: made cold-install reruns idempotent for version updates by
+  extracting release tarballs into a temporary staging directory (instead of the
+  caller's current directory) before running `bootstrap.sh global` and
+  `bootstrap.sh codex-global`.
+- **README**: documented that the cold installer one-liner is safe to re-run for
+  updates and no longer leaves `./copilotcockpit` in the working directory.
 
 ## v0.1.3 — 2026-06-16
 
