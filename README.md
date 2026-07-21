@@ -82,7 +82,7 @@ Each project's `e2e/` directory (its own git repo) gives you:
 ## Installation
 
 ```
-Given  I have a terminal with bash, git, node, docker, and tmux
+Given  I have a terminal with bash, git, node, go, docker, and tmux
 When   I run the install command below
 Then   Copilot skills are installed in ~/.copilot/skills/
 And    Codex skills are installed in ~/.agents/skills/

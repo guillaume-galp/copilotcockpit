@@ -35,7 +35,7 @@ Options:
   --dry-run             Describe removals; change nothing.
   --copilot-only        Remove only legacy Copilot skills and cockpit tools.
   --codex-only          Remove only Codex user skills.
-  --keep-cockpit-tools  Leave ~/.local/bin/cockpit-wake and cockpit-protocol in place.
+  --keep-cockpit-tools  Leave ~/.local/bin/cockpit-wake, cockpit-protocol, and cockpit-protocol.go in place.
   -h, --help            Show this help and exit.
 EOF
 }

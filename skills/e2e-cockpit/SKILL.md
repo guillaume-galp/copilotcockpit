@@ -71,6 +71,9 @@ Do **NOT**:
 
 ```bash
 # Multi-line mission brief
+cat >/tmp/worker-mission.txt <<'EOF'
+<multi-line mission brief>
+EOF
 cockpit-protocol dispatch \
   --target "<session>:<window>" \
   --message-file /tmp/worker-mission.txt
