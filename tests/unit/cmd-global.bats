@@ -21,6 +21,8 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
+	[ -f "$HOME/.local/bin/cockpit-overseer" ]
+	[ -f "$HOME/.local/bin/cockpit-trace" ]
 }
 
 @test "global: second run reports already-current and writes no backup" {

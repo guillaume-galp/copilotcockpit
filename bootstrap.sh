@@ -24,7 +24,7 @@ Usage: bootstrap.sh <command> [options]
 
 Commands:
   global [--link] [--dry-run] [--from-release <ref>]
-                          Install/update skills + cockpit-wake into your home.
+                          Install/update skills + cockpit tools into your home.
   codex-global [--link] [--dry-run]
                           Install/update Codex skills into user-scoped ~/.agents/skills.
   codex-repo [--link] [--dry-run]

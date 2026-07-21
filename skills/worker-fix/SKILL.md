@@ -40,6 +40,9 @@ runtime role context is present.
 Use `$worker-fix` if needed.
 Then proceed with the mission as dispatched.
 
+If the mission includes a `TRACE-ID` header, keep it intact and echo the same
+UUID in your completion report.
+
 ```bash
 # 1. Check k8s logs for the relevant service
 curl -sk <health-url> | head
@@ -82,6 +85,7 @@ rm -f /tmp/worker-fix-question.txt /tmp/worker-fix-answer.txt
 ```
 WORKER-FIX DONE
   root cause: <one-line diagnosis>
+  trace_id: <uuid>
   fix applied: <file(s) changed, what changed>
   verified: <TC or command used to verify>
   commit: <hash or "pending overseer approval">

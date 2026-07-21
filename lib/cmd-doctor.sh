@@ -5,8 +5,8 @@
 #   * Prerequisites — each tool found/missing with a resolved version (AC2).
 #   * PATH          — whether ~/.local/bin is on PATH, with exact remediation (AC3).
 #   * Skills        — install state / drift for each of the 8 skills (AC4).
-#   * cockpit tools — install state / drift for bin/cockpit-wake and
-#                     bin/cockpit-protocol artefacts (AC4).
+#   * cockpit tools — install state / drift for cockpit-wake, cockpit-protocol,
+#                     cockpit-overseer, and cockpit-trace artefacts (AC4).
 #
 # Exit code (AC5): 0 when every HARD prerequisite (bash, git, node, python3) is
 # present; non-zero ONLY when a hard prerequisite is missing. Missing optional
@@ -212,6 +212,16 @@ main() {
 	_row "cockpit-protocol" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-protocol.go" "$home_bin/cockpit-protocol.go")"
 	_row "cockpit-protocol.go" "$state"
+
+	# --- cockpit-overseer (AC4) ----------------------------------------------
+	_section "cockpit-overseer"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-overseer" "$home_bin/cockpit-overseer")"
+	_row "cockpit-overseer" "$state"
+
+	# --- cockpit-trace (AC4) -------------------------------------------------
+	_section "cockpit-trace"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit-trace" "$home_bin/cockpit-trace")"
+	_row "cockpit-trace" "$state"
 
 	# --- Verdict (AC5) -------------------------------------------------------
 	_section "Result"

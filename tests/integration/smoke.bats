@@ -42,11 +42,15 @@ setup() {
 	# cockpit tools are part of the same managed install pass.
 	echo "$output" | grep -q "cockpit-wake"
 	echo "$output" | grep -q "cockpit-protocol"
+	echo "$output" | grep -q "cockpit-overseer"
+	echo "$output" | grep -q "cockpit-trace"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
 	[ ! -e "$HOME/.local/bin/cockpit-protocol" ]
+	[ ! -e "$HOME/.local/bin/cockpit-overseer" ]
+	[ ! -e "$HOME/.local/bin/cockpit-trace" ]
 }
 
 @test "codex-global --dry-run lists all 8 managed skills" {

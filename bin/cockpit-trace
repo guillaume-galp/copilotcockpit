@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""cockpit-trace — inspect and stitch comms archives by trace UUID."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
+from textwrap import indent
+from typing import Dict, Iterable, List
+
+ARCHIVE_DIR = Path(os.environ.get("COCKPIT_TRACE_ARCHIVE_DIR", Path.home() / ".config" / "cockpit-overseer" / "archive"))
+ARCHIVE_INDEX = ARCHIVE_DIR / "index.jsonl"
+ARCHIVE_SESSIONS = ARCHIVE_DIR / "sessions"
+
+
+def archive_files() -> List[Path]:
+    if ARCHIVE_INDEX.exists():
+        return [ARCHIVE_INDEX]
+    if not ARCHIVE_SESSIONS.exists():
+        return []
+    return sorted(ARCHIVE_SESSIONS.glob("*.jsonl"))
+
+
+def load_records() -> List[dict]:
+    records: List[dict] = []
+    for path in archive_files():
+        try:
+            with path.open() as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+    records.sort(key=lambda r: (
+        r.get("timestamp", ""),
+        r.get("session", ""),
+        r.get("window", ""),
+        r.get("action", ""),
+    ))
+    return records
+
+
+def family_trace_ids(records: List[dict], root: str) -> List[str]:
+    by_trace: Dict[str, dict] = {}
+    children: Dict[str, set] = defaultdict(set)
+    for record in records:
+        trace_id = record.get("trace_id")
+        parent_trace_id = record.get("parent_trace_id")
+        if trace_id and trace_id not in by_trace:
+            by_trace[trace_id] = record
+        if trace_id and parent_trace_id:
+            children[parent_trace_id].add(trace_id)
+
+    closure = {root}
+    changed = True
+    while changed:
+        changed = False
+        for trace_id in list(closure):
+            record = by_trace.get(trace_id)
+            if not record:
+                continue
+            parent_trace_id = record.get("parent_trace_id")
+            if parent_trace_id and parent_trace_id not in closure:
+                closure.add(parent_trace_id)
+                changed = True
+            for child in children.get(trace_id, set()):
+                if child not in closure:
+                    closure.add(child)
+                    changed = True
+    return list(closure)
+
+
+def select_records(records: List[dict], mode: str, value: str) -> List[dict]:
+    if mode == "session":
+        return [record for record in records if record.get("session") == value]
+    if mode == "show":
+        return [record for record in records if record.get("trace_id") == value]
+    if mode == "tree":
+        family = set(family_trace_ids(records, value))
+        return [
+            record
+            for record in records
+            if record.get("trace_id") in family or record.get("parent_trace_id") in family
+        ]
+    raise SystemExit(f"unknown mode: {mode}")
+
+
+def format_record(record: dict) -> str:
+    head = [
+        f"[{record.get('timestamp', '?')}]",
+        f"{record.get('session', '?')}/{record.get('window', '?')}",
+        record.get("action", "?"),
+    ]
+    trace_id = record.get("trace_id", "")
+    parent_trace_id = record.get("parent_trace_id", "")
+    if trace_id:
+        head.append(f"trace={trace_id}")
+    if parent_trace_id:
+        head.append(f"parent={parent_trace_id}")
+    if record.get("summary"):
+        head.append(f"summary={record['summary']}")
+    if record.get("estimated_tokens") not in (None, ""):
+        head.append(f"tokens≈{record['estimated_tokens']}")
+    lines = [" ".join(head)]
+
+    for key in ("text", "brief_raw", "pane_before"):
+        value = record.get(key, "")
+        if value:
+            lines.append(f"{key}:")
+            lines.append(indent(value.rstrip("\n"), "  "))
+    return "\n".join(lines)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="cockpit-trace")
+    sub = parser.add_subparsers(dest="cmd")
+
+    show = sub.add_parser("show", help="show records for one trace UUID")
+    show.add_argument("trace_id")
+    show.set_defaults(mode="show")
+
+    tree = sub.add_parser("tree", help="show the full trace family for one UUID")
+    tree.add_argument("trace_id")
+    tree.set_defaults(mode="tree")
+
+    session = sub.add_parser("session", help="show all records for one tmux session")
+    session.add_argument("session")
+    session.set_defaults(mode="session")
+
+    return parser
+
+
+def main(argv: List[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "cmd", None):
+        parser.print_help()
+        return 0
+
+    records = load_records()
+    selected = select_records(records, args.mode, getattr(args, "trace_id", getattr(args, "session", "")))
+    if not selected:
+        print("cockpit-trace: no matching records", file=sys.stderr)
+        return 1
+
+    if args.mode == "show":
+        print(f"TRACE {args.trace_id}")
+    elif args.mode == "tree":
+        print(f"TRACE FAMILY {args.trace_id}")
+    else:
+        print(f"SESSION {args.session}")
+
+    for record in selected:
+        print(format_record(record))
+        print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

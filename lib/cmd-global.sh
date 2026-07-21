@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/cmd-global.sh — `bootstrap.sh global`: install/update skills + cockpit CLI tools.
+# lib/cmd-global.sh — `bootstrap.sh global`: install/update the 8 skills + cockpit tools.
 #
 # Installs (and idempotently updates) the repo's managed artefacts into the
 # user's home so one command makes a machine able to operate a cockpit
@@ -9,6 +9,8 @@
 #   * bin/cockpit-wake       -> ~/.local/bin/cockpit-wake (+x)
 #   * bin/cockpit-protocol   -> ~/.local/bin/cockpit-protocol (+x)
 #   * bin/cockpit-protocol.go -> ~/.local/bin/cockpit-protocol.go
+#   * bin/cockpit-overseer   -> ~/.local/bin/cockpit-overseer (+x)
+#   * bin/cockpit-trace      -> ~/.local/bin/cockpit-trace (+x)
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -54,6 +56,8 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit-wake           (+x)
   ~/.local/bin/cockpit-protocol       (+x)
   ~/.local/bin/cockpit-protocol.go
+  ~/.local/bin/cockpit-overseer       (+x)
+  ~/.local/bin/cockpit-trace          (+x)
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -300,11 +304,15 @@ main() {
 	local cw_src="$CC_ROOT/bin/cockpit-wake"
 	local cp_src="$CC_ROOT/bin/cockpit-protocol"
 	local cpg_src="$CC_ROOT/bin/cockpit-protocol.go"
+	local co_src="$CC_ROOT/bin/cockpit-overseer"
+	local ct_src="$CC_ROOT/bin/cockpit-trace"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
 	local cp_dst="$home_bin/cockpit-protocol"
 	local cpg_dst="$home_bin/cockpit-protocol.go"
+	local co_dst="$home_bin/cockpit-overseer"
+	local ct_dst="$home_bin/cockpit-trace"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -327,6 +335,14 @@ main() {
 	fi
 	if [[ ! -f "$cpg_src" ]]; then
 		log_error "required source missing: $cpg_src"
+		missing=1
+	fi
+	if [[ ! -f "$co_src" ]]; then
+		log_error "required source missing: $co_src"
+		missing=1
+	fi
+	if [[ ! -f "$ct_src" ]]; then
+		log_error "required source missing: $ct_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -352,7 +368,7 @@ main() {
 		cc_place "$src" "$dst" || return 1
 	done
 
-	# --- Install cockpit CLI tools in the same idempotent pass (AC3) ----------
+	# --- Install cockpit tools in the same idempotent pass (AC3) --------------
 	cc_place "$cw_src" "$cw_dst" || return 1
 	cc_place "$cp_src" "$cp_dst" || return 1
 	cc_place "$cpg_src" "$cpg_dst" || return 1
@@ -361,6 +377,14 @@ main() {
 		cc_run chmod +x "$cw_dst" || return 1
 		cc_run chmod +x "$cp_dst" || return 1
 	fi
+	cc_place "$co_src" "$co_dst" || return 1
+	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
+		cc_run chmod +x "$co_dst" || return 1
+	fi
+	cc_place "$ct_src" "$ct_dst" || return 1
+	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
+		cc_run chmod +x "$ct_dst" || return 1
+	fi
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
 	case ":$PATH:" in
@@ -368,7 +392,7 @@ main() {
 		: # already on PATH
 		;;
 	*)
-		log_warn "$home_bin is not on your PATH — cockpit-wake will not be found"
+		log_warn "$home_bin is not on your PATH — cockpit tools will not be found"
 		printf '\nAdd it to your current shell:\n'
 		printf '\n  export PATH="%s:$PATH"\n' "$home_bin"
 		printf '\nTo persist, append that line to your shell rc, for example:\n'

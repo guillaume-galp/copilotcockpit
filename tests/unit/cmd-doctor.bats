@@ -33,6 +33,8 @@ setup() {
 	# Output is stable across runs (the report path is the only volatile bit and
 	# it is constant here). Compare the Prerequisites + Result verdicts.
 	[ "$output" = "$first" ]
+	echo "$output" | grep -q "cockpit-overseer"
+	echo "$output" | grep -q "cockpit-trace"
 
 	# doctor must never create anything under HOME.
 	[ ! -e "$HOME/.copilot" ]

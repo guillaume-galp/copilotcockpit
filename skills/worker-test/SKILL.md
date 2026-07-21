@@ -45,6 +45,9 @@ Then proceed with the test run as dispatched.
 
 ## Verification commands
 
+If the mission includes a `TRACE-ID` header, keep it intact and echo the same
+UUID in your final report so the overseer can stitch the dialog.
+
 ```bash
 cd <repo-root>
 ./e2e/run-audit.sh --scope "@smoke" --label "<reason>"
@@ -107,3 +110,18 @@ cockpit-protocol ask \
 Project overlay references:
 - `$HOME/.agents/skills/worker-test/SKILL.md`
 - `.github/skills/worker-test/SKILL.md`
+
+---
+
+## Report-Back Format
+
+```
+WORKER-TEST RESULT
+  run: <RUN-id or AUDIT.md entry>
+  scope: <@tag or "full">
+  trace_id: <uuid>
+  passed: N  failed: M  skipped: K
+  failures:
+    - TC: <id>  class: <infra|app|spec|flaky>  dispatched-to: <worker-dev|worker-fix|overseer>
+  status: GREEN | RED | INFRA-BLOCKED
+```
