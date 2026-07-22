@@ -124,10 +124,19 @@ func cmdDispatch(args []string) error {
 		return err
 	}
 	fmt.Print(out)
-	if !strings.Contains(out, "● Working") {
-		return errors.New("worker start not confirmed (missing '● Working')")
+	if !workerStarted(out) {
+		return errors.New("worker start not confirmed (missing working status marker)")
 	}
 	return nil
+}
+
+func workerStarted(text string) bool {
+	for _, marker := range []string{"● Working", "◉ Working", "◎ Working"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func cmdSend(args []string) error {

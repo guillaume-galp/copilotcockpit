@@ -161,7 +161,7 @@ def current_session() -> str:
 
 
 def status_label(text: str) -> str:
-    if "● Working" in text:
+    if any(marker in text for marker in ("● Working", "◉ Working", "◎ Working")):
         return "working"
     if "❯" in text or "ready" in text.lower():
         return "available"

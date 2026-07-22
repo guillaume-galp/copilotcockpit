@@ -67,7 +67,7 @@ EOF
 	local archive_dir="$HOME/.config/cockpit-overseer/archive"
 	mkdir -p "$(dirname "$pane_file")"
 	cat > "$pane_file" <<'EOF'
-● Working
+◉ Working
 RUN-20260618-222040
 WORKER-TEST RESULT
   status: GREEN
