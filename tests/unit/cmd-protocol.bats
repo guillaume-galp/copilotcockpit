@@ -40,7 +40,23 @@ done
 
 case "$cmd" in
 	capture-pane)
-		printf '◉ Working\n'
+		case "$target" in
+			portal-local:worker-dev)
+				printf '❯ ready\nTRACE-ID: trace-dev\nWORKER-DEV DONE\n  story/task: protocol meta\n  tests: pass\n'
+				;;
+			*:worker-dev)
+				printf '◉ Working\n'
+				;;
+			*:worker-fix)
+				printf 'ROOT CAUSE: selector drift\nFIX: updated fixture\n'
+				;;
+			*:worker-test)
+				printf '◉ Working\n'
+				;;
+			*)
+				printf '◉ Working\n'
+				;;
+		esac
 		;;
 	load-buffer)
 		cat "$payload" > "$state_dir/buffer.txt"
@@ -50,6 +66,15 @@ case "$cmd" in
 		;;
 	send-keys)
 		printf '%s\n' "$target" > "$state_dir/send-keys-target.txt"
+		;;
+	display-message)
+		printf 'portal-local\n'
+		;;
+	list-sessions)
+		printf 'portal-local\n'
+		;;
+	list-windows)
+		printf 'overseer\nworker-test\nworker-dev\nworker-fix\nchromium\n'
 		;;
 	*)
 		;;
@@ -70,4 +95,50 @@ EOF
 	echo "$output" | grep -q "◉ Working"
 	grep -q "TASK: validate working marker" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
 	grep -q "ulysses:worker-dev" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
+}
+
+@test "cockpit-protocol meta cockpit reports current cockpit as json" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" meta cockpit --json
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '"current_session": "portal-local"'
+	echo "$output" | grep -q '"worker-dev": "portal-local:worker-dev"'
+	echo "$output" | grep -q '"health": "ok"'
+}
+
+@test "cockpit-protocol worker shortcuts resolve session and tail panes" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" tail --worker worker-dev --lines 10
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q "WORKER-DEV DONE"
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" send --worker worker-dev --text "git status"
+	[ "$status" -eq 0 ]
+	grep -q "portal-local:worker-dev" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
+}
+
+@test "cockpit-protocol worker dispatch refuses busy panes unless forced" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --worker worker-test --message "TASK: busy" --enter-delay 0 --confirm-delay 0
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "looks busy"
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --worker worker-test --message "TASK: forced" --enter-delay 0 --confirm-delay 0 --force
+	[ "$status" -eq 0 ]
+	grep -q "TASK: forced" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -q "portal-local:worker-test" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
+}
+
+@test "cockpit-protocol status json includes worker states and reports" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" status --workers worker-dev,worker-test --json
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '"session": "portal-local"'
+	echo "$output" | grep -q '"status": "available"'
+	echo "$output" | grep -q '"status": "working"'
+	echo "$output" | grep -q '"report": "WORKER-DEV DONE"'
+}
+
+@test "cockpit-protocol report extracts latest structured worker block" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" report --worker worker-fix --format markdown
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -q '```'
+	echo "$output" | grep -q "ROOT CAUSE: selector drift"
+	echo "$output" | grep -q "FIX: updated fixture"
 }

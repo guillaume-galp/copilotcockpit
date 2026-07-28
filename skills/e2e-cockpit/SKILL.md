@@ -100,6 +100,12 @@ cockpit-protocol dispatch \
 
 # Single-line command
 cockpit-protocol send --target "<session>:<window>" --text "git status"
+
+# Worker shortcut command (session resolves from --session, TMUX_SESSION,
+# current tmux session, or single-cockpit auto-detection)
+cockpit-protocol tail --worker worker-test --lines 80
+cockpit-protocol dispatch --worker worker-fix --message-file /tmp/worker-mission.txt
+cockpit-protocol status --workers all --json
 ```
 
 ### Dispatch Rules
@@ -109,6 +115,8 @@ cockpit-protocol send --target "<session>:<window>" --text "git status"
 | `cockpit-protocol dispatch` for multi-line | Uses paste-buffer safely and confirms worker start |
 | `cockpit-protocol send` for one-liners | Clean semantic command for simple pane input |
 | `cockpit-protocol tail/watch` for observability | Uniform read path for workers and log panes |
+| `cockpit-protocol meta cockpit --json` | Discovers the active cockpit session, windows, and worker targets |
+| `cockpit-protocol status --workers all --json` | Reads worker state without manual pane-tail interpretation |
 | `cockpit-overseer dispatch --ref ...` | Keeps mission briefs by reference instead of repeated prose; injects a UUID `TRACE-ID` header |
 
 ### When to Use Each Worker
