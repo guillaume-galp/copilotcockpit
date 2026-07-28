@@ -62,7 +62,7 @@ the dialog back together.
 | **worker-fix** | `worker-fix` | Deep-dives bugs. Traces API calls. Root-causes flakiness. |
 | **Setup agents** | `setup-e2e-cockpit` · `setup-e2e-runbook` | One-shot AI agents that discover your app's topology and generate the cockpit scripts + Gherkin test-book. Run once per project. |
 | **cockpit-wake** | `cockpit-wake` | Schedules one-off or recurring messages into any cockpit pane (`at` / `cron`). Wake the overseer at 07:15, trigger a nightly regression, or nudge a worker — all while detached from the session. |
-| **cockpit-protocol** | `cockpit-protocol` | Semantic tmux communication protocol CLI (`dispatch`, `send`, `tail`, `watch`, `ask`, `pending`, `read-question`, `reply`) for overseer↔worker messaging and pane observability. |
+| **cockpit-protocol** | `cockpit-protocol` | Semantic tmux communication protocol CLI (`meta`, `status`, `mission`, `nudge`, `report`, `wait-report`, `dispatch`, `send`, `tail`, `watch`, `ask`, `pending`, `read-question`, `reply`) for overseer↔worker messaging and pane observability. |
 
 Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 `~/.copilot/skills/<role>/`. Each project adds a thin overlay in
