@@ -72,6 +72,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 
 | Tool | Purpose | Managed here? |
 |------|---------|---------------|
+| `cockpit-protocol` | Semantic tmux communication CLI for cockpit discovery, worker addressing, dispatch/send/tail/watch, status JSON, nudges, and report extraction. | yes |
 | `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
@@ -124,12 +125,15 @@ Installed user-scoped files:
 - `~/.agents/skills/<role>/SKILL.md` for Codex
 - `~/.local/bin/cockpit-wake`
 - `~/.local/bin/cockpit-protocol` + `~/.local/bin/cockpit-protocol.go`
+- `~/.local/bin/cockpit-overseer`
+- `~/.local/bin/cockpit-trace`
 
 Managed roles:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·
 `worker-dev` · `worker-fix` · `worker-test` · `copilotcockpit-dev`
 
-…and `cockpit-wake` + `cockpit-overseer` + `cockpit-trace` into `~/.local/bin/`.
+…and `cockpit-protocol`, `cockpit-wake`, `cockpit-overseer`, and
+`cockpit-trace` into `~/.local/bin/`.
 
 Or from a clone (no network call):
 
