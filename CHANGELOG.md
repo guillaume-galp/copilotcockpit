@@ -13,6 +13,33 @@ architecture §9).
 > `## vX.Y.Z — YYYY-MM-DD` (newest first) and stage unreleased notes under
 > `## Unreleased`.
 
+## Unreleased
+
+_Nothing yet._
+
+## v0.6.0 — 2026-07-28
+
+### Added
+- **cockpit-protocol meta**: added session and cockpit introspection commands for
+  current-session, sessions, windows, worker target resolution, and full cockpit
+  JSON discovery.
+- **cockpit-protocol worker shortcuts**: `dispatch`, `send`, `tail`, and `watch`
+  now accept `--worker` plus optional `--session`, while preserving existing
+  `--target SESSION:WINDOW` syntax.
+- **cockpit-protocol workflow wrappers**: added `status`, `mission`, `nudge`,
+  `report`, and `wait-report` helpers for common overseer-to-worker flows.
+
+### Changed
+- Worker-addressed dispatch and mission commands now refuse panes that look busy
+  unless `--force` is supplied.
+- The E2E cockpit skill documents the new worker shortcut and status commands.
+- **install.sh**: made cold-install reruns idempotent for version updates by
+  extracting release tarballs into a temporary staging directory (instead of the
+  caller's current directory) before running `bootstrap.sh global` and
+  `bootstrap.sh codex-global`.
+- **README**: documented that the cold installer one-liner is safe to re-run for
+  updates and no longer leaves `./copilotcockpit` in the working directory.
+
 ## v0.5.1 — 2026-07-21
 
 ### Fixed
@@ -21,16 +48,6 @@ architecture §9).
   GitHub's tagged source archive.
 - **bootstrap.sh global --from-release latest**: apply the same source-archive
   fallback so release installs keep working even for legacy assetless releases.
-
-## Unreleased
-
-### Changed
-- **install.sh**: made cold-install reruns idempotent for version updates by
-  extracting release tarballs into a temporary staging directory (instead of the
-  caller's current directory) before running `bootstrap.sh global` and
-  `bootstrap.sh codex-global`.
-- **README**: documented that the cold installer one-liner is safe to re-run for
-  updates and no longer leaves `./copilotcockpit` in the working directory.
 
 ## v0.1.3 — 2026-06-16
 
