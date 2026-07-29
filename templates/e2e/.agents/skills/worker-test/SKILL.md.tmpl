@@ -9,6 +9,10 @@ Load the global role skill `$worker-test` first, then apply this project extensi
 
 Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+include `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+guidance in fix briefs when it helps worker-dev or worker-fix orient quickly.
+
 ## Repo layout
 
 - Root: `@@APP_NAME@@`

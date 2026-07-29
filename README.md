@@ -77,6 +77,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
 | `aic-tracker` | Measure token/AIC spend and compare comms efficiency across sessions. | no (companion tool) |
+| `graphify` | Optional local code graph used by skills/workers before broad text search when `graphify-out/graph.json` exists. | no (companion tool) |
 | `run-tests.sh` | Repo test dispatcher (unit/template/skills/integration/all). | yes |
 | `bootstrap.sh` | Install/scaffold entry point. | yes |
 

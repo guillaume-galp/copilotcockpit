@@ -10,6 +10,11 @@ description: "Developer worker role in the @@APP_NAME@@ cockpit. Implements feat
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific verification commands and key paths.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+before broad text search for related code, architecture, file relationships, and
+implementation patterns.
+
 ## ── CONFIGURE ── Project-specific verification commands
 
 Filled in by `/setup-e2e-cockpit` once the app's build/test commands are known.

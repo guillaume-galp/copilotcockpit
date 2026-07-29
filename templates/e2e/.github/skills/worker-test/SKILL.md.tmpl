@@ -11,6 +11,10 @@ description: "E2E Test Operator worker role in the @@APP_NAME@@ cockpit. Runs go
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific run commands and key paths.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+include `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+guidance in fix briefs when it helps worker-dev or worker-fix orient quickly.
+
 ## ── CONFIGURE ── Project-specific run commands
 
 ```bash

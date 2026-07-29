@@ -25,6 +25,12 @@ You never fix code yourself. You diagnose, classify, and hand off.
 | `e2e/test-book/CH*.md` | Full TC: steps, expected result, Gherkin, API touched |
 | `e2e/governance/GOVERNANCE.md` | Maneuver guide, cadences, failure protocol |
 
+If the repository has `graphify-out/graph.json` and `graphify` is available, use
+`graphify query "<question>" --graph "$REPO/graphify-out/graph.json"` before
+broad text search for codebase, architecture, file-relationship, and
+project-content questions. Include the graph path in fix briefs when it will help
+worker-dev or worker-fix orient quickly.
+
 ---
 
 ## Run Commands
