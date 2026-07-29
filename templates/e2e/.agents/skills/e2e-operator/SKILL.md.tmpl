@@ -7,6 +7,11 @@ description: "@@APP_NAME@@ Codex operator extension. Load the global role skill 
 
 Load the global role skill `$e2e-operator` first, then apply this project extension.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+before broad text search for codebase, architecture, file-relationship, and
+project-content questions. Include the graph path in fix briefs when useful.
+
 ## Repo layout
 
 - Repo root: `@@APP_NAME@@`

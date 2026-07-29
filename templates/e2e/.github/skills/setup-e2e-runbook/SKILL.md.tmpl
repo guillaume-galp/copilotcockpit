@@ -8,6 +8,11 @@ description: "Explore @@APP_NAME@@'s features and generate the Gherkin test-book
 > Load the **global** `setup-e2e-runbook` skill first for the full workflow.
 > This file records `@@APP_NAME@@`-specific paths and the existing test-book state.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+query it first for feature domains, routes, navigation, API groups, and
+user-facing workflows before broad text search. Confirm generated chapters and
+specs against source files and `test-book/SUMMARY.md`.
+
 ---
 
 ## ── CONFIGURE ── Existing test-book (do not duplicate)

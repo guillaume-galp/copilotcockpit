@@ -53,6 +53,23 @@ Protocol verbs:
 | `watch` | Poll pane output for live observability / log tails |
 | `pending` / `read-question` / `reply` | Worker question exchange |
 
+### Code intelligence
+
+When the target repository has `graphify-out/graph.json` and the `graphify` CLI
+is available, use Graphify before broad text search for codebase, architecture,
+file-relationship, and project-content questions:
+
+```bash
+graphify query "<question>" --graph "$REPO/graphify-out/graph.json"
+```
+
+Pass the graph path in worker mission briefs when the work requires source-code
+orientation, component mapping, or impact analysis. If the project overlay
+defines a higher-priority code intelligence system, follow that first; otherwise
+prefer Graphify over grep-style search. If the graph is missing or stale, ask the
+appropriate worker to initialize or update it rather than guessing from broad
+search.
+
 ### Operate in short-trigger mode
 
 Use the local helper for the loop. Do not paste the full overseer playbook on every

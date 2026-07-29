@@ -16,6 +16,12 @@ description: "@@APP_NAME@@ Playwright E2E cockpit: project topology overlay — 
 Use `cockpit-protocol` for all cockpit pane communication and observability
 (`dispatch`, `send`, `tail`, `watch`, `pending`, `read-question`, `reply`).
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+before broad text search for codebase, architecture, file-relationship, and
+project-content questions. Pass the graph path in worker briefs when it helps
+orientation.
+
 ---
 
 ## ── CONFIGURE ── Cockpit topology

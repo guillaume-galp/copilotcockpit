@@ -29,6 +29,18 @@ If not, run `/setup-e2e-cockpit` first.
 
 Identify feature domains by reading:
 
+If the target repo has `graphify-out/graph.json` and `graphify` is available,
+query it first to discover routes, navigation, API domains, and feature
+boundaries before broad text search:
+
+```bash
+graphify query "feature domains, frontend routes, navigation entries, backend API groups, and user-facing workflows" --graph "$REPO/graphify-out/graph.json"
+```
+
+If a project-specific code intelligence system has higher priority, use that
+first; otherwise prefer Graphify over grep-style search. Confirm generated
+chapters and specs against source files and existing `test-book/SUMMARY.md`.
+
 | Source | What to look for |
 |--------|-----------------|
 | Frontend routing | `App.tsx`, `router.tsx`, `routes/`, `pages/` — routes = domains |

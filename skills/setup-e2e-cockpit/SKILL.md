@@ -43,6 +43,17 @@ The scripts must prime each worker pane for the selected runtime:
 Discover the following by reading files, checking running processes, and asking
 user for anything you cannot determine automatically:
 
+If the target repo has `graphify-out/graph.json` and `graphify` is available,
+start topology discovery with focused graph queries before broad text search:
+
+```bash
+graphify query "application entrypoints, backend and frontend services, health endpoints, start commands, and deployment topology" --graph "$REPO/graphify-out/graph.json"
+```
+
+If a project-specific code intelligence system has higher priority, use that
+first; otherwise prefer Graphify over grep-style search. Corroborate graph
+answers with source/config files before writing cockpit scripts.
+
 | Property | How to discover |
 |----------|----------------|
 | App name | Check `package.json`, `pyproject.toml`, `pom.xml`, or ask |

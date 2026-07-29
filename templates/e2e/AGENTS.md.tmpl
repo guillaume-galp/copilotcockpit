@@ -12,6 +12,10 @@ owned by the parent project when `bootstrap.sh e2e <dir> --no-git` is used.
 - Set `SKIP_DB_RESET=true` for shared databases.
 - `./run-audit.sh` and governance files are the source of audit truth.
 - Use `cockpit-protocol` for overseer↔worker pane communication and log tail observability.
+- If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+  use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+  before broad text search for codebase, architecture, file-relationship, and
+  project-content questions.
 
 ## Project overlays
 

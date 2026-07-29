@@ -28,6 +28,21 @@ Use `cockpit-protocol` for pane communication and question/answer handoffs.
 - **You do NOT own**: broad refactors, new features, full suite runs
 - **One bug per turn** — complete diagnosis + fix before accepting another
 
+## Code Intelligence
+
+When the repo has `graphify-out/graph.json` and `graphify` is available, use it
+before broad text search to map failing behavior to related code, architecture,
+file relationships, and likely blast radius:
+
+```bash
+graphify query "<question>" --graph "$REPO/graphify-out/graph.json"
+```
+
+If the overseer provides a graph path in the mission, use that exact graph. If a
+project overlay defines a higher-priority code intelligence system, follow that
+first; otherwise prefer Graphify over grep-style search. Corroborate low-
+confidence graph answers with source reads and logs before changing code.
+
 ---
 
 ## Session Start — What to Expect

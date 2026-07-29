@@ -8,6 +8,12 @@ description: "@@APP_NAME@@ Codex cockpit overseer extension. Load the global rol
 Load the global role skill `$e2e-cockpit` first for the full overseer protocol, then read this file.
 Use `cockpit-protocol` for pane communication and observability in this cockpit.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+before broad text search for codebase, architecture, file-relationship, and
+project-content questions. Pass the graph path in worker briefs when it helps
+orientation.
+
 ## Repo layout
 
 - `e2e/` — project smoke-test harness.

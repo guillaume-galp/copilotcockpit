@@ -8,6 +8,11 @@ description: "Explore the @@APP_NAME@@ app and generate tmux-cockpit.sh and tmux
 > Load the **global** `setup-e2e-cockpit` skill first for the full setup workflow.
 > This file records `@@APP_NAME@@`-specific discoveries as you make them.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+start topology discovery with `graphify query` before broad text search, then
+corroborate graph answers with source/config files before writing cockpit
+scripts and overlays.
+
 ---
 
 ## What to generate

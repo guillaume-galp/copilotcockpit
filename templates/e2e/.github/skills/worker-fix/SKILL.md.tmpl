@@ -10,6 +10,11 @@ description: "Troubleshooter worker role in the @@APP_NAME@@ cockpit. Deep-dives
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific investigation commands.
 
+If the parent repo has `graphify-out/graph.json` and `graphify` is available,
+use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
+before broad text search to map failing behavior to related code, architecture,
+file relationships, and likely blast radius.
+
 ## ── CONFIGURE ── Project-specific investigation commands
 
 Filled in by `/setup-e2e-cockpit` once the app's log/topology is known.
