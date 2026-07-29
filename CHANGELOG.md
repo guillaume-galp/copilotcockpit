@@ -17,6 +17,13 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.7.2 — 2026-07-29
+
+### Fixed
+- Made generated Copilot and Codex `e2e-cockpit` project overlays explicitly require `cockpit-protocol` / `cockpit-overseer` for cockpit status, discovery, pane observability, and worker communication.
+- Made the managed-cockpit rule cover read-only status requests, including `tmux ls`, `tmux list-windows`, `tmux list-panes`, and `tmux capture-pane`, unless the user explicitly asks for raw tmux diagnostics.
+- Added template regression coverage so future generated overlays cannot silently drop the cockpit protocol guardrail.
+
 ## v0.7.1 — 2026-07-29
 
 ### Fixed
