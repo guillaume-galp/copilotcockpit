@@ -127,7 +127,7 @@ The script must:
 
 ```bash
 prime_worker() {
-  local pane="$1"   # e.g. "1:worker-dev"
+  local target="$1" # e.g. "${SESSION}:worker-dev"
   local role="$2"   # e.g. "worker-dev"
 
   # Try Copilot and Codex global+project overlay stacks.
@@ -146,7 +146,7 @@ prime_worker() {
 
   for i in $(seq 1 10); do
     local output
-    output=$(tmux capture-pane -t "$pane" -p 2>/dev/null)
+    output=$(cockpit-protocol tail --target "$target" --lines 80 2>/dev/null || true)
     if echo "$output" | grep -qE "agent|copilot|commands|help"; then break; fi
     sleep 2
   done
@@ -161,10 +161,10 @@ Load the runtime skills in order:
 After reading your skills, confirm: "I am ${role} for $(basename "$(pwd)"), ready."
 PRIME
 
-  tmux load-buffer /tmp/prime_${role}.txt
-  tmux paste-buffer -t "$pane"
-  sleep 1
-  tmux send-keys -t "$pane" "" Enter
+  cockpit-protocol dispatch \
+    --target "$target" \
+    --message-file /tmp/prime_${role}.txt \
+    --force
   rm /tmp/prime_${role}.txt
 }
 ```

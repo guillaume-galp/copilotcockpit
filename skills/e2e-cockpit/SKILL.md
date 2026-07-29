@@ -41,7 +41,7 @@ are busy AND the task cannot wait.
 ### Required Tooling (no raw tmux commands)
 
 Use `cockpit-protocol` for all pane communication and pane observability.
-Do not improvise raw `tmux send-keys` / `tmux capture-pane` commands.
+Do not bypass it with direct tmux pane commands.
 
 Protocol verbs:
 
@@ -129,7 +129,7 @@ cockpit-protocol status --workers all --json
 
 | Rule | Why |
 |------|-----|
-| `cockpit-protocol dispatch` for multi-line | Uses paste-buffer safely and confirms worker start |
+| `cockpit-protocol dispatch` for multi-line | Safely delivers multi-line content and confirms worker start |
 | `cockpit-protocol send` for one-liners | Clean semantic command for simple pane input |
 | `cockpit-protocol tail/watch` for observability | Uniform read path for workers and log panes |
 | `cockpit-protocol meta cockpit --json` | Discovers the active cockpit session, windows, and worker targets |
@@ -255,14 +255,14 @@ failure found →
 ## Staying Available
 
 - After dispatching: **end your response**. Do not keep investigating.
-- Poll workers via pane capture, not by doing the work yourself:
+- Poll workers via the protocol CLI, not by doing the work yourself:
   ```bash
   cockpit-protocol tail --target "<session>:<window>" --lines 20
   ```
 - Track active missions: one sentence per worker, updated in your head or SQL.
-- Poll workers via `cockpit-overseer loop`; avoid repeated full `capture-pane` tails.
+- Poll workers via `cockpit-overseer loop`; avoid repeated full pane-tail dumps.
 - Track active missions with short IDs, not pasted briefs.
-- Poll workers via `cockpit-overseer loop`; avoid repeated full `capture-pane` tails.
+- Poll workers via `cockpit-overseer loop`; avoid repeated full pane-tail dumps.
 - Track active missions with short IDs, not pasted briefs.
 
 ### Budget guardrail
@@ -297,7 +297,7 @@ Always pass the **exact tmux session name** of this cockpit when scheduling:
 ```bash
 cockpit-wake schedule --once "07:15" -s <THIS-SESSION> -w overseer -m "…"
 ```
-The session name is: `tmux display-message -p '#S'`
+Retrieve the session name with: `cockpit-protocol meta current-session`
 
 ---
 
@@ -337,7 +337,7 @@ Only dispatch to a worker whose STATUS is **idle**.
 ### Sequencing missions to the same worker
 
 When a worker finishes one mission and you have a follow-up:
-1. Wait for the worker to report done (capture-pane shows idle prompt + report text)
+1. Wait for the worker to report done with `cockpit-protocol wait-report --worker <worker> --trace-id <trace-id>` or confirm idle with `cockpit-protocol status --workers all --json`
 2. Send the next mission as a **new, clean dispatch** — do not append to a previous message
 3. Never pre-load a follow-up mission in the same dispatch ("after you commit, then do X")
    — workers execute top-to-bottom and will start X before the commit is clean
