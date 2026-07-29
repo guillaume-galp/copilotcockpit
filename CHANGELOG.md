@@ -17,6 +17,21 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.7.0 — 2026-07-29
+
+### Added
+- Graphify-aware code intelligence guidance across the global cockpit,
+  operator, setup, worker-dev, and worker-fix skills.
+- Scaffolded Copilot and Codex project overlays now tell agents to prefer
+  `graphify query` when the parent repository has `graphify-out/graph.json`,
+  while respecting higher-priority project-specific code intelligence systems.
+
+### Changed
+- Worker and operator briefs can now carry the Graphify graph path so workers
+  orient with the local code graph before broad text search.
+- README documents `graphify` as an optional companion tool for cockpit skills
+  and workers.
+
 ## v0.6.0 — 2026-07-28
 
 ### Added
