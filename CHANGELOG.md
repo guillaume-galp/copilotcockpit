@@ -17,6 +17,17 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.7.1 — 2026-07-29
+
+### Fixed
+- Replaced stale raw tmux worker communication guidance with
+  `cockpit-protocol` and `cockpit-overseer` usage across the canonical E2E
+  cockpit skills.
+- Made `e2e-operator` explicitly load `e2e-cockpit` first so protocol rules are
+  applied before operator-specific triage and dispatch guidance.
+- Updated setup guidance for worker priming to use `cockpit-protocol dispatch`
+  and `cockpit-protocol tail`.
+
 ## v0.7.0 — 2026-07-29
 
 ### Added
