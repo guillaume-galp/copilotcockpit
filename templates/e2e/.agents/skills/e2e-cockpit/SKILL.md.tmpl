@@ -6,7 +6,22 @@ description: "@@APP_NAME@@ Codex cockpit overseer extension. Load the global rol
 # e2e-cockpit — @@APP_NAME@@ Codex overlay
 
 Load the global role skill `$e2e-cockpit` first for the full overseer protocol, then read this file.
-Use `cockpit-protocol` for pane communication and observability in this cockpit.
+
+## Cockpit communication protocol
+
+When a tmux cockpit is running, treat it as managed state. Use
+`cockpit-protocol` for all cockpit pane communication and observability
+(`dispatch`, `send`, `tail`, `watch`, `pending`, `read-question`, `reply`,
+`meta cockpit --json`, `status --workers all --json`).
+
+Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
+checks and short-loop polling.
+
+Do not inspect or control the cockpit with ad-hoc raw `tmux` commands. This
+applies to read-only status requests as well as worker coordination. Do not
+improvise `tmux ls`, `tmux list-windows`, `tmux list-panes`,
+`tmux capture-pane`, `tmux load-buffer`, `tmux paste-buffer`, or
+`tmux send-keys` unless the user explicitly asks for raw tmux diagnostics.
 
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
