@@ -6,8 +6,9 @@ description: "Generic E2E governed test operator: run-audit.sh workflow, audit t
 # E2E Operator — Generic Playbook
 
 You are the **E2E Test Operator** in a tmux cockpit.
-Load the **repo-local** `e2e-operator` skill on top of this one for
-project-specific paths, URLs, TC-IDs, and chapter names.
+Load the generic `e2e-cockpit` skill before this skill, then load the
+**repo-local** `e2e-operator` skill on top for project-specific paths, URLs,
+TC-IDs, and chapter names.
 
 You never fix code yourself. You diagnose, classify, and hand off.
 
@@ -24,6 +25,8 @@ You never fix code yourself. You diagnose, classify, and hand off.
 | `e2e/test-book/SUMMARY.md` | Master TC index: TC-ID → chapter → spec file |
 | `e2e/test-book/CH*.md` | Full TC: steps, expected result, Gherkin, API touched |
 | `e2e/governance/GOVERNANCE.md` | Maneuver guide, cadences, failure protocol |
+| `cockpit-protocol` | Required cockpit communication and pane-observability CLI |
+| `cockpit-overseer` | Required short-loop/status helper for polling worker panes |
 
 If the repository has `graphify-out/graph.json` and `graphify` is available, use
 `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"` before
@@ -117,7 +120,7 @@ If unhealthy → cockpit problem. Check port-forward window. Do not dispatch.
 | **Spec bug** | stale selector, wrong mock, timing | dispatch to `worker-dev` |
 | **Flaky** | passes on retry | note in `e2e/flaky-known.md`; dispatch to `worker-fix` |
 
-### Step 5 — Dispatch fix brief (load-buffer pattern)
+### Step 5 — Dispatch fix brief (`cockpit-protocol` pattern)
 
 ```bash
 cat > /tmp/worker-mission.txt << 'MISSION'
@@ -131,16 +134,16 @@ Fix brief from worker-test:
   action: <what needs to change>
   verify with: ./e2e/run-audit.sh --scope "@TC-XXX-NNN" --label "fix-verify"
 MISSION
-tmux load-buffer /tmp/worker-mission.txt
-tmux paste-buffer -t "<session>:worker-dev"    # or worker-fix
-sleep 1 && tmux send-keys -t "<session>:worker-dev" "" Enter
+cockpit-protocol dispatch \
+  --target "<session>:worker-dev" \
+  --message-file /tmp/worker-mission.txt
 rm /tmp/worker-mission.txt
 ```
 
 ### Dispatch constraints (worker-test must enforce)
 
 - **One brief per worker per dispatch** — never send two TCs to the same worker in one message
-- **Check worker is idle before dispatching** — capture-pane the target window first; if it shows `● Working`, queue the brief and wait
+- **Check worker is idle before dispatching** — use `cockpit-protocol status --workers all --json`, `cockpit-protocol tail`, or `cockpit-overseer status`; if the worker is busy, queue the brief and wait
 - **Never chain briefs inline** — do not write "fix TC-001, then fix TC-002"; send TC-001, wait for DONE, then send TC-002
 - **Separate app-bug briefs by root cause** — if two TCs share a root cause, send one brief covering both; if they have different root causes, send two separate briefs in separate turns
 - **Carry the trace UUID forward** — every follow-up brief or answer should keep the same `TRACE-ID` unless you intentionally start a new dialog; use `cockpit-trace show <uuid>` to inspect the thread
@@ -182,5 +185,5 @@ To schedule a deferred test run or reminder, use the **`cockpit-wake`** skill.
 Trigger phrases: "wake me at X", "schedule a morning check", "set a recurring run".
 Always pass the exact session name — retrieve it with:
 ```bash
-tmux display-message -p '#S'
+cockpit-protocol meta current-session
 ```
