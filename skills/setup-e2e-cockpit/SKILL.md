@@ -207,6 +207,18 @@ description: "Project extension for <role> in <AppName>."
 - Worker question inbox: /tmp/worker-<role>-question.txt
 ```
 
+For the `e2e-cockpit` overlay specifically, include a visible
+`## Cockpit communication protocol` section that makes the managed-cockpit rule
+persistent in the generated project:
+
+- Use `cockpit-protocol` for dispatch, send, tail, watch, pending questions,
+  replies, `meta cockpit --json`, and `status --workers all --json`.
+- Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
+  checks and short-loop polling.
+- Do not use ad-hoc raw `tmux` commands for cockpit status, discovery, pane
+  reading, or pane control unless the user explicitly asks for raw tmux
+  diagnostics.
+
 Use `$skill-name` to refer to the runtime skill when writing project-specific prompts.
 
 ---

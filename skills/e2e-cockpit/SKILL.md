@@ -41,7 +41,14 @@ are busy AND the task cannot wait.
 ### Required Tooling (no raw tmux commands)
 
 Use `cockpit-protocol` for all pane communication and pane observability.
-Do not bypass it with direct tmux pane commands.
+Do not bypass it with direct tmux commands, including read-only status or
+discovery commands.
+
+When a tmux cockpit is running, treat it as managed state. Do not improvise
+`tmux ls`, `tmux list-windows`, `tmux list-panes`, `tmux capture-pane`,
+`tmux load-buffer`, `tmux paste-buffer`, or `tmux send-keys` unless the user
+explicitly asks for raw tmux diagnostics. Use `cockpit-protocol` and
+`cockpit-overseer` instead.
 
 Protocol verbs:
 
@@ -52,6 +59,8 @@ Protocol verbs:
 | `tail` | Read latest pane output |
 | `watch` | Poll pane output for live observability / log tails |
 | `pending` / `read-question` / `reply` | Worker question exchange |
+| `meta cockpit --json` | Discover active cockpit session, windows, and workers |
+| `status --workers all --json` | Read worker state without manual pane tails |
 
 ### Code intelligence
 

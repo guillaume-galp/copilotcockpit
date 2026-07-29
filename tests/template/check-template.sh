@@ -181,6 +181,36 @@ for sh in run-audit.sh run-playwright.sh; do
 	fi
 done
 
+# --- Check 5: generated cockpit overlays preserve protocol guardrails --------
+printf '\n== Check 5: cockpit overlay protocol guardrails ==\n'
+for rel in \
+	".github/skills/e2e-cockpit/SKILL.md.tmpl" \
+	".agents/skills/e2e-cockpit/SKILL.md.tmpl"; do
+	f="$TEMPLATE_ROOT/$rel"
+	if [[ ! -f "$f" ]]; then
+		fail "$rel not found: $f"
+		continue
+	fi
+	resolved="$(_sub "$f")"
+	missing=0
+	for required in \
+		"Cockpit communication protocol" \
+		"cockpit-protocol" \
+		"cockpit-overseer status" \
+		"Do not inspect or control the cockpit with ad-hoc raw" \
+		"tmux capture-pane" \
+		"tmux send-keys" \
+		"unless the user explicitly asks for raw tmux diagnostics"; do
+		if ! printf '%s\n' "$resolved" | grep -Fq "$required"; then
+			fail "$rel missing protocol guardrail text: $required"
+			missing=$((missing + 1))
+		fi
+	done
+	if [[ "$missing" -eq 0 ]]; then
+		ok "$rel preserves cockpit protocol guardrails"
+	fi
+done
+
 # --- Verdict -----------------------------------------------------------------
 printf '\n'
 if [[ "$fails" -ne 0 ]]; then
