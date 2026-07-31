@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""cockpit-queue — FIFO request queue for cockpit overseers."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+ACTIVE_STATES = {
+    "shaping",
+    "planned",
+    "implementing",
+    "testing",
+    "fixing",
+    "delivered",
+    "e2e-testing-runbooks",
+    "e2e-related-fixing",
+}
+TERMINAL_STATES = {"cleared", "rejected"}
+VALID_STATES = {"queued", "blocked", *ACTIVE_STATES, *TERMINAL_STATES}
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def queue_root() -> Path:
+    return Path(os.environ.get("COCKPIT_QUEUE_ROOT", "docs/queue"))
+
+
+def items_dir() -> Path:
+    return queue_root() / "items"
+
+
+def events_path() -> Path:
+    return queue_root() / "events.jsonl"
+
+
+def ensure_dirs() -> None:
+    items_dir().mkdir(parents=True, exist_ok=True)
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:48] or "request"
+
+
+def load_json(path: Path) -> Dict[str, Any]:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        raise SystemExit(f"not found: {path}") from None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid queue item: {path}: {exc}") from None
+
+
+def write_json(path: Path, data: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def append_event(event: Dict[str, Any]) -> None:
+    ensure_dirs()
+    event.setdefault("timestamp", now())
+    with events_path().open("a") as fh:
+        fh.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def load_events() -> List[Dict[str, Any]]:
+    path = events_path()
+    if not path.exists():
+        return []
+    events: List[Dict[str, Any]] = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
+def queue_paused() -> bool:
+    paused = False
+    for event in load_events():
+        if event.get("type") == "queue-paused":
+            paused = True
+        elif event.get("type") == "queue-resumed":
+            paused = False
+    return paused
+
+
+def iter_items() -> Iterable[Dict[str, Any]]:
+    if not items_dir().exists():
+        return []
+    items = []
+    for path in sorted(items_dir().glob("*.yaml")):
+        item = load_json(path)
+        item["_path"] = str(path)
+        items.append(item)
+    return sorted(items, key=lambda item: (item.get("created_at", ""), item.get("id", "")))
+
+
+def item_path(item_id: str) -> Path:
+    return items_dir() / f"{item_id}.yaml"
+
+
+def load_item(item_id: str) -> Dict[str, Any]:
+    return load_json(item_path(item_id))
+
+
+def classify_text(text: str, approved: bool = False) -> Dict[str, str]:
+    if approved:
+        return {"classification": "build", "reason": "explicit overseer approval"}
+    if "/the-copilot-build-method" in text or "the-copilot-build-method" in text:
+        return {"classification": "build", "reason": "build-method tagged"}
+    return {"classification": "non-build", "reason": "missing build-method tag or explicit approval"}
+
+
+def next_id(text: str, created_at: str) -> str:
+    stamp = re.sub(r"[^0-9]", "", created_at)[:14]
+    base = f"QI-{stamp}-{slugify(text)}"
+    candidate = base
+    i = 2
+    while item_path(candidate).exists():
+        candidate = f"{base}-{i}"
+        i += 1
+    return candidate
+
+
+def mutate_state(item: Dict[str, Any], state: str, actor: str, reason: str, **extra: Any) -> Dict[str, Any]:
+    if state not in VALID_STATES:
+        raise SystemExit(f"invalid state: {state}")
+    previous = item.get("state")
+    item["state"] = state
+    item["updated_at"] = now()
+    for key, value in extra.items():
+        if value is not None:
+            item[key] = value
+    write_json(item_path(item["id"]), item)
+    append_event(
+        {
+            "type": "state-transition",
+            "item_id": item["id"],
+            "actor": actor,
+            "previous_state": previous,
+            "next_state": state,
+            "reason": reason,
+            **{key: value for key, value in extra.items() if value is not None},
+        }
+    )
+    return item
+
+
+def cmd_classify(args: argparse.Namespace) -> int:
+    result = classify_text(args.text, args.approved)
+    print(json.dumps(result, sort_keys=True) if args.json else f"{result['classification']}: {result['reason']}")
+    return 0
+
+
+def cmd_enqueue(args: argparse.Namespace) -> int:
+    result = classify_text(args.text, args.approved)
+    if result["classification"] != "build":
+        append_event({"type": "request-rejected", "actor": args.actor, "reason": result["reason"], "source_text": args.text})
+        raise SystemExit(f"request is not queueable: {result['reason']}")
+    ensure_dirs()
+    created_at = now()
+    item_id = args.id or next_id(args.text, created_at)
+    path = item_path(item_id)
+    if path.exists():
+        raise SystemExit(f"queue item already exists: {item_id}")
+    item = {
+        "id": item_id,
+        "title": args.title or args.text.strip().splitlines()[0][:80],
+        "state": "queued",
+        "source_text": args.text,
+        "actor": args.actor,
+        "scope": args.scope,
+        "eligibility": result["reason"],
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    write_json(path, item)
+    append_event(
+        {
+            "type": "item-created",
+            "item_id": item_id,
+            "actor": args.actor,
+            "previous_state": None,
+            "next_state": "queued",
+            "reason": result["reason"],
+        }
+    )
+    print(item_id)
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    rows = [item for item in iter_items() if args.all or item.get("state") not in TERMINAL_STATES]
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    print(f"paused: {'yes' if queue_paused() else 'no'}")
+    for item in rows:
+        print(f"{item['id']}\t{item.get('state')}\t{item.get('title', '')}")
+    return 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    item = load_item(args.item_id)
+    events = [event for event in load_events() if event.get("item_id") == args.item_id]
+    print(json.dumps({"item": item, "events": events}, indent=2, sort_keys=True))
+    return 0
+
+
+def active_item() -> Optional[Dict[str, Any]]:
+    for item in iter_items():
+        if item.get("state") in ACTIVE_STATES:
+            return item
+    return None
+
+
+def cmd_start_next(args: argparse.Namespace) -> int:
+    if queue_paused():
+        raise SystemExit("queue is paused")
+    active = active_item()
+    if active:
+        raise SystemExit(f"active item exists: {active['id']}")
+    for item in iter_items():
+        if item.get("state") == "queued":
+            item = mutate_state(item, "shaping", args.actor, args.reason)
+            print(item["id"])
+            return 0
+    raise SystemExit("no queued item available")
+
+
+def cmd_pause(args: argparse.Namespace) -> int:
+    append_event({"type": "queue-paused", "actor": args.actor, "reason": args.reason})
+    print("paused")
+    return 0
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    append_event({"type": "queue-resumed", "actor": args.actor, "reason": args.reason})
+    print("resumed")
+    return 0
+
+
+def cmd_reject(args: argparse.Namespace) -> int:
+    item = load_item(args.item_id)
+    if item.get("state") == "cleared":
+        raise SystemExit("cannot reject a cleared item")
+    mutate_state(item, "rejected", args.actor, args.reason)
+    print(args.item_id)
+    return 0
+
+
+def cmd_clear_current(args: argparse.Namespace) -> int:
+    item = active_item()
+    if not item:
+        raise SystemExit("no active item")
+    if item.get("state") not in {"delivered", "e2e-testing-runbooks"}:
+        raise SystemExit(f"item must be delivered before clearance: {item['id']} is {item.get('state')}")
+    if not args.e2e_run and not args.waiver:
+        raise SystemExit("clear-current requires --e2e-run or --waiver")
+    evidence = {
+        "e2e_run": args.e2e_run,
+        "e2e_result": args.e2e_result,
+        "waiver": args.waiver,
+    }
+    mutate_state(item, "cleared", args.actor, args.reason, **evidence)
+    print(item["id"])
+    return 0
+
+
+def cmd_transition(args: argparse.Namespace) -> int:
+    item = load_item(args.item_id)
+    if item.get("state") in TERMINAL_STATES:
+        raise SystemExit(f"cannot transition terminal item: {args.item_id}")
+    mutate_state(item, args.state, args.actor, args.reason)
+    print(args.item_id)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="FIFO request queue for cockpit overseers")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    classify = sub.add_parser("classify")
+    classify.add_argument("--text", required=True)
+    classify.add_argument("--approved", action="store_true")
+    classify.add_argument("--json", action="store_true")
+    classify.set_defaults(func=cmd_classify)
+
+    enqueue = sub.add_parser("enqueue")
+    enqueue.add_argument("--text", required=True)
+    enqueue.add_argument("--title")
+    enqueue.add_argument("--scope", default="build")
+    enqueue.add_argument("--actor", default="overseer")
+    enqueue.add_argument("--approved", action="store_true")
+    enqueue.add_argument("--id")
+    enqueue.set_defaults(func=cmd_enqueue)
+
+    list_cmd = sub.add_parser("list")
+    list_cmd.add_argument("--all", action="store_true")
+    list_cmd.add_argument("--json", action="store_true")
+    list_cmd.set_defaults(func=cmd_list)
+
+    inspect = sub.add_parser("inspect")
+    inspect.add_argument("item_id")
+    inspect.set_defaults(func=cmd_inspect)
+
+    pause = sub.add_parser("pause")
+    pause.add_argument("--actor", default="overseer")
+    pause.add_argument("--reason", default="operator pause")
+    pause.set_defaults(func=cmd_pause)
+
+    resume = sub.add_parser("resume")
+    resume.add_argument("--actor", default="overseer")
+    resume.add_argument("--reason", default="operator resume")
+    resume.set_defaults(func=cmd_resume)
+
+    reject = sub.add_parser("reject")
+    reject.add_argument("item_id")
+    reject.add_argument("--actor", default="overseer")
+    reject.add_argument("--reason", required=True)
+    reject.set_defaults(func=cmd_reject)
+
+    start_next = sub.add_parser("start-next")
+    start_next.add_argument("--actor", default="overseer")
+    start_next.add_argument("--reason", default="start next FIFO item")
+    start_next.set_defaults(func=cmd_start_next)
+
+    clear = sub.add_parser("clear-current")
+    clear.add_argument("--actor", default="overseer")
+    clear.add_argument("--reason", default="queue item complete")
+    clear.add_argument("--e2e-run")
+    clear.add_argument("--e2e-result", choices=["passed", "waived"], default="passed")
+    clear.add_argument("--waiver")
+    clear.set_defaults(func=cmd_clear_current)
+
+    transition = sub.add_parser("transition", help=argparse.SUPPRESS)
+    transition.add_argument("item_id")
+    transition.add_argument("state", choices=sorted(VALID_STATES - {"queued", "cleared", "rejected"}))
+    transition.add_argument("--actor", default="overseer")
+    transition.add_argument("--reason", required=True)
+    transition.set_defaults(func=cmd_transition)
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

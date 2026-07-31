@@ -13,6 +13,30 @@ green smoke run, with a squad of agents ready to take orders.
 
 ---
 
+## FIFO request queue
+
+Product ideas arrive in bursts, but cockpit workers must stay focused on one
+delivery at a time. Without a queue, the human operator either interrupts the
+current mission or leaves ideas buried in chat history.
+
+`copilotcockpit` solves that with a FIFO overseer request queue. The overseer can
+accept build-method ideas, reject non-build chatter, inspect queue depth, start
+the next item only when workers are ready, and clear an item only after the
+cockpit has local delivery evidence plus the queue-scoped E2E operator runbook
+result.
+
+Benefits:
+
+- **No orphan ideas**: accepted build requests persist until cleared or rejected.
+- **Lower overseer overhead**: queue commands replace repeated prompt boilerplate.
+- **Worker focus**: one active queue item prevents mission bleed across workers.
+- **Auditable delivery**: queue events link the idea, worker trace, and E2E run
+  evidence.
+- **Operator calm**: product owners can submit ideas at thought speed while the
+  cockpit delivers FIFO.
+
+---
+
 ## What is the Copilot Cockpit?
 
 Imagine a mission-control room for your codebase — built entirely inside
@@ -75,6 +99,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 | `cockpit-protocol` | Semantic tmux communication CLI for cockpit discovery, worker addressing, dispatch/send/tail/watch, status JSON, nudges, and report extraction. | yes |
 | `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
+| `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | planned |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
 | `aic-tracker` | Measure token/AIC spend and compare comms efficiency across sessions. | no (companion tool) |
 | `graphify` | Optional local code graph used by skills/workers before broad text search when `graphify-out/graph.json` exists. | no (companion tool) |

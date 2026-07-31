@@ -11,6 +11,7 @@
 #   * bin/cockpit-protocol.go -> ~/.local/bin/cockpit-protocol.go
 #   * bin/cockpit-overseer   -> ~/.local/bin/cockpit-overseer (+x)
 #   * bin/cockpit-trace      -> ~/.local/bin/cockpit-trace (+x)
+#   * bin/cockpit-queue      -> ~/.local/bin/cockpit-queue (+x)
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -58,6 +59,7 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit-protocol.go
   ~/.local/bin/cockpit-overseer       (+x)
   ~/.local/bin/cockpit-trace          (+x)
+  ~/.local/bin/cockpit-queue          (+x)
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -345,6 +347,7 @@ main() {
 	local cpg_src="$CC_ROOT/bin/cockpit-protocol.go"
 	local co_src="$CC_ROOT/bin/cockpit-overseer"
 	local ct_src="$CC_ROOT/bin/cockpit-trace"
+	local cq_src="$CC_ROOT/bin/cockpit-queue"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
@@ -352,6 +355,7 @@ main() {
 	local cpg_dst="$home_bin/cockpit-protocol.go"
 	local co_dst="$home_bin/cockpit-overseer"
 	local ct_dst="$home_bin/cockpit-trace"
+	local cq_dst="$home_bin/cockpit-queue"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -382,6 +386,10 @@ main() {
 	fi
 	if [[ ! -f "$ct_src" ]]; then
 		log_error "required source missing: $ct_src"
+		missing=1
+	fi
+	if [[ ! -f "$cq_src" ]]; then
+		log_error "required source missing: $cq_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -423,6 +431,10 @@ main() {
 	cc_place "$ct_src" "$ct_dst" || return 1
 	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
 		cc_run chmod +x "$ct_dst" || return 1
+	fi
+	cc_place "$cq_src" "$cq_dst" || return 1
+	if [[ "$_CC_LINK_MODE" -ne 1 ]]; then
+		cc_run chmod +x "$cq_dst" || return 1
 	fi
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------

@@ -1,5 +1,10 @@
 # Session Log — copilotcockpit
 
+- 2026-07-31T11:09:14+01:00 — User accepted TH2 delivery checkpoint; locked FIFO overseer request queue theme. — copilotcockpit
+- 2026-07-31T11:09:14+01:00 — Implemented TH2 queue runtime: added cockpit-queue CLI, install/uninstall/doctor wiring, queue unit tests, and queue-scoped overseer/e2e-operator runbook updates. — copilotcockpit
+- 2026-07-30T20:47:56+01:00 — Advanced TH2 to architecture/planning: updated architecture overview with FIFO queue component model and added TH2 epic issue templates. — copilotcockpit
+- 2026-07-30T19:56:41+01:00 — Kickstarted VP2 FIFO overseer request queue; accepted queue-directory persistence ADR; added TH2 with queue operator and E2E clearance stories. — copilotcockpit
+
 A running log of lifecycle ceremonies and significant decisions.
 
 ---
