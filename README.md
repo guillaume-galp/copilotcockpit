@@ -23,7 +23,9 @@ current mission or leaves ideas buried in chat history.
 accept build-method ideas, reject non-build chatter, inspect queue depth, start
 the next item only when workers are ready, and clear an item only after the
 cockpit has local delivery evidence plus the queue-scoped E2E operator runbook
-result.
+result. Set `COCKPIT_QUEUE_ROOT` to the intended `docs/queue` directory before
+running queue commands so independent cockpits never share or corrupt each
+other's FIFO state.
 
 Benefits:
 
@@ -99,7 +101,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 | `cockpit-protocol` | Semantic tmux communication CLI for cockpit discovery, worker addressing, dispatch/send/tail/watch, status JSON, nudges, and report extraction. | yes |
 | `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
-| `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | planned |
+| `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | yes |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
 | `aic-tracker` | Measure token/AIC spend and compare comms efficiency across sessions. | no (companion tool) |
 | `graphify` | Optional local code graph used by skills/workers before broad text search when `graphify-out/graph.json` exists. | no (companion tool) |

@@ -8,6 +8,38 @@ setup() {
 	export COCKPIT_QUEUE_ROOT="$BATS_TEST_TMPDIR/queue"
 }
 
+@test "queue root must be explicit to avoid crossing cockpit scopes" {
+	unset COCKPIT_QUEUE_ROOT
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" list
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "COCKPIT_QUEUE_ROOT is required"
+}
+
+@test "queue root may come from current tmux session environment" {
+	unset COCKPIT_QUEUE_ROOT
+	export TMUX="$BATS_TEST_TMPDIR/tmux-socket,123,0"
+	mkdir -p "$BATS_TEST_TMPDIR/bin"
+	cat >"$BATS_TEST_TMPDIR/bin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "show-environment" ] && [ "\$2" = "COCKPIT_QUEUE_ROOT" ]; then
+  printf 'COCKPIT_QUEUE_ROOT=%s\n' "$BATS_TEST_TMPDIR/tmux-queue"
+  exit 0
+fi
+exit 1
+EOF
+	chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
+	export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue \
+		--id QI-tmux \
+		--text "A /the-copilot-build-method" \
+		--actor overseer
+	[ "$status" -eq 0 ]
+	[ "$output" = "QI-tmux" ]
+	[ -f "$BATS_TEST_TMPDIR/tmux-queue/items/QI-tmux.yaml" ]
+}
+
 @test "enqueue accepts build-method requests and persists item plus event" {
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue \
 		--id QI-test-1 \
@@ -56,6 +88,33 @@ setup() {
 	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" resume >/dev/null
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" start-next
 	[ "$status" -eq 0 ]
+}
+
+@test "pause does not block enqueue intake" {
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" pause >/dev/null
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue \
+		--id QI-a \
+		--text "A /the-copilot-build-method" \
+		--actor overseer
+	[ "$status" -eq 0 ]
+	[ "$output" = "QI-a" ]
+	grep -q '"state": "queued"' "$COCKPIT_QUEUE_ROOT/items/QI-a.yaml"
+}
+
+@test "multiple active items fail before starting or clearing work" {
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue --id QI-a --text "A /the-copilot-build-method" >/dev/null
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue --id QI-b --text "B /the-copilot-build-method" >/dev/null
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" transition QI-a shaping --reason "simulate active one" >/dev/null
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" transition QI-b shaping --reason "simulate active two" >/dev/null
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" start-next
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "multiple active items detected: QI-a, QI-b"
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" clear-current --waiver "human recovery"
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "multiple active items detected: QI-a, QI-b"
 }
 
 @test "clear-current requires delivered state and E2E evidence or waiver" {
