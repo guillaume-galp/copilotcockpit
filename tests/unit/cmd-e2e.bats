@@ -25,6 +25,10 @@ setup() {
 	[ "$status" -eq 0 ]
 	[ -f "$proj/e2e/playwright.config.ts" ]
 	[ -f "$proj/e2e/MANIFEST.toml" ]
+	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"' "$proj/e2e/tmux-cockpit.sh"
+	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"' "$proj/e2e/tmux-cockpit.sh"
+	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"' "$proj/e2e/tmux-cockpit-local.sh"
+	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"' "$proj/e2e/tmux-cockpit-local.sh"
 }
 
 # --- idempotency: --update twice yields the same state, no new backup --------

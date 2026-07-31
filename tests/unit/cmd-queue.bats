@@ -16,6 +16,30 @@ setup() {
 	echo "$output" | grep -q "COCKPIT_QUEUE_ROOT is required"
 }
 
+@test "queue root may come from current tmux session environment" {
+	unset COCKPIT_QUEUE_ROOT
+	export TMUX="$BATS_TEST_TMPDIR/tmux-socket,123,0"
+	mkdir -p "$BATS_TEST_TMPDIR/bin"
+	cat >"$BATS_TEST_TMPDIR/bin/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "show-environment" ] && [ "\$2" = "COCKPIT_QUEUE_ROOT" ]; then
+  printf 'COCKPIT_QUEUE_ROOT=%s\n' "$BATS_TEST_TMPDIR/tmux-queue"
+  exit 0
+fi
+exit 1
+EOF
+	chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
+	export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue \
+		--id QI-tmux \
+		--text "A /the-copilot-build-method" \
+		--actor overseer
+	[ "$status" -eq 0 ]
+	[ "$output" = "QI-tmux" ]
+	[ -f "$BATS_TEST_TMPDIR/tmux-queue/items/QI-tmux.yaml" ]
+}
+
 @test "enqueue accepts build-method requests and persists item plus event" {
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue \
 		--id QI-test-1 \

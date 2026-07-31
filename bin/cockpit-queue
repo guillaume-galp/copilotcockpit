@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,13 +32,34 @@ def now() -> str:
 
 
 def queue_root() -> Path:
-    root = os.environ.get("COCKPIT_QUEUE_ROOT")
+    root = os.environ.get("COCKPIT_QUEUE_ROOT") or tmux_queue_root()
     if not root:
         raise SystemExit(
-            "COCKPIT_QUEUE_ROOT is required; set it to the cockpit FIFO queue root "
-            "(for example: /path/to/repo/docs/queue)"
+            "COCKPIT_QUEUE_ROOT is required; set it in the shell or tmux session "
+            "environment to the cockpit FIFO queue root (for example: /path/to/repo/docs/queue)"
         )
     return Path(root)
+
+
+def tmux_queue_root() -> Optional[str]:
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["tmux", "show-environment", "COCKPIT_QUEUE_ROOT"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    prefix = "COCKPIT_QUEUE_ROOT="
+    value = proc.stdout.strip()
+    if value.startswith(prefix):
+        return value[len(prefix) :]
+    return None
 
 
 def items_dir() -> Path:

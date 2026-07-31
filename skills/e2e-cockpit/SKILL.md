@@ -256,7 +256,12 @@ current directory, because a machine may host multiple independent FIFO queues:
 
 ```bash
 export COCKPIT_QUEUE_ROOT="<repo-or-cockpit>/docs/queue"
+tmux set-environment -t "<session>" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
 ```
+
+Generated cockpit launchers should set this tmux session environment when the
+session starts. `cockpit-queue` may read `COCKPIT_QUEUE_ROOT` from the shell or
+from the current tmux session environment, but it must never infer it from `cwd`.
 
 ### Queue intake
 
