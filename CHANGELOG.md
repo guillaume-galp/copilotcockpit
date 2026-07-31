@@ -17,6 +17,29 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.8.0 — 2026-07-31
+
+### Added
+- Added `cockpit-queue`, a FIFO overseer request queue CLI for classifying,
+  enqueueing, inspecting, pausing/resuming, rejecting, starting, and clearing
+  build requests.
+- Added queue persistence under `docs/queue/items/<id>.yaml` with append-only
+  transition history in `docs/queue/events.jsonl`.
+- Added queue-scoped E2E clearance rules: a queue item can clear only after
+  local delivery evidence plus governed runbook evidence or an explicit waiver.
+
+### Changed
+- Featured the FIFO queue use case in the README with problem, solution, and
+  benefits.
+- Wired `cockpit-queue` into global install, doctor, uninstall, and integration
+  smoke checks.
+- Updated `e2e-cockpit` and `e2e-operator` skills with queue loop and clearance
+  report guidance.
+
+### Tests
+- Added unit coverage for queue intake, rejection, FIFO start behavior,
+  pause/resume, and clearance evidence.
+
 ## v0.7.2 — 2026-07-29
 
 ### Fixed
