@@ -17,6 +17,16 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.8.2 — 2026-07-31
+
+### Fixed
+- Made `cockpit-wake` press Enter explicitly after pasting a scheduled wake
+  message into the target tmux pane, with a `C-m` fallback for compatibility.
+
+### Tests
+- Added fake-tmux regression coverage proving `cockpit-wake fire` pastes the
+  wake message and submits it in the target pane.
+
 ## v0.8.1 — 2026-07-31
 
 ### Fixed
