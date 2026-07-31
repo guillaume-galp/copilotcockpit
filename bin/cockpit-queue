@@ -31,7 +31,13 @@ def now() -> str:
 
 
 def queue_root() -> Path:
-    return Path(os.environ.get("COCKPIT_QUEUE_ROOT", "docs/queue"))
+    root = os.environ.get("COCKPIT_QUEUE_ROOT")
+    if not root:
+        raise SystemExit(
+            "COCKPIT_QUEUE_ROOT is required; set it to the cockpit FIFO queue root "
+            "(for example: /path/to/repo/docs/queue)"
+        )
+    return Path(root)
 
 
 def items_dir() -> Path:
@@ -221,17 +227,26 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
-def active_item() -> Optional[Dict[str, Any]]:
-    for item in iter_items():
-        if item.get("state") in ACTIVE_STATES:
-            return item
-    return None
+def active_items() -> List[Dict[str, Any]]:
+    return [item for item in iter_items() if item.get("state") in ACTIVE_STATES]
+
+
+def single_active_item() -> Optional[Dict[str, Any]]:
+    active = active_items()
+    if len(active) > 1:
+        ids = ", ".join(item["id"] for item in active)
+        raise SystemExit(
+            "multiple active items detected: "
+            f"{ids}. Pause dispatch, inspect active items, keep the earliest valid item, "
+            "and transition/reset the others before continuing."
+        )
+    return active[0] if active else None
 
 
 def cmd_start_next(args: argparse.Namespace) -> int:
     if queue_paused():
         raise SystemExit("queue is paused")
-    active = active_item()
+    active = single_active_item()
     if active:
         raise SystemExit(f"active item exists: {active['id']}")
     for item in iter_items():
@@ -264,7 +279,7 @@ def cmd_reject(args: argparse.Namespace) -> int:
 
 
 def cmd_clear_current(args: argparse.Namespace) -> int:
-    item = active_item()
+    item = single_active_item()
     if not item:
         raise SystemExit("no active item")
     if item.get("state") not in {"delivered", "e2e-testing-runbooks"}:

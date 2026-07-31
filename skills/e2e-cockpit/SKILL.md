@@ -227,6 +227,37 @@ Workers block waiting for the answer file — never leave them hanging.
 Use the queue for build-method requests and explicitly approved build work that
 should not interrupt the current worker mission.
 
+### Dual-state contract: SQL vs FIFO
+
+The native Copilot CLI SQL tables (`todos`, `todo_deps`, `inbox_entries`, and
+session scratch tables) are **session-local operational state**. Use SQL for raw
+idea staging, worker mission tracking, ephemeral todos, and dependencies inside a
+single overseer session.
+
+`cockpit-queue` is the **durable product FIFO** for accepted build requests. Any
+accepted request tagged with `/the-copilot-build-method`, or explicitly approved
+for cockpit-framework build work, must be promoted into `cockpit-queue` before
+workers start implementation.
+
+Rules when both exist:
+
+- FIFO item state is authoritative for product progress and clearance.
+- SQL completion never clears a FIFO item; only `cockpit-queue clear-current`
+  can do that.
+- Every SQL todo derived from a FIFO item must include `source_item_id=<QI-ID>`
+  in its description or equivalent task metadata.
+- Every staged SQL idea promoted into FIFO must be marked
+  `promoted_to=<QI-ID>`; keep the SQL row as audit/scratch state, not as the
+  source of truth.
+- Do not use SQL queues to skip FIFO ordering for durable product work.
+
+Before any queue command, set the queue root explicitly. Never rely on the
+current directory, because a machine may host multiple independent FIFO queues:
+
+```bash
+export COCKPIT_QUEUE_ROOT="<repo-or-cockpit>/docs/queue"
+```
+
 ### Queue intake
 
 ```bash
@@ -239,6 +270,9 @@ cockpit-queue enqueue --text "<request containing /the-copilot-build-method>" --
 # accepted by explicit overseer approval
 cockpit-queue enqueue --text "<request>" --approved --actor overseer
 ```
+
+Queue pause blocks only `start-next`. Enqueueing remains free-flowing so the
+human can keep adding ideas while delivery is paused.
 
 Do not enqueue questions, pure diagnostics, reminders, or unrelated commands.
 Use `cockpit-queue reject <id> --reason "<why>"` for an existing item that is
@@ -258,11 +292,14 @@ cockpit-protocol status --workers all --json
 Rules:
 
 - Start the next item only when no item is already active.
+- If `cockpit-queue` reports multiple active items, stop dispatching, inspect the
+  active QI-IDs, keep the earliest valid item, transition/reset the others, then
+  resume the FIFO pace.
 - Preserve FIFO order unless the human explicitly overrides it.
 - Never dispatch to a busy worker.
 - Keep the queue item ID in every worker mission and trace/report.
 - Pause/resume with `cockpit-queue pause` and `cockpit-queue resume` when the
-  human wants intake to stop advancing.
+  human wants `start-next` advancement to stop.
 
 ### Queue states
 

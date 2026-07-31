@@ -178,6 +178,12 @@ When the run is for a queue item, include:
     command: cockpit-queue clear-current --e2e-run RUN-<id> --e2e-result passed
 ```
 
+Set `COCKPIT_QUEUE_ROOT` explicitly before using `cockpit-queue`; never infer it
+from the current directory when multiple cockpits or repositories may have their
+own FIFO queues. SQL todos or inbox rows may reference the run as session-local
+scratch state, but they are not clearance evidence unless the report also names
+the FIFO `QI-ID` and the governed runbook `RUN-ID`.
+
 Only report `clearance: eligible` when the governed runbook evidence is green for
 the required scope. If failures remain, report `clearance: blocked` and classify
 the failure so the overseer can move the queue item through
