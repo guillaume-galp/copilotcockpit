@@ -25,6 +25,9 @@ setup() {
 	[ ! -e "$HOME/.local/bin/cockpit-wake" ]
 	[ ! -e "$HOME/.local/bin/cockpit-protocol" ]
 	[ ! -e "$HOME/.local/bin/cockpit-protocol.go" ]
+	[ ! -e "$HOME/.local/bin/cockpit-overseer" ]
+	[ ! -e "$HOME/.local/bin/cockpit-trace" ]
+	[ ! -e "$HOME/.local/bin/cockpit-queue" ]
 	[ -f "$HOME/.copilot/skills/unrelated/SKILL.md" ]
 	[ -f "$HOME/.agents/skills/unrelated/SKILL.md" ]
 }
@@ -44,6 +47,9 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
+	[ -f "$HOME/.local/bin/cockpit-overseer" ]
+	[ -f "$HOME/.local/bin/cockpit-trace" ]
+	[ -f "$HOME/.local/bin/cockpit-queue" ]
 }
 
 @test "uninstall --codex-only leaves Copilot skills and cockpit tools" {
@@ -60,6 +66,9 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit-wake" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol" ]
 	[ -f "$HOME/.local/bin/cockpit-protocol.go" ]
+	[ -f "$HOME/.local/bin/cockpit-overseer" ]
+	[ -f "$HOME/.local/bin/cockpit-trace" ]
+	[ -f "$HOME/.local/bin/cockpit-queue" ]
 }
 
 @test "uninstall: unknown option exits 2" {

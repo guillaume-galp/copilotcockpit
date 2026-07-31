@@ -10,6 +10,11 @@ vision_phases:
     title: "One-command bootstrap for the Copilot E2E testing harness"
     status: architecture_complete
     path: docs/vision_of_product/VP1-e2e-bootstrap/VP1.md
+  - id: VP2
+    slug: fifo-overseer-request-queue
+    title: "FIFO overseer request queue"
+    status: planned
+    path: docs/vision_of_product/VP2-fifo-overseer-request-queue/VP2.md
 
 architecture:
   overview: docs/architecture/overview.md
@@ -46,6 +51,10 @@ architecture:
       title: "copilotcockpit-dev skill & GitOps release flow"
       status: accepted
       path: docs/ADRs/ADR-008-copilotcockpit-dev-skill.md
+    - id: ADR-010
+      title: "FIFO queue persistence"
+      status: accepted
+      path: docs/ADRs/ADR-010-fifo-queue-persistence.md
 
 themes:
   - id: TH1
@@ -220,3 +229,46 @@ themes:
             size: M
             path: docs/themes/TH1-bootstrap-tooling/E5-dev-skill-test-infra/US3-copilotcockpit-dev-skill.md
             depends_on: [TH1-E4-US2]
+
+  - id: TH2
+    slug: fifo-overseer-request-queue
+    vision: VP2-fifo-overseer-request-queue
+    title: "FIFO overseer request queue"
+    status: done
+    locked: true
+    readme: docs/themes/TH2-fifo-overseer-request-queue/README.md
+    epics:
+      - id: TH2.E1
+        title: "Queue operator"
+        slug: queue-operator
+        status: done
+        stories:
+          - id: TH2.E1.US1
+            title: "Queue intake and classification"
+            status: done
+            size: M
+            path: docs/themes/TH2-fifo-overseer-request-queue/E1-queue-operator/stories/US1-queue-intake-classification.md
+            depends_on: []
+          - id: TH2.E1.US2
+            title: "Queue persistence and CLI operations"
+            status: done
+            size: M
+            path: docs/themes/TH2-fifo-overseer-request-queue/E1-queue-operator/stories/US2-queue-persistence-cli.md
+            depends_on: [TH2.E1.US1]
+      - id: TH2.E2
+        title: "Cockpit E2E operations"
+        slug: cockpit-e2e-operations
+        status: done
+        stories:
+          - id: TH2.E2.US1
+            title: "Overseer FIFO worker loop"
+            status: done
+            size: M
+            path: docs/themes/TH2-fifo-overseer-request-queue/E2-cockpit-e2e-operations/stories/US1-overseer-fifo-worker-loop.md
+            depends_on: [TH2.E1.US2]
+          - id: TH2.E2.US2
+            title: "E2E operator clearance gate"
+            status: done
+            size: M
+            path: docs/themes/TH2-fifo-overseer-request-queue/E2-cockpit-e2e-operations/stories/US2-e2e-operator-clearance-gate.md
+            depends_on: [TH2.E2.US1]

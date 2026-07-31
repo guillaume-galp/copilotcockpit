@@ -44,6 +44,7 @@ setup() {
 	echo "$output" | grep -q "cockpit-protocol"
 	echo "$output" | grep -q "cockpit-overseer"
 	echo "$output" | grep -q "cockpit-trace"
+	echo "$output" | grep -q "cockpit-queue"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
@@ -51,6 +52,7 @@ setup() {
 	[ ! -e "$HOME/.local/bin/cockpit-protocol" ]
 	[ ! -e "$HOME/.local/bin/cockpit-overseer" ]
 	[ ! -e "$HOME/.local/bin/cockpit-trace" ]
+	[ ! -e "$HOME/.local/bin/cockpit-queue" ]
 }
 
 @test "codex-global --dry-run lists all 8 managed skills" {
@@ -77,6 +79,7 @@ setup() {
 	echo "$output" | grep -q "$HOME/.agents/skills/worker-dev/SKILL.md"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-wake"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-protocol"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit-queue"
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.agents" ]
 	[ ! -e "$HOME/.local" ]

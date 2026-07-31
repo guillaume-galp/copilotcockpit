@@ -62,6 +62,12 @@ Protocol verbs:
 | `meta cockpit --json` | Discover active cockpit session, windows, and workers |
 | `status --workers all --json` | Read worker state without manual pane tails |
 
+Queue verb:
+
+| Tool | Purpose |
+|------|---------|
+| `cockpit-queue` | FIFO request queue CLI: `enqueue`, `list`, `inspect`, `classify`, `pause`, `resume`, `reject`, `start-next`, `clear-current` |
+
 ### Code intelligence
 
 When the target repository has `graphify-out/graph.json` and the `graphify` CLI
@@ -213,6 +219,69 @@ If any exist:
 3. Write answer: `cockpit-protocol reply --worker worker-<name> --answer "<answer>"`
 
 Workers block waiting for the answer file — never leave them hanging.
+
+---
+
+## FIFO Request Queue — Overseer Duty
+
+Use the queue for build-method requests and explicitly approved build work that
+should not interrupt the current worker mission.
+
+### Queue intake
+
+```bash
+# classify before enqueueing when the request is ambiguous
+cockpit-queue classify --text "<request>"
+
+# accepted automatically when build-method-tagged
+cockpit-queue enqueue --text "<request containing /the-copilot-build-method>" --actor overseer
+
+# accepted by explicit overseer approval
+cockpit-queue enqueue --text "<request>" --approved --actor overseer
+```
+
+Do not enqueue questions, pure diagnostics, reminders, or unrelated commands.
+Use `cockpit-queue reject <id> --reason "<why>"` for an existing item that is
+not buildable.
+
+### Queue loop
+
+Before dispatching new work:
+
+```bash
+cockpit-queue list
+cockpit-queue start-next --actor overseer
+cockpit-queue inspect <queue-id>
+cockpit-protocol status --workers all --json
+```
+
+Rules:
+
+- Start the next item only when no item is already active.
+- Preserve FIFO order unless the human explicitly overrides it.
+- Never dispatch to a busy worker.
+- Keep the queue item ID in every worker mission and trace/report.
+- Pause/resume with `cockpit-queue pause` and `cockpit-queue resume` when the
+  human wants intake to stop advancing.
+
+### Queue states
+
+`queued -> shaping -> planned -> implementing -> testing -> fixing -> delivered -> e2e-testing-runbooks -> e2e-related-fixing -> cleared`
+
+`blocked` and `rejected` are escape states.
+
+### Clearance
+
+A queue item may clear only after local delivery evidence and queue-scoped E2E
+operator evidence, or an explicit human waiver:
+
+```bash
+cockpit-queue clear-current --e2e-run RUN-<id> --e2e-result passed --reason "delivered and runbook green"
+cockpit-queue clear-current --waiver "<human-approved waiver>" --e2e-result waived
+```
+
+If worker-test reports failures, transition the item through
+`e2e-related-fixing` and dispatch one focused fix at a time.
 
 ---
 

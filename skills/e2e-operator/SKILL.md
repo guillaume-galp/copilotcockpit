@@ -27,6 +27,7 @@ You never fix code yourself. You diagnose, classify, and hand off.
 | `e2e/governance/GOVERNANCE.md` | Maneuver guide, cadences, failure protocol |
 | `cockpit-protocol` | Required cockpit communication and pane-observability CLI |
 | `cockpit-overseer` | Required short-loop/status helper for polling worker panes |
+| `cockpit-queue` | Queue-scoped clearance evidence helper when worker-test runs for a FIFO item |
 
 If the repository has `graphify-out/graph.json` and `graphify` is available, use
 `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"` before
@@ -167,6 +168,20 @@ WORKER-TEST RESULT
   smoke P0: ✅ N/N | ❌ N/N
   status: GREEN | RED | INFRA-BLOCKED
 ```
+
+When the run is for a queue item, include:
+
+```
+  queue:
+    item: <queue-id>
+    clearance: eligible | blocked | waived
+    command: cockpit-queue clear-current --e2e-run RUN-<id> --e2e-result passed
+```
+
+Only report `clearance: eligible` when the governed runbook evidence is green for
+the required scope. If failures remain, report `clearance: blocked` and classify
+the failure so the overseer can move the queue item through
+`e2e-related-fixing`.
 
 ---
 

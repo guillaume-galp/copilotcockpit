@@ -7,6 +7,9 @@
 #   * ~/.local/bin/cockpit-wake
 #   * ~/.local/bin/cockpit-protocol
 #   * ~/.local/bin/cockpit-protocol.go
+#   * ~/.local/bin/cockpit-overseer
+#   * ~/.local/bin/cockpit-trace
+#   * ~/.local/bin/cockpit-queue
 #
 # It never removes unrelated skills, backup files, parent skills directories, or
 # repository-scoped Codex overlays under a checkout.
@@ -30,12 +33,15 @@ Remove copilotcockpit's managed user-scoped install:
   ~/.local/bin/cockpit-wake
   ~/.local/bin/cockpit-protocol
   ~/.local/bin/cockpit-protocol.go
+  ~/.local/bin/cockpit-overseer
+  ~/.local/bin/cockpit-trace
+  ~/.local/bin/cockpit-queue
 
 Options:
   --dry-run             Describe removals; change nothing.
   --copilot-only        Remove only legacy Copilot skills and cockpit tools.
   --codex-only          Remove only Codex user skills.
-  --keep-cockpit-tools  Leave ~/.local/bin/cockpit-wake, cockpit-protocol, and cockpit-protocol.go in place.
+  --keep-cockpit-tools  Leave ~/.local/bin/cockpit-* tools in place.
   -h, --help            Show this help and exit.
 EOF
 }
@@ -122,6 +128,9 @@ if [[ "$cc_target_bin" -ne 0 ]]; then
 	cc_remove_file "$HOME/.local/bin/cockpit-wake"
 	cc_remove_file "$HOME/.local/bin/cockpit-protocol"
 	cc_remove_file "$HOME/.local/bin/cockpit-protocol.go"
+	cc_remove_file "$HOME/.local/bin/cockpit-overseer"
+	cc_remove_file "$HOME/.local/bin/cockpit-trace"
+	cc_remove_file "$HOME/.local/bin/cockpit-queue"
 fi
 
 cc_log "uninstall complete"

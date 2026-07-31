@@ -21,6 +21,7 @@ Every significant decision is recorded as an ADR and linked inline.
 | P4 | **Idempotent & non-destructive.** | Re-running any command converges; updates refresh framework files and never touch project-owned content. ([ADR-006](../ADRs/ADR-006-template-update-strategy.md)) |
 | P5 | **No external dependencies** beyond what the harness already needs: `bash`, `git`, `node`/`npm`, `docker`, `python3`. | Installs on a near-fresh machine; works behind corporate proxies. |
 | P6 | **Self-explaining.** | `bootstrap.sh` with no args prints usage; every script keeps `--help`. |
+| P7 | **Queue-first cockpit operations.** | The overseer can persist build requests and process them FIFO without disturbing active worker missions. ([ADR-010](../ADRs/ADR-010-fifo-queue-persistence.md)) |
 
 ---
 
@@ -63,7 +64,8 @@ copilotcockpit/
 │   └── copilotcockpit-dev/SKILL.md  # 8th skill: GitOps delivery runbook (ADR-008)
 │
 ├── bin/
-│   └── cockpit-wake              # vendored single-file Python CLI (ADR-005)
+│   ├── cockpit-wake              # vendored single-file Python CLI (ADR-005)
+│   └── cockpit-queue             # planned FIFO request queue CLI (ADR-010)
 │
 ├── templates/
 │   └── e2e/                      # the full parameterisable e2e/ scaffold (ADR-002/004)
@@ -151,6 +153,58 @@ copilotcockpit/
                     └────────────────────────────────┘
                           (AI skills complete the topology)
 ```
+
+### 3.1 FIFO request queue architecture (TH2)
+
+The queue capability is cockpit runtime scope. It is deliberately separate from
+autopilot Gitflow tooling: `copilotcockpit` owns intake, FIFO selection, worker
+coordination, and queue-scoped E2E clearance; external delivery methods can call
+into the queue but do not own queue state.
+
+```
+   Human / product owner
+            │
+            │ cockpit-queue enqueue|classify|reject
+            ▼
+   ┌────────────────────┐
+   │   cockpit-queue    │
+   │  FIFO queue CLI    │
+   └──────┬─────────────┘
+          │ atomic item write + append event
+          ▼
+   ┌──────────────────────────────┐
+   │ docs/queue/                  │
+   │  items/<queue-id>.yaml       │ canonical item state
+   │  events.jsonl                │ append-only transitions
+   └──────┬───────────────────────┘
+          │ start-next / inspect
+          ▼
+   ┌────────────────────┐
+   │ e2e-cockpit        │ overseer runbook
+   │ overseer skill     │
+   └──┬────────┬────────┘
+      │        │
+      │        ├── worker-dev / worker-fix: one scoped mission at a time
+      │        │
+      ▼        ▼
+   worker-test (`e2e-operator`) runs governed runbook before clear-current
+```
+
+#### Queue data ownership
+
+| Data | Owner | Interface |
+|------|-------|-----------|
+| Queue item state | `cockpit-queue` | `docs/queue/items/<queue-id>.yaml` |
+| Queue transition history | `cockpit-queue` | `docs/queue/events.jsonl` |
+| Worker dispatch trace | `e2e-cockpit` / `cockpit-overseer` | trace ID stored on queue events |
+| E2E evidence | `worker-test` / `e2e-operator` | run ID, scope, result stored before `cleared` |
+
+#### Queue clearance invariant
+
+`clear-current` must fail unless the current item has local delivery evidence and
+either queue-scoped governed E2E evidence or an explicit human waiver. Failed E2E
+runs transition the item through `e2e-related-fixing` before another clearance
+attempt.
 
 ---
 
