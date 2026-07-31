@@ -17,6 +17,12 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.8.1 — 2026-07-31
+
+### Fixed
+- Enforced the dual-queue contract so cockpit request queue operations require an explicit, scoped queue root instead of falling back to shared state.
+- Isolated queue roots per cockpit tmux session so concurrent cockpit sessions keep independent overseer request queues.
+
 ## v0.8.0 — 2026-07-31
 
 ### Added
