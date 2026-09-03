@@ -15,9 +15,15 @@ vision_phases:
     title: "FIFO overseer request queue"
     status: planned
     path: docs/vision_of_product/VP2-fifo-overseer-request-queue/VP2.md
+  - id: VP3
+    slug: overseer-orchestration-resilience
+    title: "Holistic cockpit control plane and overseer resilience"
+    status: architecture_complete
+    path: docs/vision_of_product/VP3-overseer-orchestration-resilience/VP3.md
 
 architecture:
   overview: docs/architecture/overview.md
+  control_plane: docs/architecture/overseer-control-plane.md
   adrs:
     - id: ADR-001
       title: "Skills source-of-truth strategy"
@@ -55,6 +61,34 @@ architecture:
       title: "FIFO queue persistence"
       status: accepted
       path: docs/ADRs/ADR-010-fifo-queue-persistence.md
+    - id: ADR-011
+      title: "Cockpit control-plane ownership"
+      status: accepted
+      path: docs/ADRs/ADR-011-control-plane-ownership.md
+    - id: ADR-012
+      title: "Versioned file-backed control store"
+      status: accepted
+      path: docs/ADRs/ADR-012-control-store-persistence.md
+    - id: ADR-013
+      title: "Worker lifecycle and idempotent mission commands"
+      status: accepted
+      path: docs/ADRs/ADR-013-worker-lifecycle-command-protocol.md
+    - id: ADR-014
+      title: "Deterministic control-plane reconciliation"
+      status: accepted
+      path: docs/ADRs/ADR-014-deterministic-reconciliation.md
+    - id: ADR-015
+      title: "Intent-aware wake leases and termination"
+      status: accepted
+      path: docs/ADRs/ADR-015-intent-aware-wake-leases.md
+    - id: ADR-016
+      title: "Evidence correlation and declared mission boundaries"
+      status: accepted
+      path: docs/ADRs/ADR-016-trace-and-boundary-correlation.md
+    - id: ADR-017
+      title: "Additive control-plane adoption and migration"
+      status: accepted
+      path: docs/ADRs/ADR-017-control-plane-compatibility.md
 
 themes:
   - id: TH1
