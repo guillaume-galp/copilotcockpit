@@ -24,12 +24,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 CONTROL_SCHEMA_VERSION = 1
 CONTROL_METADATA_NAME = "control.json"
 LEDGER_NAME = "ledger.json"
 EVENTS_NAME = "events.jsonl"
+# Derived projections are replaced through one reusable temporary path each, so
+# an interruption can only leave a named non-authoritative file behind.
+LEDGER_TEMPORARY_NAME = f"{LEDGER_NAME}.tmp"
+EVENTS_VIEW_TEMPORARY_NAME = f"{EVENTS_NAME}.tmp"
 EVENTS_DIR_NAME = "events"
 PENDING_DIR_NAME = "pending"
 EVENT_FILENAME_SUFFIX = ".json"
@@ -38,6 +42,14 @@ EVENT_FILENAME_SUFFIX = ".json"
 EVENT_REVISION_DIGITS = 12
 DEFAULT_EVENT_ACTOR = "cockpit-control"
 DEFAULT_EVENT_COMMAND = "cockpit-control publish-event"
+DEFAULT_LEDGER_COMMAND = "cockpit-control replay-ledger"
+# The ledger fields a committed event may declare in its payload.  Nothing else
+# in an event can move derived state, so the projection is a total function of
+# the committed sequence.
+LEDGER_PROJECTION_FIELDS = ("active_queue_item_id", "active_mission_id")
+# Derived identity is a function of the control root identity, so every replay
+# of the same committed sequence rebuilds byte-identical bytes.
+LEDGER_ID_DERIVATION_NAME = "cockpit-control/ledger"
 COMMANDS_DIR_NAME = "commands"
 ESCALATIONS_DIR_NAME = "escalations"
 LOCKS_DIR_NAME = "locks"
@@ -65,6 +77,21 @@ LOCK_REPAIR_WOULD_QUARANTINE = "would-quarantine"
 # Immutable event-publication outcomes.
 EVENT_COMMITTED = "committed"
 EVENT_WOULD_COMMIT = "would-commit"
+
+# Derived ledger-projection outcomes.  A projection is never authority, so the
+# only outcomes are "already equals the rebuild" and "was replaced by it".
+PROJECTION_CURRENT = "current"
+PROJECTION_REBUILT = "rebuilt"
+PROJECTION_WOULD_REBUILD = "would-rebuild"
+
+# Why a projection did not equal the deterministic rebuild.
+PROJECTION_REASON_CURRENT = "current"
+PROJECTION_REASON_MISSING = "missing"
+PROJECTION_REASON_CORRUPT = "corrupt"
+PROJECTION_REASON_AHEAD = "ahead"
+PROJECTION_REASON_STALE = "stale"
+PROJECTION_REASON_DIVERGENT = "divergent"
+PROJECTION_REASON_VIEW = "derived-view"
 
 
 class ControlStoreError(RuntimeError):
@@ -374,6 +401,10 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
         raise ControlStoreError(f"{label} requires positive integer revision")
     _require_string(data, "event_type", label)
     _require_string(data, "actor", label)
+    # A committed event projects derived state through its payload, so an
+    # unstructured payload is refused before it can wedge a projection rebuild.
+    if "payload" in data and not isinstance(data["payload"], dict):
+        raise ControlStoreError(f"{label} requires an object payload")
     return data
 
 
@@ -674,9 +705,10 @@ def _serialized_record(record: Mapping[str, Any]) -> str:
         raise ControlStoreError(f"cannot serialize control record: {exc}") from None
 
 
-def _write_json(path: Path, record: Mapping[str, Any]) -> None:
+def _write_new_text(path: Path, text: str) -> None:
+    """Create one new flushed file, refusing to replace anything that exists."""
+
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    text = _serialized_record(record)
     try:
         descriptor = os.open(str(path), flags, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -687,12 +719,8 @@ def _write_json(path: Path, record: Mapping[str, Any]) -> None:
         raise ControlStoreError(f"cannot write {path.name}: {exc}") from None
 
 
-def _write_empty_file(path: Path) -> None:
-    try:
-        descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        os.close(descriptor)
-    except OSError as exc:
-        raise ControlStoreError(f"cannot create {path.name}: {exc}") from None
+def _write_json(path: Path, record: Mapping[str, Any]) -> None:
+    _write_new_text(path, _serialized_record(record))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1607,6 +1635,434 @@ def repair_stale_control_lock(
     ).run()
 
 
+def _derived_ledger_id(control_id: str) -> str:
+    """Derive the ledger identity from the control root, never from the ledger.
+
+    A rebuilt projection must not depend on the file it replaces, so the
+    identifier is a deterministic function of the authoritative control root
+    identity.  Initialization and every later replay therefore agree.
+    """
+
+    try:
+        namespace = UUID(control_id)
+    except (ValueError, AttributeError):
+        raise ControlStoreError(f"{CONTROL_METADATA_NAME} requires UUID control_id") from None
+    return str(uuid5(namespace, LEDGER_ID_DERIVATION_NAME))
+
+
+def _event_ledger_declarations(record: Mapping[str, Any], label: str) -> Dict[str, Any]:
+    """Return the derived ledger fields one committed event declares."""
+
+    payload = record.get("payload")
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ControlStoreError(f"{label} requires an object payload")
+    declared: Dict[str, Any] = {}
+    if "active_queue_item_id" in payload:
+        declared["active_queue_item_id"] = _require_optional_string(
+            payload, "active_queue_item_id", f"{label} payload"
+        )
+    if "active_mission_id" in payload:
+        declared["active_mission_id"] = _require_optional_uuid(
+            payload, "active_mission_id", f"{label} payload"
+        )
+    return declared
+
+
+def build_ledger_projection(
+    metadata: Mapping[str, Any],
+    events: Sequence[CommittedEvent] = (),
+) -> Dict[str, Any]:
+    """Fold the committed event sequence into the one derived ledger record.
+
+    Every input is authoritative and non-derived: the validated control root
+    metadata and the contiguous committed events.  The ledger it returns is
+    therefore reproducible, so replaying the same committed sequence any number
+    of times yields byte-identical bytes and can never invent a revision that no
+    committed event represents.
+    """
+
+    control_id = _require_uuid(metadata, "control_id", CONTROL_METADATA_NAME)
+    created_at = _require_timestamp(metadata, "created_at", CONTROL_METADATA_NAME)
+    roots = _validate_canonical_roots(metadata.get("canonical_roots"), CONTROL_METADATA_NAME)
+
+    revision = 0
+    updated_at = created_at
+    state: Dict[str, Any] = {field: None for field in LEDGER_PROJECTION_FIELDS}
+    for event in events:
+        label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        state.update(_event_ledger_declarations(event.record, label))
+        if state["active_mission_id"] is not None and state["active_queue_item_id"] is None:
+            raise ControlStoreError(
+                f"{label} projects active_mission_id without active_queue_item_id"
+            )
+        revision = event.revision
+        updated_at = event.record["timestamp"]
+
+    record = {
+        "schema_version": CONTROL_SCHEMA_VERSION,
+        "record_type": "ledger",
+        "ledger_id": _derived_ledger_id(control_id),
+        "control_id": control_id,
+        "revision": revision,
+        "active_queue_item_id": state["active_queue_item_id"],
+        "active_mission_id": state["active_mission_id"],
+        "canonical_roots": {
+            "control_root": roots["control_root"],
+            "queue_root": roots["queue_root"],
+            "planning_root": roots["planning_root"],
+            "implementation_roots": list(roots["implementation_roots"]),
+        },
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+    validate_ledger(record, control_id)
+    return record
+
+
+def build_events_view(events: Sequence[CommittedEvent] = ()) -> str:
+    """Render the derived `events.jsonl` compatibility view of committed events."""
+
+    lines = []
+    for event in events:
+        try:
+            lines.append(json.dumps(event.record, sort_keys=True, separators=(",", ":")))
+        except (TypeError, ValueError) as exc:
+            raise ControlStoreError(
+                f"cannot render {EVENTS_DIR_NAME}/{event.path.name} into {EVENTS_NAME}: {exc}"
+            ) from None
+    return "".join(f"{line}\n" for line in lines)
+
+
+def _reusable_temporary_flags() -> int:
+    """Open a reusable projection temporary without following or blocking."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    for name in ("O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
+    return flags
+
+
+def _write_projection_temporary(path: Path, text: str, label: str) -> os.stat_result:
+    """Write, flush, and verify the exact bytes of one projection temporary.
+
+    The temporary path is reused by name because the protocol names it, and any
+    debris left there by an interrupted predecessor is non-authoritative.  The
+    file is only ever truncated and rewritten in place while the control lock is
+    held; it is never unlinked by pathname after a separate identity check.
+    """
+
+    data = text.encode("utf-8")
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label}: {exc}") from None
+    else:
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise ControlStoreError(
+                f"{label} must be a regular file, not a symlink or directory"
+            )
+
+    try:
+        descriptor = os.open(str(path), _reusable_temporary_flags(), 0o600)
+    except OSError as exc:
+        raise ControlStoreError(f"cannot write {label}: {exc}") from None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            identity = os.fstat(handle.fileno())
+            if not stat.S_ISREG(identity.st_mode):
+                raise ControlStoreError(
+                    f"{label} must be a regular file, not a symlink or directory"
+                )
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+            identity = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise ControlStoreError(f"cannot write {label}: {exc}") from None
+
+    try:
+        written_identity = path.lstat()
+        written = path.read_bytes()
+    except OSError as exc:
+        raise ControlStoreError(f"cannot verify {label}: {exc}") from None
+    if not _same_filesystem_identity(written_identity, identity) or written != data:
+        raise ControlStoreError(f"{label} is not the exact projection that was serialized")
+    return identity
+
+
+def _replace_projection(
+    temporary_path: Path,
+    target_path: Path,
+    identity: os.stat_result,
+    label: str,
+) -> None:
+    """Atomically replace one derived projection with its verified temporary."""
+
+    try:
+        os.replace(str(temporary_path), str(target_path))
+    except OSError as exc:
+        raise ControlStoreError(f"cannot atomically replace {label}: {exc}") from None
+    try:
+        replaced = target_path.lstat()
+    except OSError as exc:
+        raise ControlStoreError(f"{label} was replaced but cannot be verified: {exc}") from None
+    if not _same_filesystem_identity(replaced, identity):
+        raise ControlStoreError(f"{label} changed filesystem identity during replacement")
+
+
+def _ledger_projection_fault(boundary: str, projection: "ControlLedgerProjection") -> None:
+    """No-op named projection hook used by deterministic protocol tests."""
+
+    del boundary, projection
+
+
+@dataclass(frozen=True)
+class LedgerProjectionResult:
+    """Outcome of one derived ledger projection or replay attempt."""
+
+    root: Path
+    outcome: str
+    reason: str
+    revision: int
+    observed_revision: Optional[int]
+    path: Path
+    record: Dict[str, Any]
+    interrupted_temporaries: Tuple[Path, ...]
+    pending_debris: Tuple[Path, ...]
+
+    @property
+    def current(self) -> bool:
+        return self.outcome == PROJECTION_CURRENT
+
+    @property
+    def rebuilt(self) -> bool:
+        return self.outcome == PROJECTION_REBUILT
+
+
+class ControlLedgerProjection:
+    """Rebuild the derived ledger from committed events and replace it atomically.
+
+    Committed event files are the only authority.  This step reads them under
+    the control lock, folds them into one deterministic ledger record, writes
+    that record to `ledger.json.tmp`, flushes it, and atomically replaces
+    `ledger.json`.  The rebuilt bytes always win: a missing, stale, corrupt, or
+    revision-ahead ledger is discarded as derived corruption rather than
+    consulted, and an interrupted temporary never overrides the rebuild.
+
+    Because the rebuild is a pure function of committed events, replay is
+    idempotent.  Running it repeatedly commits no event and, once the projection
+    equals the rebuild, changes nothing at all.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        command: str = DEFAULT_LEDGER_COMMAND,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+        dry_run: bool = False,
+        held_lock: Optional[PortableControlLock] = None,
+    ) -> None:
+        self.root = _require_absolute_root(str(root), "configured")
+        self.ledger_path = self.root / LEDGER_NAME
+        self.ledger_temporary_path = self.root / LEDGER_TEMPORARY_NAME
+        self.view_path = self.root / EVENTS_NAME
+        self.view_temporary_path = self.root / EVENTS_VIEW_TEMPORARY_NAME
+        self.command = command.strip() if isinstance(command, str) else ""
+        if not self.command:
+            raise ControlStoreError("ledger projection requires a non-empty command")
+        self.timeout_seconds = _configured_lock_timeout(timeout_seconds)
+        self.poll_seconds = _validated_seconds(
+            poll_seconds,
+            "control lock poll interval",
+            allow_zero=False,
+        )
+        self.dry_run = bool(dry_run)
+        self.held_lock = held_lock
+        self.lock: Optional[PortableControlLock] = None
+        self.record: Optional[Dict[str, Any]] = None
+        self.revision: Optional[int] = None
+        self.observed_revision: Optional[int] = None
+        self.reason: Optional[str] = None
+        self.interrupted_temporaries: Tuple[Path, ...] = ()
+        self.pending_debris: Tuple[Path, ...] = ()
+
+    def _interrupted_temporaries(self) -> Tuple[Path, ...]:
+        """List every interrupted projection temporary without judging it."""
+
+        found: List[Path] = []
+        for path in (self.view_temporary_path, self.ledger_temporary_path):
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ControlStoreError(f"cannot inspect {path.name}: {exc}") from None
+            found.append(path)
+        return tuple(found)
+
+    def _classify_ledger(self, control_id: str, expected: bytes) -> Tuple[Optional[int], str]:
+        """Say why the published projection does or does not equal the rebuild."""
+
+        try:
+            mode = self.ledger_path.lstat().st_mode
+        except FileNotFoundError:
+            return None, PROJECTION_REASON_MISSING
+        except OSError as exc:
+            raise ControlStoreError(f"cannot inspect {LEDGER_NAME}: {exc}") from None
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            return None, PROJECTION_REASON_CORRUPT
+        try:
+            published = self.ledger_path.read_bytes()
+        except OSError:
+            return None, PROJECTION_REASON_CORRUPT
+        if published == expected:
+            return json.loads(expected.decode("utf-8"))["revision"], PROJECTION_REASON_CURRENT
+        try:
+            existing = validate_ledger(
+                json.loads(published.decode("utf-8")), control_id, self.root
+            )
+        except (ControlStoreError, UnicodeDecodeError, json.JSONDecodeError):
+            return None, PROJECTION_REASON_CORRUPT
+        observed = existing["revision"]
+        rebuilt_revision = json.loads(expected.decode("utf-8"))["revision"]
+        if observed > rebuilt_revision:
+            return observed, PROJECTION_REASON_AHEAD
+        if observed < rebuilt_revision:
+            return observed, PROJECTION_REASON_STALE
+        return observed, PROJECTION_REASON_DIVERGENT
+
+    def _view_matches(self, expected: str) -> bool:
+        """Report whether the derived compatibility view equals the rebuild."""
+
+        try:
+            mode = self.view_path.lstat().st_mode
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ControlStoreError(f"cannot inspect {EVENTS_NAME}: {exc}") from None
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            return False
+        try:
+            return self.view_path.read_bytes() == expected.encode("utf-8")
+        except OSError:
+            return False
+
+    def _result(self, outcome: str) -> LedgerProjectionResult:
+        record = dict(self.record or {})
+        return LedgerProjectionResult(
+            root=self.root,
+            outcome=outcome,
+            reason=self.reason or PROJECTION_REASON_CURRENT,
+            revision=int(self.revision or 0),
+            observed_revision=self.observed_revision,
+            path=self.ledger_path,
+            record=record,
+            interrupted_temporaries=self.interrupted_temporaries,
+            pending_debris=self.pending_debris,
+        )
+
+    def _project(self) -> LedgerProjectionResult:
+        """Rebuild and, when it differs, atomically replace the derived state."""
+
+        metadata, history = inspect_control_events(self.root)
+        control_id = metadata["control_id"]
+        self.pending_debris = history.pending
+        record = build_ledger_projection(metadata, history.events)
+        if record["revision"] != history.latest_revision:
+            raise ControlStoreError(
+                f"{LEDGER_NAME} projection revision {record['revision']} does not match the "
+                f"committed revision {history.latest_revision}"
+            )
+        self.record = record
+        self.revision = record["revision"]
+        ledger_text = _serialized_record(record)
+        view_text = build_events_view(history.events)
+        self.interrupted_temporaries = self._interrupted_temporaries()
+
+        observed, reason = self._classify_ledger(control_id, ledger_text.encode("utf-8"))
+        if reason == PROJECTION_REASON_CURRENT and not self._view_matches(view_text):
+            reason = PROJECTION_REASON_VIEW
+        self.observed_revision = observed
+        self.reason = reason
+        _ledger_projection_fault("projection-built", self)
+
+        if reason == PROJECTION_REASON_CURRENT:
+            return self._result(PROJECTION_CURRENT)
+        if self.dry_run:
+            return self._result(PROJECTION_WOULD_REBUILD)
+
+        # The compatibility view is replaced first so that `ledger.json` stays
+        # the single watermark of a complete projection: an interruption between
+        # the two replacements leaves a stale ledger that the next replay
+        # rebuilds, never a ledger that claims state its view does not show.
+        view_identity = _write_projection_temporary(
+            self.view_temporary_path, view_text, EVENTS_VIEW_TEMPORARY_NAME
+        )
+        _replace_projection(
+            self.view_temporary_path, self.view_path, view_identity, EVENTS_NAME
+        )
+        _fsync_directory(self.root)
+        _ledger_projection_fault("view-replaced", self)
+
+        ledger_identity = _write_projection_temporary(
+            self.ledger_temporary_path, ledger_text, LEDGER_TEMPORARY_NAME
+        )
+        # Interruption here leaves the flushed temporary behind; committed
+        # events remain the only authority and `ledger.json` is untouched.
+        _ledger_projection_fault("ledger-temporary-written", self)
+        _replace_projection(
+            self.ledger_temporary_path, self.ledger_path, ledger_identity, LEDGER_NAME
+        )
+        _fsync_directory(self.root)
+        self.interrupted_temporaries = self._interrupted_temporaries()
+        _ledger_projection_fault("ledger-replaced", self)
+        return self._result(PROJECTION_REBUILT)
+
+    def run(self) -> LedgerProjectionResult:
+        """Project committed events into the ledger under the control lock."""
+
+        _require_directory(self.root, "COCKPIT_CONTROL_ROOT")
+        if self.held_lock is not None:
+            if self.held_lock.owner is None or self.held_lock.root != self.root:
+                raise ControlStoreError(
+                    "ledger projection requires the held control lock for this control root"
+                )
+            self.lock = self.held_lock
+            return self._project()
+
+        with PortableControlLock(
+            self.root,
+            self.command,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        ) as lock:
+            self.lock = lock
+            return self._project()
+
+
+def replay_control_ledger(
+    root: Path,
+    command: str = DEFAULT_LEDGER_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> LedgerProjectionResult:
+    """Replay committed events into the derived ledger, committing no event."""
+
+    return ControlLedgerProjection(
+        root,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    ).run()
+
+
 def _event_publication_fault(boundary: str, publication: "ControlEventPublication") -> None:
     """No-op named publication hook used by deterministic protocol tests."""
 
@@ -1624,6 +2080,7 @@ class EventPublicationResult:
     path: Path
     record: Dict[str, Any]
     pending_debris: Tuple[Path, ...]
+    projection: Optional[LedgerProjectionResult] = None
 
     @property
     def committed(self) -> bool:
@@ -1640,8 +2097,11 @@ class ControlEventPublication:
     nothing after it is rewritten, so interruption can only leave a diagnosable
     pending candidate or one complete committed event.
 
-    Projection of committed events into `ledger.json` is a separate protocol
-    step and is deliberately not performed here.
+    Once the event is committed, the same held lock is used to rebuild the
+    derived ledger projection from committed events and replace it atomically.
+    The projection never changes event authority: the rename already committed
+    the event, and an interruption before or during the replacement leaves a
+    projection that the next replay rebuilds exactly once.
     """
 
     def __init__(
@@ -1677,6 +2137,7 @@ class ControlEventPublication:
         self.candidate_path: Optional[Path] = None
         self.committed_path: Optional[Path] = None
         self.pending_debris: Tuple[Path, ...] = ()
+        self.projection: Optional[LedgerProjectionResult] = None
 
     @staticmethod
     def _validated_payload(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -1817,6 +2278,7 @@ class ControlEventPublication:
             path=committed_path,
             record=dict(record),
             pending_debris=self.pending_debris,
+            projection=self.projection,
         )
 
     def run(self) -> EventPublicationResult:
@@ -1845,6 +2307,20 @@ class ControlEventPublication:
             self.record = record
             self.candidate_path = candidate_path
             self.committed_path = committed_path
+            # Refuse an event whose derived contribution could never be
+            # projected, before any private candidate exists to clean up.
+            build_ledger_projection(
+                metadata,
+                history.events
+                + (
+                    CommittedEvent(
+                        path=committed_path,
+                        revision=revision,
+                        event_id=record["event_id"],
+                        record=record,
+                    ),
+                ),
+            )
             _event_publication_fault("revision-allocated", self)
 
             if self.dry_run:
@@ -1862,11 +2338,34 @@ class ControlEventPublication:
             _event_publication_fault("candidate-validated", self)
             self._commit_by_rename(candidate_path, committed_path, candidate_identity)
             self._confirm_committed_tip(control_id, committed_path, record, revision)
-            # The rename is the whole commit; the ledger projection that follows
-            # it in the control protocol is a separate, independently recovered
-            # step and is not performed by this publisher.
+            # The rename is the whole commit.  Interruption at this boundary
+            # leaves a committed event and an unadvanced projection, which the
+            # next replay repairs exactly once without committing anything.
             _event_publication_fault("event-committed", self)
+            self.projection = self._project_committed_events(lock, committed_path, revision)
             return self._result(EVENT_COMMITTED, record, revision, committed_path)
+
+    def _project_committed_events(
+        self,
+        lock: PortableControlLock,
+        committed_path: Path,
+        revision: int,
+    ) -> LedgerProjectionResult:
+        """Advance the derived ledger under the lock that committed the event."""
+
+        try:
+            return ControlLedgerProjection(
+                self.root,
+                command=self.command,
+                timeout_seconds=self.timeout_seconds,
+                poll_seconds=self.poll_seconds,
+                held_lock=lock,
+            ).run()
+        except ControlStoreError as exc:
+            raise ControlStoreError(
+                f"{EVENTS_DIR_NAME}/{committed_path.name} is committed at revision {revision}; "
+                f"only the derived ledger projection failed and must be replayed: {exc}"
+            ) from None
 
 
 def publish_control_event(
@@ -1944,19 +2443,9 @@ def _initial_records(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "created_at": created_at,
         "last_migration_at": created_at,
     }
-    ledger = {
-        "schema_version": CONTROL_SCHEMA_VERSION,
-        "record_type": "ledger",
-        "ledger_id": str(uuid4()),
-        "control_id": control_id,
-        "revision": 0,
-        "active_queue_item_id": None,
-        "active_mission_id": None,
-        "canonical_roots": canonical_roots,
-        "created_at": created_at,
-        "updated_at": created_at,
-    }
-    return metadata, ledger
+    # The initial ledger is the projection of an empty committed sequence, so
+    # a first replay finds it already current instead of rewriting it.
+    return metadata, build_ledger_projection(metadata)
 
 
 def _root_has_entries(root: Path) -> bool:
@@ -1994,7 +2483,7 @@ def _create_store_atomically(root: Path) -> None:
         metadata, ledger = _initial_records(root)
         _write_json(temporary_root / CONTROL_METADATA_NAME, metadata)
         _write_json(temporary_root / LEDGER_NAME, ledger)
-        _write_empty_file(temporary_root / EVENTS_NAME)
+        _write_new_text(temporary_root / EVENTS_NAME, build_events_view())
         _fsync_directory(temporary_root)
         os.replace(str(temporary_root), str(root))
         _fsync_directory(parent)
@@ -2064,6 +2553,64 @@ def _report_pending_debris(debris: Sequence[Path]) -> None:
         )
 
 
+def _report_projection_debris(temporaries: Sequence[Path]) -> None:
+    """Report every interrupted projection temporary as non-authoritative."""
+
+    for path in temporaries:
+        print(
+            f"cockpit-control: {path.name} is a non-authoritative interrupted projection "
+            "temporary; it never overrides the ledger rebuilt from committed events",
+            file=os.sys.stderr,
+        )
+
+
+def _projection_reason(result: LedgerProjectionResult) -> str:
+    """Describe why a derived projection did not equal the committed rebuild."""
+
+    if result.reason == PROJECTION_REASON_MISSING:
+        return f"the derived {LEDGER_NAME} was missing"
+    if result.reason == PROJECTION_REASON_CORRUPT:
+        return f"the derived {LEDGER_NAME} was unreadable derived corruption"
+    if result.reason == PROJECTION_REASON_AHEAD:
+        return (
+            f"the derived {LEDGER_NAME} claimed revision {result.observed_revision}, which no "
+            "committed event represents"
+        )
+    if result.reason == PROJECTION_REASON_STALE:
+        return f"the derived {LEDGER_NAME} was stale at revision {result.observed_revision}"
+    if result.reason == PROJECTION_REASON_DIVERGENT:
+        return (
+            f"the derived {LEDGER_NAME} disagreed with the committed events at revision "
+            f"{result.observed_revision}"
+        )
+    if result.reason == PROJECTION_REASON_VIEW:
+        return f"the derived {EVENTS_NAME} view was out of date"
+    return "the derived projection already matched the committed events"
+
+
+def _report_ledger_projection(result: LedgerProjectionResult) -> int:
+    """Print one projection or replay outcome and report debris on stderr."""
+
+    if result.current:
+        print(
+            f"cockpit-control: {LEDGER_NAME} projection is current at revision "
+            f"{result.revision} in {result.root}"
+        )
+    elif result.outcome == PROJECTION_WOULD_REBUILD:
+        print(
+            f"cockpit-control: would rebuild {LEDGER_NAME} at revision {result.revision} "
+            f"({_projection_reason(result)}); no state changed"
+        )
+    else:
+        print(
+            f"cockpit-control: rebuilt {LEDGER_NAME} at revision {result.revision} "
+            f"({_projection_reason(result)})"
+        )
+    _report_projection_debris(result.interrupted_temporaries)
+    _report_pending_debris(result.pending_debris)
+    return 0
+
+
 def _report_event_publication(result: EventPublicationResult) -> int:
     """Print one publication outcome on stdout and report debris on stderr."""
 
@@ -2075,6 +2622,12 @@ def _report_event_publication(result: EventPublicationResult) -> int:
             f"cockpit-control: would commit {location} at revision {result.revision}; "
             "no state changed"
         )
+    if result.projection is not None:
+        print(
+            f"cockpit-control: projected {LEDGER_NAME} at revision "
+            f"{result.projection.revision}"
+        )
+        _report_projection_debris(result.projection.interrupted_temporaries)
     _report_pending_debris(result.pending_debris)
     return 0
 
@@ -2117,8 +2670,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cockpit-control",
         description=(
-            "initialize, validate, publish immutable events into, and guardedly repair "
-            "the versioned cockpit control store"
+            "initialize, validate, publish immutable events into, replay the derived "
+            "ledger of, and guardedly repair the versioned cockpit control store"
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2173,6 +2726,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "list-events",
         help="list committed events and report retained private candidates",
     )
+    replay = subcommands.add_parser(
+        "replay-ledger",
+        help=(
+            "rebuild the derived ledger projection from committed events without "
+            "committing any event"
+        ),
+    )
+    replay.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the projection decision without changing any state",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -2191,6 +2756,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     payload=_parsed_payload(args.payload),
                     dry_run=args.dry_run,
                 )
+            )
+        if args.command == "replay-ledger":
+            return _report_ledger_projection(
+                replay_control_ledger(resolved.path, dry_run=args.dry_run)
             )
         if args.command == "list-events":
             _metadata, history = inspect_control_events(resolved.path)

@@ -2020,6 +2020,9 @@ def fault(boundary, publication):
         assert cockpit_control._same_filesystem_identity(
             committed.lstat(), candidate["identity"]
         ), "the exact validated candidate inode must be the committed event"
+        assert (root / cockpit_control.LEDGER_NAME).read_bytes() == ledger_before, (
+            "the rename alone commits the event; the projection follows it"
+        )
 
 cockpit_control._event_publication_fault = fault
 first = cockpit_control.publish_control_event(
@@ -2082,8 +2085,26 @@ for event in history.events:
     assert event.record["schema_version"] == cockpit_control.CONTROL_SCHEMA_VERSION
 assert history.events[0].record["payload"] == {"queue_item_id": "QI-1"}
 
-assert (root / cockpit_control.LEDGER_NAME).read_bytes() == ledger_before
-assert (root / cockpit_control.EVENTS_NAME).read_bytes() == compatibility_view_before
+assert second.projection is not None and second.projection.rebuilt
+assert second.projection.revision == 2
+
+# The projection is derived: it equals a fresh rebuild from committed events.
+metadata = cockpit_control.validate_root_metadata(
+    json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text()), root
+)
+rebuilt = cockpit_control.build_ledger_projection(metadata, history.events)
+ledger_after = (root / cockpit_control.LEDGER_NAME).read_bytes()
+assert ledger_after != ledger_before, "the committed event advanced the projection"
+assert ledger_after == cockpit_control._serialized_record(rebuilt).encode("utf-8")
+assert json.loads(ledger_after.decode("utf-8"))["revision"] == 2
+assert json.loads(ledger_after.decode("utf-8"))["updated_at"] == (
+    history.events[-1].record["timestamp"]
+)
+view_after = (root / cockpit_control.EVENTS_NAME).read_bytes()
+assert view_after != compatibility_view_before
+assert view_after == cockpit_control.build_events_view(history.events).encode("utf-8")
+assert not (root / cockpit_control.LEDGER_TEMPORARY_NAME).exists()
+assert not (root / cockpit_control.EVENTS_VIEW_TEMPORARY_NAME).exists()
 print("one atomic rename per revision verified")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
@@ -2636,4 +2657,519 @@ print("commit-boundary crash left one immutable committed revision")
 	echo "$output" | grep -Fq "2 committed events in $root (latest revision 2)"
 	run "$CONTROL_BIN" validate
 	[ "$status" -eq 0 ]
+}
+
+@test "a committed event atomically advances the derived ledger to its revision" {
+	local root="$BATS_TEST_TMPDIR/ledger-projection"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+from uuid import uuid4
+
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+root = Path(sys.argv[1])
+ledger_path = root / cockpit_control.LEDGER_NAME
+ledger_temporary = root / cockpit_control.LEDGER_TEMPORARY_NAME
+view_path = root / cockpit_control.EVENTS_NAME
+view_temporary = root / cockpit_control.EVENTS_VIEW_TEMPORARY_NAME
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+metadata_path = root / cockpit_control.CONTROL_METADATA_NAME
+control_id = json.loads(metadata_path.read_text())["control_id"]
+mission_id = str(uuid4())
+
+initial_ledger = ledger_path.read_bytes()
+assert json.loads(initial_ledger.decode("utf-8"))["revision"] == 0
+boundaries = []
+observed = {}
+
+def fault(boundary, projection):
+    boundaries.append(boundary)
+    assert authoritative.is_dir(), "the projection must hold the control lock"
+    owner = json.loads((authoritative / cockpit_control.LOCK_OWNER_NAME).read_text())
+    assert owner["command"] == "projection-boundary-test"
+    if boundary == "projection-built":
+        assert projection.revision == 1
+        assert projection.observed_revision == 0
+        assert projection.reason == cockpit_control.PROJECTION_REASON_STALE
+        assert ledger_path.read_bytes() == initial_ledger
+        assert not ledger_temporary.exists()
+    elif boundary == "view-replaced":
+        assert ledger_path.read_bytes() == initial_ledger, "the ledger is the watermark"
+    elif boundary == "ledger-temporary-written":
+        assert ledger_path.read_bytes() == initial_ledger, "nothing is replaced yet"
+        observed["identity"] = ledger_temporary.lstat()
+        observed["bytes"] = ledger_temporary.read_bytes()
+        assert observed["bytes"] == cockpit_control._serialized_record(
+            projection.record
+        ).encode("utf-8")
+    elif boundary == "ledger-replaced":
+        assert not ledger_temporary.exists()
+        assert ledger_path.read_bytes() == observed["bytes"]
+        assert cockpit_control._same_filesystem_identity(
+            ledger_path.lstat(), observed["identity"]
+        ), "the exact flushed temporary inode became the ledger"
+
+cockpit_control._ledger_projection_fault = fault
+published = cockpit_control.publish_control_event(
+    root,
+    "mission-dispatched",
+    actor="overseer",
+    payload={"active_queue_item_id": "QI-9", "active_mission_id": mission_id},
+    command="projection-boundary-test",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+assert boundaries == [
+    "projection-built",
+    "view-replaced",
+    "ledger-temporary-written",
+    "ledger-replaced",
+], boundaries
+assert published.committed
+assert published.projection is not None
+assert published.projection.rebuilt
+assert published.projection.revision == published.revision == 1
+assert not authoritative.exists(), "the control lock is released after the projection"
+assert sorted(entry.name for entry in locks.iterdir()) == [cockpit_control.CONTROL_GUARD_NAME]
+
+history = cockpit_control.read_committed_events(root, control_id)
+metadata = cockpit_control.validate_root_metadata(json.loads(metadata_path.read_text()), root)
+derived = cockpit_control.build_ledger_projection(metadata, history.events)
+projected = ledger_path.read_bytes()
+assert projected == cockpit_control._serialized_record(derived).encode("utf-8")
+ledger = json.loads(projected.decode("utf-8"))
+assert ledger["revision"] == history.latest_revision == 1
+assert ledger["active_queue_item_id"] == "QI-9"
+assert ledger["active_mission_id"] == mission_id
+assert ledger["updated_at"] == history.events[0].record["timestamp"]
+assert ledger["control_id"] == control_id
+assert ledger["canonical_roots"] == metadata["canonical_roots"]
+assert view_path.read_bytes() == cockpit_control.build_events_view(history.events).encode("utf-8")
+assert not ledger_temporary.exists() and not view_temporary.exists()
+
+cockpit_control._ledger_projection_fault = lambda boundary, projection: None
+repeated = cockpit_control.replay_control_ledger(root, timeout_seconds=5, poll_seconds=0.01)
+assert repeated.current, repeated.outcome
+assert repeated.revision == 1
+assert ledger_path.read_bytes() == projected, "replay is idempotent byte for byte"
+assert cockpit_control.read_committed_events(root, control_id).latest_revision == 1, (
+    "replay never commits an event"
+)
+print("the committed event advanced the derived ledger atomically")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the committed event advanced the derived ledger atomically"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger.json projection is current at revision 1 in $root"
+}
+
+@test "a writer killed during the ledger temporary write keeps committed events authoritative" {
+	local root="$BATS_TEST_TMPDIR/ledger-crash-temporary"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+ledger_path = root / cockpit_control.LEDGER_NAME
+ledger_temporary = root / cockpit_control.LEDGER_TEMPORARY_NAME
+events = root / cockpit_control.EVENTS_DIR_NAME
+authoritative = root / cockpit_control.LOCKS_DIR_NAME / cockpit_control.CONTROL_LOCK_NAME
+metadata_path = root / cockpit_control.CONTROL_METADATA_NAME
+control_id = json.loads(metadata_path.read_text())["control_id"]
+ledger_before = ledger_path.read_bytes()
+
+writer_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+def park(boundary, projection):
+    if boundary == "ledger-temporary-written":
+        print("LEDGER_TEMPORARY_WRITTEN", flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the projection barrier was released instead of killed")
+
+cockpit_control._ledger_projection_fault = park
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "committed-before-projection",
+    actor="killed-writer",
+    payload={"active_queue_item_id": "QI-11"},
+    command="killed-during-ledger-temporary",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = writer.stdout.readline().strip()
+    assert parked == "LEDGER_TEMPORARY_WRITTEN", writer.stderr.read()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+history = cockpit_control.read_committed_events(root, control_id)
+assert history.latest_revision == 1, "the committed event is authority regardless of projection"
+assert len(history.events) == 1
+assert history.pending == ()
+assert ledger_path.read_bytes() == ledger_before, "the interrupted projection replaced nothing"
+assert json.loads(ledger_path.read_text())["revision"] == 0
+assert ledger_temporary.is_file(), "the interrupted temporary is retained as debris"
+metadata = cockpit_control.validate_root_metadata(json.loads(metadata_path.read_text()), root)
+expected = cockpit_control._serialized_record(
+    cockpit_control.build_ledger_projection(metadata, history.events)
+).encode("utf-8")
+assert ledger_temporary.read_bytes() == expected, "the temporary was flushed before the kill"
+assert authoritative.is_dir(), "the killed writer still holds the control lock"
+
+assert cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=5, poll_seconds=0.01
+).repaired
+replayed = cockpit_control.replay_control_ledger(root, timeout_seconds=5, poll_seconds=0.01)
+assert replayed.rebuilt, replayed.outcome
+assert replayed.reason == cockpit_control.PROJECTION_REASON_STALE
+assert replayed.observed_revision == 0
+assert replayed.revision == 1
+assert ledger_path.read_bytes() == expected
+assert not ledger_temporary.exists()
+assert cockpit_control.read_committed_events(root, control_id).latest_revision == 1, (
+    "replay advanced the ledger without creating another event"
+)
+
+steady = cockpit_control.replay_control_ledger(root, timeout_seconds=5, poll_seconds=0.01)
+assert steady.current, steady.outcome
+assert ledger_path.read_bytes() == expected
+assert len(cockpit_control.read_committed_events(root, control_id).events) == 1
+print("the interrupted ledger temporary never overrode committed events")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the interrupted ledger temporary never overrode committed events"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "1 committed events in $root (latest revision 1)"
+}
+
+@test "a writer killed after the ledger replacement agrees with committed events" {
+	local root="$BATS_TEST_TMPDIR/ledger-crash-replaced"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+ledger_path = root / cockpit_control.LEDGER_NAME
+ledger_temporary = root / cockpit_control.LEDGER_TEMPORARY_NAME
+view_path = root / cockpit_control.EVENTS_NAME
+authoritative = root / cockpit_control.LOCKS_DIR_NAME / cockpit_control.CONTROL_LOCK_NAME
+metadata_path = root / cockpit_control.CONTROL_METADATA_NAME
+control_id = json.loads(metadata_path.read_text())["control_id"]
+
+writer_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+def park(boundary, projection):
+    if boundary == "ledger-replaced":
+        print("LEDGER_REPLACED " + str(projection.revision), flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the projection barrier was released instead of killed")
+
+cockpit_control._ledger_projection_fault = park
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "projected-then-killed",
+    actor="killed-writer",
+    payload={"active_queue_item_id": "QI-12"},
+    command="killed-after-ledger-replace",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = writer.stdout.readline().split()
+    assert parked and parked[0] == "LEDGER_REPLACED", writer.stderr.read()
+    assert parked[1] == "1", parked
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+history = cockpit_control.read_committed_events(root, control_id)
+metadata = cockpit_control.validate_root_metadata(json.loads(metadata_path.read_text()), root)
+expected = cockpit_control._serialized_record(
+    cockpit_control.build_ledger_projection(metadata, history.events)
+).encode("utf-8")
+assert history.latest_revision == 1
+assert json.loads(ledger_path.read_text())["revision"] == history.latest_revision, (
+    "the event and ledger revisions agree at this boundary"
+)
+assert ledger_path.read_bytes() == expected
+assert view_path.read_bytes() == cockpit_control.build_events_view(history.events).encode("utf-8")
+assert not ledger_temporary.exists()
+assert authoritative.is_dir(), "the killed writer died before releasing the control lock"
+
+try:
+    cockpit_control.PortableControlLock(
+        root, "blocked-by-dead-owner", timeout_seconds=0.15, poll_seconds=0.01
+    ).acquire()
+except cockpit_control.ControlStoreError as error:
+    assert "timed out after 0.15s waiting for locks/control.lock" in str(error), str(error)
+else:
+    raise AssertionError("the dead owner lock was silently taken over")
+
+assert cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=5, poll_seconds=0.01
+).repaired, "later acquisition succeeds after owner-death repair"
+steady = cockpit_control.replay_control_ledger(root, timeout_seconds=5, poll_seconds=0.01)
+assert steady.current, steady.outcome
+assert ledger_path.read_bytes() == expected, "a complete projection is replayed unchanged"
+
+published = cockpit_control.publish_control_event(
+    root, "after-projection-crash", command="writer-after-projection-crash",
+    timeout_seconds=5, poll_seconds=0.01,
+)
+assert published.revision == 2
+assert published.projection.revision == 2
+assert json.loads(ledger_path.read_text())["revision"] == 2
+print("the replaced projection agreed with committed events after repair")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the replaced projection agreed with committed events after repair"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+}
+
+@test "replay advances an unprojected committed event exactly once" {
+	local root="$BATS_TEST_TMPDIR/ledger-replay-once"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+writer_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+def park(boundary, publication):
+    if boundary == "event-committed":
+        print("EVENT_COMMITTED", flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the commit barrier was released instead of killed")
+
+cockpit_control._event_publication_fault = park
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "committed-without-projection",
+    actor="killed-writer",
+    payload={"active_queue_item_id": "QI-13"},
+    command="killed-before-projection",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    assert writer.stdout.readline().strip() == "EVENT_COMMITTED", writer.stderr.read()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+assert cockpit_control.read_committed_events(root, control_id).latest_revision == 1
+assert json.loads((root / cockpit_control.LEDGER_NAME).read_text())["revision"] == 0
+assert (root / cockpit_control.EVENTS_NAME).read_bytes() == b"", (
+    "the derived view was never replaced either"
+)
+assert not (root / cockpit_control.LEDGER_TEMPORARY_NAME).exists()
+assert cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=5, poll_seconds=0.01
+).repaired
+print("committed without projection")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "committed without projection"
+
+	local events_before
+	events_before="$(cd "$root/events" && cksum ./*)"
+
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "rebuilt ledger.json at revision 1"
+	echo "$output" | grep -Fq "the derived ledger.json was stale at revision 0"
+	[ "$(find "$root/events" -type f | wc -l)" -eq 1 ]
+	[ "$(cd "$root/events" && cksum ./*)" = "$events_before" ]
+
+	local projected
+	projected="$(cksum "$root/ledger.json")"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger.json projection is current at revision 1"
+	[ "$(cksum "$root/ledger.json")" = "$projected" ]
+	[ "$(find "$root/events" -type f | wc -l)" -eq 1 ]
+	[ "$(cd "$root/events" && cksum ./*)" = "$events_before" ]
+
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "1 committed events in $root (latest revision 1)"
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+}
+
+@test "a ledger revision no committed event represents is discarded and rebuilt" {
+	local root="$BATS_TEST_TMPDIR/ledger-derived-corruption"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	"$CONTROL_BIN" publish-event --type first --actor overseer \
+		--payload '{"active_queue_item_id": "QI-14"}' >/dev/null
+	"$CONTROL_BIN" publish-event --type second --actor overseer >/dev/null
+
+	local expected="$BATS_TEST_TMPDIR/expected-ledger.json"
+	cp "$root/ledger.json" "$expected"
+	local expected_view="$BATS_TEST_TMPDIR/expected-events.jsonl"
+	cp "$root/events.jsonl" "$expected_view"
+	local events_before
+	events_before="$(cd "$root/events" && cksum ./*)"
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+record = json.loads(path.read_text())
+record["revision"] = 99
+path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+' "$root/ledger.json"
+	[ "$status" -eq 0 ]
+
+	local corrupt
+	corrupt="$(cksum "$root/ledger.json")"
+	run "$CONTROL_BIN" replay-ledger --dry-run
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "would rebuild ledger.json at revision 2"
+	echo "$output" | grep -Fq "claimed revision 99, which no committed event represents"
+	echo "$output" | grep -Fq "no state changed"
+	[ "$(cksum "$root/ledger.json")" = "$corrupt" ]
+
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "rebuilt ledger.json at revision 2"
+	echo "$output" | grep -Fq "claimed revision 99, which no committed event represents"
+	cmp "$root/ledger.json" "$expected"
+
+	printf 'not a ledger' > "$root/ledger.json"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "was unreadable derived corruption"
+	cmp "$root/ledger.json" "$expected"
+
+	rm "$root/ledger.json"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the derived ledger.json was missing"
+	cmp "$root/ledger.json" "$expected"
+
+	printf '' > "$root/events.jsonl"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the derived events.jsonl view was out of date"
+	cmp "$root/events.jsonl" "$expected_view"
+	cmp "$root/ledger.json" "$expected"
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+source = Path(sys.argv[1])
+record = json.loads(source.read_text())
+record["revision"] = 99
+Path(sys.argv[2]).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+' "$expected" "$root/ledger.json.tmp"
+	[ "$status" -eq 0 ]
+
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger.json projection is current at revision 2"
+	echo "$output" | grep -Fq "ledger.json.tmp is a non-authoritative interrupted projection temporary"
+	cmp "$root/ledger.json" "$expected"
+	[ -f "$root/ledger.json.tmp" ]
+
+	[ "$(find "$root/events" -type f | wc -l)" -eq 2 ]
+	[ "$(cd "$root/events" && cksum ./*)" = "$events_before" ]
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 committed events in $root (latest revision 2)"
 }
