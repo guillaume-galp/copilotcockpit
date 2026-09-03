@@ -18,7 +18,7 @@ vision_phases:
   - id: VP3
     slug: overseer-orchestration-resilience
     title: "Holistic cockpit control plane and overseer resilience"
-    status: architecture_complete
+    status: planned
     path: docs/vision_of_product/VP3-overseer-orchestration-resilience/VP3.md
 
 architecture:
@@ -306,3 +306,151 @@ themes:
             size: M
             path: docs/themes/TH2-fifo-overseer-request-queue/E2-cockpit-e2e-operations/stories/US2-e2e-operator-clearance-gate.md
             depends_on: [TH2.E2.US1]
+
+  - id: TH3
+    slug: holistic-cockpit-control-plane
+    vision: VP3-overseer-orchestration-resilience
+    title: "Holistic cockpit control plane"
+    status: todo
+    locked: false
+    readme: docs/themes/TH3-holistic-cockpit-control-plane/README.md
+    epics:
+      - id: TH3.E1
+        title: "Control store and preflight foundations"
+        slug: control-store-preflight
+        status: todo
+        depends_on: []
+        stories:
+          - id: TH3.E1.US1
+            title: "Control root and versioned schemas"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US1-control-root-schemas.md
+            depends_on: []
+          - id: TH3.E1.US2
+            title: "Atomic event journal and portable locking"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US2-journal-locking.md
+            depends_on: [TH3.E1.US1]
+          - id: TH3.E1.US3
+            title: "Ledger replay and control-plane preflight"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US3-ledger-replay-preflight.md
+            depends_on: [TH3.E1.US2]
+
+      - id: TH3.E2
+        title: "Worker lifecycle and idempotent mission protocol"
+        slug: worker-mission-protocol
+        status: todo
+        depends_on: [TH3.E1]
+        stories:
+          - id: TH3.E2.US1
+            title: "Structured worker lifecycle and freshness"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US1-worker-lifecycle-freshness.md
+            depends_on: [TH3.E1.US3]
+          - id: TH3.E2.US2
+            title: "Idempotent command envelopes and acknowledgements"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US2-command-envelopes-acknowledgements.md
+            depends_on: [TH3.E2.US1]
+          - id: TH3.E2.US3
+            title: "Managed questions, cancellation, and replacement"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US3-managed-mission-control.md
+            depends_on: [TH3.E2.US2]
+
+      - id: TH3.E3
+        title: "Overseer reconciliation and bounded recovery"
+        slug: overseer-reconciliation
+        status: todo
+        depends_on: [TH3.E1, TH3.E2]
+        stories:
+          - id: TH3.E3.US1
+            title: "One-action controller tick and evidence precedence"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US1-controller-tick-precedence.md
+            depends_on: [TH3.E1.US3, TH3.E2.US2]
+          - id: TH3.E3.US2
+            title: "Stale-worker recovery and conflict reconciliation"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US2-stale-conflict-recovery.md
+            depends_on: [TH3.E3.US1, TH3.E2.US3]
+          - id: TH3.E3.US3
+            title: "Queue-linked bounded escalation"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US3-queue-bounded-escalation.md
+            depends_on: [TH3.E3.US2]
+
+      - id: TH3.E4
+        title: "Intent-aware wakes, evidence, and boundaries"
+        slug: wakes-evidence-boundaries
+        status: todo
+        depends_on: [TH3.E1]
+        stories:
+          - id: TH3.E4.US1
+            title: "Mission-aware wake scheduling and termination"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E4-wakes-evidence-boundaries/stories/US1-mission-aware-wakes.md
+            depends_on: [TH3.E1.US3, TH3.E3.US1]
+          - id: TH3.E4.US2
+            title: "Wake leases and duplicate suppression"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E4-wakes-evidence-boundaries/stories/US2-wake-leases.md
+            depends_on: [TH3.E1.US2, TH3.E4.US1]
+          - id: TH3.E4.US3
+            title: "Evidence correlation and declared mission boundaries"
+            status: todo
+            priority: medium
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E4-wakes-evidence-boundaries/stories/US3-evidence-boundaries.md
+            depends_on: [TH3.E2.US2, TH3.E3.US1]
+
+      - id: TH3.E5
+        title: "Compatibility, integration, and resilience validation"
+        slug: compatibility-resilience
+        status: todo
+        depends_on: [TH3.E1, TH3.E2, TH3.E3, TH3.E4]
+        stories:
+          - id: TH3.E5.US1
+            title: "Additive migration and legacy compatibility"
+            status: todo
+            priority: medium
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US1-additive-migration.md
+            depends_on: [TH3.E1.US3, TH3.E2.US3, TH3.E4.US1]
+          - id: TH3.E5.US2
+            title: "Control-plane contract and fault-injection coverage"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US2-control-plane-test-coverage.md
+            depends_on: [TH3.E3.US3, TH3.E4.US2, TH3.E4.US3, TH3.E5.US1]
+          - id: TH3.E5.US3
+            title: "End-to-end control-plane resilience proof"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US3-end-to-end-resilience.md
+            depends_on: [TH3.E5.US2]

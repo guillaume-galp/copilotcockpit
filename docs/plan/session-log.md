@@ -1,5 +1,6 @@
 # Session Log — copilotcockpit
 
+- 2026-09-03T16:20:19+01:00 — Planned TH3 holistic cockpit control plane: 5 epics and 15 BDD stories covering control storage, worker protocol, reconciliation, recurrent wakes, evidence boundaries, compatibility, and resilience validation; archived TH2 issue templates. — copilotcockpit
 - 2026-07-31T11:09:14+01:00 — User accepted TH2 delivery checkpoint; locked FIFO overseer request queue theme. — copilotcockpit
 - 2026-07-31T11:09:14+01:00 — Implemented TH2 queue runtime: added cockpit-queue CLI, install/uninstall/doctor wiring, queue unit tests, and queue-scoped overseer/e2e-operator runbook updates. — copilotcockpit
 - 2026-07-30T20:47:56+01:00 — Advanced TH2 to architecture/planning: updated architecture overview with FIFO queue component model and added TH2 epic issue templates. — copilotcockpit
