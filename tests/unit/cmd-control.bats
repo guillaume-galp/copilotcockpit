@@ -1215,3 +1215,754 @@ print("repeated EINTR returned the bounded visible guard timeout")
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "repeated EINTR returned the bounded visible guard timeout"
 }
+
+@test "guarded repair quarantines a proven-dead same-host owner and frees acquisition" {
+	local root="$BATS_TEST_TMPDIR/repair-dead-owner"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+holder_code = r"""
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+def park(boundary, lock):
+    if boundary == "lock-published":
+        print("HOLDER_PUBLISHED " + json.dumps(lock.owner), flush=True)
+        sys.stdin.readline()
+cockpit_control._lock_transition_fault = park
+cockpit_control.PortableControlLock(
+    Path(sys.argv[1]), "crashed-owner", timeout_seconds=2, poll_seconds=0.01
+).acquire()
+"""
+
+holder = subprocess.Popen(
+    [sys.executable, "-c", holder_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    published = holder.stdout.readline().strip()
+    assert published.startswith("HOLDER_PUBLISHED "), holder.stderr.read()
+    dead_owner = json.loads(published.split(" ", 1)[1])
+finally:
+    holder.kill()
+    holder.wait(timeout=5)
+assert dead_owner["pid"] == holder.pid
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+stale_identity = authoritative.lstat()
+assert json.loads(
+    (authoritative / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == dead_owner
+state, reason = cockpit_control._prove_lock_owner_death(dead_owner)
+assert state == cockpit_control.LOCK_OWNER_DEAD, reason
+
+boundaries = []
+def observe(boundary, repair):
+    boundaries.append(boundary)
+    if boundary == "repair-validated":
+        assert authoritative.is_dir()
+        assert repair.owner == dead_owner
+        assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+    elif boundary == "repair-quarantined":
+        assert not authoritative.exists()
+        quarantines = list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+        assert quarantines == [repair._quarantine_path]
+
+cockpit_control._lock_transition_fault = observe
+
+preview = cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=0.5, poll_seconds=0.01, dry_run=True
+)
+assert preview.outcome == cockpit_control.LOCK_REPAIR_WOULD_QUARANTINE
+assert preview.repaired is False
+assert preview.lock_id == dead_owner["lock_id"]
+assert preview.quarantine_path is None
+assert cockpit_control._same_filesystem_identity(
+    authoritative.lstat(), stale_identity
+)
+assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+
+result = cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=0.5, poll_seconds=0.01
+)
+assert result.repaired is True
+assert result.outcome == cockpit_control.LOCK_REPAIR_QUARANTINED
+assert result.lock_id == dead_owner["lock_id"]
+assert "proven same-host owner death" in result.reason
+assert boundaries == [
+    "repair-guard-held",
+    "repair-validated",
+    "repair-guard-held",
+    "repair-validated",
+    "repair-quarantined",
+]
+
+quarantine = result.quarantine_path
+assert quarantine.name.startswith(
+    cockpit_control.LOCK_REPAIRED_PREFIX + dead_owner["lock_id"] + "-"
+)
+assert not authoritative.exists()
+assert cockpit_control._same_filesystem_identity(quarantine.lstat(), stale_identity)
+assert json.loads(
+    (quarantine / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == dead_owner
+assert not list(locks.glob(cockpit_control.LOCK_CANDIDATE_PREFIX + "*"))
+assert not list(locks.glob(cockpit_control.LOCK_RELEASED_PREFIX + "*"))
+
+def silent(boundary, lock):
+    return None
+
+cockpit_control._lock_transition_fault = silent
+with cockpit_control.PortableControlLock(
+    root, "post-repair-writer", timeout_seconds=0.5, poll_seconds=0.01
+) as new_lock:
+    assert authoritative.is_dir()
+    assert new_lock.owner["lock_id"] != dead_owner["lock_id"]
+assert not authoritative.exists()
+
+again = cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=0.5, poll_seconds=0.01
+)
+assert again.outcome == cockpit_control.LOCK_REPAIR_ABSENT
+assert again.repaired is False
+assert again.quarantine_path is None
+assert list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*")) == [quarantine]
+print("guarded repair quarantined the proven-dead owner and freed acquisition")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "guarded repair quarantined the proven-dead owner and freed acquisition"
+}
+
+@test "repair killed after the quarantine rename leaves evidence and permits acquisition" {
+	local root="$BATS_TEST_TMPDIR/repair-crash-after-rename"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+
+probe = subprocess.Popen([sys.executable, "-c", "pass"])
+probe.wait(timeout=5)
+stale_owner = cockpit_control._new_lock_owner("owner-that-already-exited")
+stale_owner["pid"] = probe.pid
+stale_owner = cockpit_control._validate_lock_owner(stale_owner)
+authoritative.mkdir(mode=0o700)
+cockpit_control._write_json(
+    authoritative / cockpit_control.LOCK_OWNER_NAME, stale_owner
+)
+cockpit_control._fsync_directory(authoritative)
+stale_identity = authoritative.lstat()
+assert cockpit_control._prove_lock_owner_death(stale_owner)[0] == (
+    cockpit_control.LOCK_OWNER_DEAD
+)
+
+repair_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+def park(boundary, repair):
+    if boundary == "repair-quarantined":
+        print("REPAIR_QUARANTINED " + repair._quarantine_path.name, flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the repair barrier was released instead of killed")
+cockpit_control._lock_transition_fault = park
+cockpit_control.repair_stale_control_lock(
+    Path(sys.argv[1]), timeout_seconds=5, poll_seconds=0.01
+)
+"""
+
+repairer = subprocess.Popen(
+    [sys.executable, "-c", repair_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = repairer.stdout.readline().strip()
+    assert parked.startswith("REPAIR_QUARANTINED "), repairer.stderr.read()
+    quarantine_name = parked.split(" ", 1)[1]
+finally:
+    repairer.kill()
+    repairer.wait(timeout=5)
+assert repairer.returncode != 0
+
+quarantine = locks / quarantine_name
+assert not authoritative.exists()
+assert quarantine.is_dir()
+assert list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*")) == [quarantine]
+assert cockpit_control._same_filesystem_identity(quarantine.lstat(), stale_identity)
+assert json.loads(
+    (quarantine / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == stale_owner
+assert not list(locks.glob(cockpit_control.LOCK_CANDIDATE_PREFIX + "*"))
+assert not list(locks.glob(cockpit_control.LOCK_RELEASED_PREFIX + "*"))
+
+writer_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+with cockpit_control.PortableControlLock(
+    Path(sys.argv[1]), "writer-after-killed-repair", timeout_seconds=2, poll_seconds=0.01
+) as lock:
+    print("WRITER_ACQUIRED " + lock.owner["lock_id"], flush=True)
+print("WRITER_RELEASED", flush=True)
+"""
+
+writer = subprocess.run(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    timeout=30,
+)
+assert writer.returncode == 0, writer.stderr
+lines = writer.stdout.split()
+assert lines[0] == "WRITER_ACQUIRED", writer.stdout
+assert lines[2] == "WRITER_RELEASED", writer.stdout
+assert lines[1] != stale_owner["lock_id"]
+
+assert not authoritative.exists()
+assert list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*")) == [quarantine]
+assert json.loads(
+    (quarantine / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == stale_owner
+print("killed repair retained quarantine evidence and permitted a new writer")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "killed repair retained quarantine evidence and permitted a new writer"
+}
+
+@test "repair killed before the quarantine rename leaves the exact lock unchanged" {
+	local root="$BATS_TEST_TMPDIR/repair-crash-before-rename"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+
+probe = subprocess.Popen([sys.executable, "-c", "pass"])
+probe.wait(timeout=5)
+stale_owner = cockpit_control._new_lock_owner("owner-that-already-exited")
+stale_owner["pid"] = probe.pid
+stale_owner = cockpit_control._validate_lock_owner(stale_owner)
+authoritative.mkdir(mode=0o700)
+cockpit_control._write_json(
+    authoritative / cockpit_control.LOCK_OWNER_NAME, stale_owner
+)
+cockpit_control._fsync_directory(authoritative)
+stale_identity = authoritative.lstat()
+
+repair_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+def park(boundary, repair):
+    if boundary == "repair-validated":
+        print("REPAIR_VALIDATED " + repair.owner["lock_id"], flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the repair barrier was released instead of killed")
+cockpit_control._lock_transition_fault = park
+cockpit_control.repair_stale_control_lock(
+    Path(sys.argv[1]), timeout_seconds=5, poll_seconds=0.01
+)
+"""
+
+repairer = subprocess.Popen(
+    [sys.executable, "-c", repair_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = repairer.stdout.readline().strip()
+    assert parked == "REPAIR_VALIDATED " + stale_owner["lock_id"], (
+        repairer.stderr.read()
+    )
+finally:
+    repairer.kill()
+    repairer.wait(timeout=5)
+assert repairer.returncode != 0
+
+assert authoritative.is_dir()
+assert cockpit_control._same_filesystem_identity(
+    authoritative.lstat(), stale_identity
+)
+assert json.loads(
+    (authoritative / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == stale_owner
+assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+assert not list(locks.glob(cockpit_control.LOCK_RELEASED_PREFIX + "*"))
+assert not list(locks.glob(cockpit_control.LOCK_CANDIDATE_PREFIX + "*"))
+
+resumed = cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=1, poll_seconds=0.01
+)
+assert resumed.repaired is True
+assert resumed.lock_id == stale_owner["lock_id"]
+assert not authoritative.exists()
+assert cockpit_control._same_filesystem_identity(
+    resumed.quarantine_path.lstat(), stale_identity
+)
+assert json.loads(
+    (resumed.quarantine_path / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == stale_owner
+print("repair killed before the rename left the exact lock recoverable")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "repair killed before the rename left the exact lock recoverable"
+}
+
+@test "repair and acquisition cannot interleave under the shared transition guard" {
+	local root="$BATS_TEST_TMPDIR/repair-acquire-interleaving"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+
+probe = subprocess.Popen([sys.executable, "-c", "pass"])
+probe.wait(timeout=5)
+stale_owner = cockpit_control._new_lock_owner("owner-that-already-exited")
+stale_owner["pid"] = probe.pid
+stale_owner = cockpit_control._validate_lock_owner(stale_owner)
+authoritative.mkdir(mode=0o700)
+cockpit_control._write_json(
+    authoritative / cockpit_control.LOCK_OWNER_NAME, stale_owner
+)
+cockpit_control._fsync_directory(authoritative)
+stale_identity = authoritative.lstat()
+
+repair_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+def park(boundary, repair):
+    if boundary == "repair-validated":
+        print("REPAIR_VALIDATED " + repair.owner["lock_id"], flush=True)
+        if sys.stdin.readline().strip() != "go":
+            raise RuntimeError("the repair barrier was not received")
+cockpit_control._lock_transition_fault = park
+result = cockpit_control.repair_stale_control_lock(
+    Path(sys.argv[1]), timeout_seconds=10, poll_seconds=0.01
+)
+print("REPAIR_DONE " + result.quarantine_path.name, flush=True)
+"""
+
+repairer = subprocess.Popen(
+    [sys.executable, "-c", repair_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = repairer.stdout.readline().strip()
+    assert parked == "REPAIR_VALIDATED " + stale_owner["lock_id"], (
+        repairer.stderr.read()
+    )
+
+    try:
+        cockpit_control.PortableControlLock(
+            root, "writer-blocked-by-repair", timeout_seconds=0.2, poll_seconds=0.01
+        ).acquire()
+    except cockpit_control.ControlStoreError as error:
+        message = str(error)
+        assert message.startswith("timed out after "), message
+        assert message.endswith("waiting for locks/control.guard"), message
+    else:
+        raise AssertionError("acquisition bypassed the repair transition guard")
+
+    try:
+        cockpit_control.repair_stale_control_lock(
+            root, timeout_seconds=0.2, poll_seconds=0.01
+        )
+    except cockpit_control.ControlStoreError as error:
+        assert "timed out after 0.2s waiting for locks/control.guard" in str(error)
+    else:
+        raise AssertionError("a second repair bypassed the repair transition guard")
+
+    assert cockpit_control._same_filesystem_identity(
+        authoritative.lstat(), stale_identity
+    )
+    assert not list(locks.glob(cockpit_control.LOCK_CANDIDATE_PREFIX + "*"))
+    assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+
+    repairer.stdin.write("go\n")
+    repairer.stdin.flush()
+    finished = repairer.stdout.readline().strip()
+    assert finished.startswith("REPAIR_DONE "), repairer.stderr.read()
+    quarantine = locks / finished.split(" ", 1)[1]
+finally:
+    repairer.stdin.close()
+    try:
+        repairer.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        repairer.kill()
+        repairer.wait(timeout=5)
+assert repairer.returncode == 0, repairer.stderr.read()
+
+assert not authoritative.exists()
+assert cockpit_control._same_filesystem_identity(quarantine.lstat(), stale_identity)
+assert json.loads(
+    (quarantine / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == stale_owner
+
+with cockpit_control.PortableControlLock(
+    root, "writer-after-repair", timeout_seconds=1, poll_seconds=0.01
+) as lock:
+    assert authoritative.is_dir()
+    assert lock.owner["lock_id"] != stale_owner["lock_id"]
+print("the shared transition guard serialized repair against acquisition")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "the shared transition guard serialized repair against acquisition"
+}
+
+@test "repair refuses a live same-host owner even with explicit authorization" {
+	local root="$BATS_TEST_TMPDIR/repair-live-owner"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+holder_code = r"""
+import json
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+with cockpit_control.PortableControlLock(
+    Path(sys.argv[1]), "live-owner", timeout_seconds=2, poll_seconds=0.01
+) as lock:
+    print("HOLDER_READY " + json.dumps(lock.owner), flush=True)
+    if sys.stdin.readline().strip() != "release":
+        raise RuntimeError("the holder release barrier was not received")
+print("HOLDER_RELEASED", flush=True)
+"""
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+holder = subprocess.Popen(
+    [sys.executable, "-c", holder_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    ready = holder.stdout.readline().strip()
+    assert ready.startswith("HOLDER_READY "), holder.stderr.read()
+    live_owner = json.loads(ready.split(" ", 1)[1])
+    live_identity = authoritative.lstat()
+    assert cockpit_control._prove_lock_owner_death(live_owner)[0] == (
+        cockpit_control.LOCK_OWNER_ALIVE
+    )
+
+    for authorization in (None, live_owner["lock_id"]):
+        try:
+            cockpit_control.repair_stale_control_lock(
+                root,
+                authorized_lock_id=authorization,
+                timeout_seconds=0.5,
+                poll_seconds=0.01,
+            )
+        except cockpit_control.ControlStoreError as error:
+            assert "refusing to repair a live locks/control.lock" in str(error)
+            assert "is alive" in str(error)
+            assert "lock retained" in str(error)
+        else:
+            raise AssertionError("repair moved a live same-host owner")
+
+        preview = None
+        try:
+            preview = cockpit_control.repair_stale_control_lock(
+                root,
+                authorized_lock_id=authorization,
+                timeout_seconds=0.5,
+                poll_seconds=0.01,
+                dry_run=True,
+            )
+        except cockpit_control.ControlStoreError as error:
+            assert "refusing to repair a live locks/control.lock" in str(error)
+        else:
+            raise AssertionError("a dry run approved a live same-host owner")
+        assert preview is None
+
+    assert cockpit_control._same_filesystem_identity(
+        authoritative.lstat(), live_identity
+    )
+    assert json.loads(
+        (authoritative / cockpit_control.LOCK_OWNER_NAME).read_text()
+    ) == live_owner
+    assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+
+    assert cockpit_control._prove_lock_owner_death(
+        cockpit_control._new_lock_owner("this-very-process")
+    )[0] == cockpit_control.LOCK_OWNER_ALIVE
+finally:
+    if holder.poll() is None:
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "HOLDER_RELEASED", (
+            holder.stderr.read()
+        )
+    holder.wait(timeout=5)
+assert holder.returncode == 0, holder.stderr.read()
+assert not authoritative.exists()
+print("repair refused the live same-host owner and retained the lock")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "repair refused the live same-host owner and retained the lock"
+}
+
+@test "repair fails closed for remote malformed and mis-authorized owners" {
+	local root="$BATS_TEST_TMPDIR/repair-fails-closed"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from uuid import uuid4
+
+root = Path(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+
+def publish(command, host=None, pid=None):
+    owner = cockpit_control._new_lock_owner(command)
+    if host is not None:
+        owner["host"] = host
+    if pid is not None:
+        owner["pid"] = pid
+    owner = cockpit_control._validate_lock_owner(owner)
+    authoritative.mkdir(mode=0o700)
+    cockpit_control._write_json(
+        authoritative / cockpit_control.LOCK_OWNER_NAME, owner
+    )
+    cockpit_control._fsync_directory(authoritative)
+    return owner, authoritative.lstat()
+
+def refuses(expected, **kwargs):
+    identity = authoritative.lstat()
+    before = (authoritative / cockpit_control.LOCK_OWNER_NAME).read_bytes()
+    try:
+        cockpit_control.repair_stale_control_lock(
+            root, timeout_seconds=0.5, poll_seconds=0.01, **kwargs
+        )
+    except cockpit_control.ControlStoreError as error:
+        assert expected in str(error), str(error)
+    else:
+        raise AssertionError("repair did not fail closed for: " + expected)
+    assert cockpit_control._same_filesystem_identity(
+        authoritative.lstat(), identity
+    )
+    assert (authoritative / cockpit_control.LOCK_OWNER_NAME).read_bytes() == before
+    assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+
+# A remote owner is never proven dead, even when its PID matches a live local one.
+remote_owner, remote_identity = publish(
+    "remote-owner", host="another-host.example", pid=os.getpid()
+)
+assert cockpit_control._prove_lock_owner_death(remote_owner)[0] == (
+    cockpit_control.LOCK_OWNER_UNPROVEN
+)
+refuses("refusing to repair locks/control.lock without proof of owner death")
+refuses("same-host process death cannot be proven")
+refuses("re-run with explicit authorization for lock " + remote_owner["lock_id"])
+refuses("repair authorization names lock", authorized_lock_id=str(uuid4()))
+refuses("control lock repair requires UUID authorized_lock_id", authorized_lock_id="not-a-uuid")
+refuses("control lock repair requires non-empty authorized_lock_id", authorized_lock_id="")
+
+# Explicit guarded authorization for the exact owner UUID repairs the same lock.
+authorized = cockpit_control.repair_stale_control_lock(
+    root,
+    authorized_lock_id=remote_owner["lock_id"],
+    timeout_seconds=0.5,
+    poll_seconds=0.01,
+)
+assert authorized.repaired is True
+assert "explicit guarded authorization" in authorized.reason
+assert cockpit_control._same_filesystem_identity(
+    authorized.quarantine_path.lstat(), remote_identity
+)
+assert json.loads(
+    (authorized.quarantine_path / cockpit_control.LOCK_OWNER_NAME).read_text()
+) == remote_owner
+shutil.rmtree(str(authorized.quarantine_path))
+
+# Malformed owner metadata is never repaired, with or without authorization.
+malformed_owner = publish("malformed-owner")[0]
+(authoritative / cockpit_control.LOCK_OWNER_NAME).write_text("{ not json")
+refuses("malformed locks/control.lock/owner.json")
+refuses(
+    "malformed locks/control.lock/owner.json",
+    authorized_lock_id=malformed_owner["lock_id"],
+)
+(authoritative / cockpit_control.LOCK_OWNER_NAME).write_text(
+    json.dumps({"schema_version": 1, "record_type": "control-lock"})
+)
+refuses("locks/control.lock/owner.json requires non-empty lock_id")
+(authoritative / cockpit_control.LOCK_OWNER_NAME).unlink()
+identity = authoritative.lstat()
+try:
+    cockpit_control.repair_stale_control_lock(
+        root, timeout_seconds=0.5, poll_seconds=0.01
+    )
+except cockpit_control.ControlStoreError as error:
+    assert "malformed locks/control.lock: expected exactly owner.json" in str(error)
+else:
+    raise AssertionError("repair claimed an owner-less lock directory")
+assert cockpit_control._same_filesystem_identity(authoritative.lstat(), identity)
+assert not list(locks.glob(cockpit_control.LOCK_REPAIRED_PREFIX + "*"))
+authoritative.rmdir()
+
+# Repair of an absent lock is idempotent and never creates state.
+absent = cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=0.5, poll_seconds=0.01
+)
+assert absent.outcome == cockpit_control.LOCK_REPAIR_ABSENT
+assert absent.repaired is False
+assert sorted(entry.name for entry in locks.iterdir()) == [
+    cockpit_control.CONTROL_GUARD_NAME
+]
+print("repair failed closed for every ambiguous owner")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "repair failed closed for every ambiguous owner"
+}
+
+@test "repair-lock reports guarded outcomes and fail-closed refusals on stderr" {
+	local root="$BATS_TEST_TMPDIR/repair-lock-cli"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run "$CONTROL_BIN" repair-lock
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "no locks/control.lock to repair in $root"
+
+	run python3 -c '
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+authoritative = root / cockpit_control.LOCKS_DIR_NAME / cockpit_control.CONTROL_LOCK_NAME
+probe = subprocess.Popen([sys.executable, "-c", "pass"])
+probe.wait(timeout=5)
+owner = cockpit_control._new_lock_owner("cli-stale-owner")
+owner["pid"] = probe.pid
+owner = cockpit_control._validate_lock_owner(owner)
+authoritative.mkdir(mode=0o700)
+cockpit_control._write_json(authoritative / cockpit_control.LOCK_OWNER_NAME, owner)
+cockpit_control._fsync_directory(authoritative)
+print(owner["lock_id"])
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	local stale_id="$output"
+
+	run "$CONTROL_BIN" repair-lock --dry-run
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "would quarantine control lock $stale_id"
+	echo "$output" | grep -Fq "no state changed"
+	[ -d "$root/locks/control.lock" ]
+
+	run "$CONTROL_BIN" repair-lock --authorize "00000000-0000-4000-8000-000000000000"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "cockpit-control: repair authorization names lock"
+	[ -d "$root/locks/control.lock" ]
+
+	run "$CONTROL_BIN" repair-lock
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "quarantined control lock $stale_id as locks/control.lock.repaired-$stale_id-"
+	[ ! -e "$root/locks/control.lock" ]
+	[ -n "$(find "$root/locks" -maxdepth 1 -name "control.lock.repaired-$stale_id-*" -type d)" ]
+
+	run "$CONTROL_BIN" repair-lock
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "no locks/control.lock to repair in $root"
+
+	export COCKPIT_CONTROL_ROOT=""
+	run "$CONTROL_BIN" repair-lock
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is empty"
+}

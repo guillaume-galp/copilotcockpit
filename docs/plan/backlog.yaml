@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-03T19:43:23+01:00"
+last-updated: "2026-09-03T20:06:40+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -346,7 +346,7 @@ themes:
             depends_on: [TH3.E1.US1]
           - id: TH3.E1.US3
             title: "Recoverable guarded stale-lock repair"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US3-stale-lock-repair.md

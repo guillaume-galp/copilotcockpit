@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4
 
 CONTROL_SCHEMA_VERSION = 1
@@ -37,8 +37,21 @@ CONTROL_LOCK_NAME = "control.lock"
 LOCK_OWNER_NAME = "owner.json"
 LOCK_CANDIDATE_PREFIX = f".{CONTROL_LOCK_NAME}.candidate-"
 LOCK_RELEASED_PREFIX = f"{CONTROL_LOCK_NAME}.released-"
+LOCK_REPAIRED_PREFIX = f"{CONTROL_LOCK_NAME}.repaired-"
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_POLL_SECONDS = 0.05
+
+# Owner-fate classification.  Only LOCK_OWNER_DEAD is positive proof that the
+# publisher of a lock can no longer be running; everything else is refused by
+# automatic repair.
+LOCK_OWNER_DEAD = "dead"
+LOCK_OWNER_ALIVE = "alive"
+LOCK_OWNER_UNPROVEN = "unproven"
+
+# Guarded stale-lock repair outcomes.
+LOCK_REPAIR_ABSENT = "absent"
+LOCK_REPAIR_QUARANTINED = "quarantined"
+LOCK_REPAIR_WOULD_QUARANTINE = "would-quarantine"
 
 
 class ControlStoreError(RuntimeError):
@@ -565,10 +578,13 @@ def _same_filesystem_identity(left: os.stat_result, right: os.stat_result) -> bo
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def _lock_transition_fault(boundary: str, lock: "PortableControlLock") -> None:
+def _lock_transition_fault(
+    boundary: str,
+    transition: Union["PortableControlLock", "ControlLockRepair"],
+) -> None:
     """No-op named transition hook used by deterministic protocol tests."""
 
-    del boundary, lock
+    del boundary, transition
 
 
 def _validate_lock_owner(record: Any, label: str = "control lock owner") -> Dict[str, Any]:
@@ -599,6 +615,45 @@ def _new_lock_owner(command: str) -> Dict[str, Any]:
             "acquired_at": utc_timestamp(),
         }
     )
+
+
+def _prove_lock_owner_death(owner: Mapping[str, Any]) -> Tuple[str, str]:
+    """Classify a validated lock owner as positively dead, alive, or unproven.
+
+    Only a same-host owner whose PID no longer exists is positively dead.  A
+    remote owner, a PID that cannot be signalled for an unexpected reason, and
+    any other ambiguity are `LOCK_OWNER_UNPROVEN` so that automatic repair
+    fails closed.  A PID that still exists is reported alive even when it may
+    have been recycled, because refusing repair is always the safe direction.
+    """
+
+    local_host = socket.gethostname()
+    owner_host = owner["host"]
+    if owner_host != local_host:
+        return (
+            LOCK_OWNER_UNPROVEN,
+            f"owner host {owner_host!r} is not this host {local_host!r}; "
+            "same-host process death cannot be proven",
+        )
+
+    pid = owner["pid"]
+    if pid == os.getpid():
+        return LOCK_OWNER_ALIVE, f"same-host owner pid {pid} is this running process"
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return LOCK_OWNER_DEAD, f"same-host owner pid {pid} no longer exists"
+    except PermissionError:
+        return (
+            LOCK_OWNER_ALIVE,
+            f"same-host owner pid {pid} is alive under another user",
+        )
+    except OSError as exc:
+        return (
+            LOCK_OWNER_UNPROVEN,
+            f"cannot determine the fate of same-host owner pid {pid}: {exc}",
+        )
+    return LOCK_OWNER_ALIVE, f"same-host owner pid {pid} is alive"
 
 
 def _directory_open_flags() -> int:
@@ -891,21 +946,29 @@ def _quarantine_owned_lock_while_guarded(
     locks_path: Path,
     owner: Mapping[str, Any],
     observed: os.stat_result,
+    *,
+    prefix: str = LOCK_RELEASED_PREFIX,
+    transition: str = "released",
 ) -> Tuple[Path, os.stat_result]:
-    """Atomically move one exact authoritative owner to a private quarantine."""
+    """Atomically move one exact authoritative owner to a private quarantine.
+
+    Release and repair share this single claim step so neither transition can
+    unlink a shared pathname after a separate identity check.  The caller must
+    already hold the transition guard; the rename itself is the complete claim.
+    """
 
     _validate_owned_directory(lock_path, owner, observed, f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}")
     quarantine_path = locks_path / (
-        f"{LOCK_RELEASED_PREFIX}{owner['lock_id']}-{uuid4()}"
+        f"{prefix}{owner['lock_id']}-{uuid4()}"
     )
     try:
         quarantine_path.lstat()
     except FileNotFoundError:
         pass
     except OSError as exc:
-        raise ControlStoreError(f"cannot prepare release quarantine: {exc}") from None
+        raise ControlStoreError(f"cannot prepare {transition} quarantine: {exc}") from None
     else:
-        raise ControlStoreError("cannot prepare unique release quarantine")
+        raise ControlStoreError(f"cannot prepare unique {transition} quarantine")
 
     try:
         os.rename(str(lock_path), str(quarantine_path))
@@ -915,7 +978,9 @@ def _quarantine_owned_lock_while_guarded(
             f"cannot quarantine exact control lock; lock retained: {exc}"
         ) from None
     if not _same_filesystem_identity(quarantined, observed):
-        raise ControlStoreError("released quarantine changed filesystem identity; evidence retained")
+        raise ControlStoreError(
+            f"{transition} quarantine changed filesystem identity; evidence retained"
+        )
     _fsync_directory(locks_path)
     return quarantine_path, quarantined
 
@@ -1157,6 +1222,215 @@ class PortableControlLock(AbstractContextManager):
         return False
 
 
+@dataclass(frozen=True)
+class LockRepairResult:
+    """Outcome of one guarded stale-lock repair attempt."""
+
+    root: Path
+    outcome: str
+    reason: str
+    repaired: bool
+    lock_id: Optional[str]
+    quarantine_path: Optional[Path]
+
+
+class ControlLockRepair:
+    """Guarded stale-lock repair whose only claim is one quarantine rename.
+
+    Repair holds exactly the same `locks/control.guard` transition guard as
+    acquisition and release, so no acquisition can publish a replacement lock
+    between owner validation and the rename.  There is no shared repair marker:
+    interruption before the rename leaves the authoritative lock untouched, and
+    interruption after it leaves a unique non-authoritative quarantine while the
+    authoritative path is free for a new writer.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        authorized_lock_id: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+        dry_run: bool = False,
+    ) -> None:
+        self.root = _require_absolute_root(str(root), "configured")
+        self.locks_path = self.root / LOCKS_DIR_NAME
+        self.path = self.locks_path / CONTROL_LOCK_NAME
+        self.timeout_seconds = _configured_lock_timeout(timeout_seconds)
+        self.poll_seconds = _validated_seconds(
+            poll_seconds,
+            "control lock poll interval",
+            allow_zero=False,
+        )
+        self.dry_run = bool(dry_run)
+        self.authorized_lock_id = self._validated_authorization(authorized_lock_id)
+        self.owner: Optional[Dict[str, Any]] = None
+        self.observed: Optional[os.stat_result] = None
+        self._quarantine_path: Optional[Path] = None
+
+    @staticmethod
+    def _validated_authorization(value: Optional[str]) -> Optional[str]:
+        """Require an explicit authorization to name one exact owner UUID."""
+
+        if value is None:
+            return None
+        return _require_uuid(
+            {"authorized_lock_id": value},
+            "authorized_lock_id",
+            "control lock repair",
+        )
+
+    def _observe_owner_while_guarded(
+        self,
+    ) -> Optional[Tuple[Dict[str, Any], os.stat_result]]:
+        """Read the exact published owner, or report that no lock is published."""
+
+        label = f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}"
+        try:
+            observed = self.path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ControlStoreError(f"cannot inspect {label}: {exc}") from None
+
+        descriptor = _open_exact_directory(self.path, observed, label)
+        try:
+            try:
+                entries = os.listdir(descriptor)
+            except OSError as exc:
+                raise ControlStoreError(f"cannot inspect {label}; lock retained: {exc}") from None
+            if entries != [LOCK_OWNER_NAME]:
+                raise ControlStoreError(
+                    f"malformed {label}: expected exactly {LOCK_OWNER_NAME}; lock retained"
+                )
+            owner = _read_lock_owner_from_directory(descriptor, label)
+        finally:
+            os.close(descriptor)
+
+        self.owner = owner
+        self.observed = observed
+        return owner, observed
+
+    def _authorize_while_guarded(self, owner: Mapping[str, Any]) -> str:
+        """Decide, under the guard, whether this exact owner may be repaired."""
+
+        label = f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}"
+        lock_id = owner["lock_id"]
+        if self.authorized_lock_id is not None and self.authorized_lock_id != lock_id:
+            raise ControlStoreError(
+                f"repair authorization names lock {self.authorized_lock_id}, but {label} "
+                f"is owned by {lock_id}; lock retained"
+            )
+
+        state, reason = _prove_lock_owner_death(owner)
+        if state == LOCK_OWNER_ALIVE:
+            raise ControlStoreError(
+                f"refusing to repair a live {label}: {reason}; lock retained"
+            )
+        if state == LOCK_OWNER_DEAD:
+            return f"proven same-host owner death: {reason}"
+        if self.authorized_lock_id is None:
+            raise ControlStoreError(
+                f"refusing to repair {label} without proof of owner death: {reason}; "
+                f"lock retained; re-run with explicit authorization for lock {lock_id}"
+            )
+        return f"explicit guarded authorization for lock {lock_id}: {reason}"
+
+    def _result(
+        self,
+        outcome: str,
+        reason: str,
+        repaired: bool,
+        lock_id: Optional[str],
+        quarantine_path: Optional[Path],
+    ) -> LockRepairResult:
+        return LockRepairResult(
+            root=self.root,
+            outcome=outcome,
+            reason=reason,
+            repaired=repaired,
+            lock_id=lock_id,
+            quarantine_path=quarantine_path,
+        )
+
+    def run(self) -> LockRepairResult:
+        """Perform at most one guarded repair claim and report what happened."""
+
+        _require_directory(self.root, "COCKPIT_CONTROL_ROOT")
+        _require_directory(self.locks_path, LOCKS_DIR_NAME)
+        self.owner = None
+        self.observed = None
+        self._quarantine_path = None
+
+        with ControlTransitionGuard(
+            self.locks_path,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        ):
+            _lock_transition_fault("repair-guard-held", self)
+            published = self._observe_owner_while_guarded()
+            if published is None:
+                return self._result(
+                    LOCK_REPAIR_ABSENT,
+                    f"no {LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME} is published",
+                    False,
+                    None,
+                    None,
+                )
+
+            owner, observed = published
+            reason = self._authorize_while_guarded(owner)
+            # Interruption at this boundary must leave the lock unchanged: the
+            # repair has made no filesystem claim yet.
+            _lock_transition_fault("repair-validated", self)
+            if self.dry_run:
+                return self._result(
+                    LOCK_REPAIR_WOULD_QUARANTINE,
+                    reason,
+                    False,
+                    owner["lock_id"],
+                    None,
+                )
+
+            quarantine_path, _identity = _quarantine_owned_lock_while_guarded(
+                self.path,
+                self.locks_path,
+                owner,
+                observed,
+                prefix=LOCK_REPAIRED_PREFIX,
+                transition="repaired",
+            )
+            self._quarantine_path = quarantine_path
+            # The rename is the whole claim.  Nothing is deleted, so interruption
+            # here leaves recoverable evidence and a free authoritative path.
+            _lock_transition_fault("repair-quarantined", self)
+            return self._result(
+                LOCK_REPAIR_QUARANTINED,
+                reason,
+                True,
+                owner["lock_id"],
+                quarantine_path,
+            )
+
+
+def repair_stale_control_lock(
+    root: Path,
+    authorized_lock_id: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> LockRepairResult:
+    """Quarantine one provably stale or explicitly authorized control lock."""
+
+    return ControlLockRepair(
+        root,
+        authorized_lock_id=authorized_lock_id,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    ).run()
+
+
 def _session_identity() -> str:
     """Return an explicit cockpit session identity without consulting cwd."""
 
@@ -1288,6 +1562,29 @@ def _print_error(error: Exception) -> int:
     return 1
 
 
+def _report_lock_repair(result: LockRepairResult) -> int:
+    """Print one guarded repair outcome on stdout and succeed."""
+
+    if result.outcome == LOCK_REPAIR_ABSENT:
+        print(
+            f"cockpit-control: no {LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME} to repair "
+            f"in {result.root}"
+        )
+    elif result.outcome == LOCK_REPAIR_WOULD_QUARANTINE:
+        print(
+            f"cockpit-control: would quarantine control lock {result.lock_id} "
+            f"({result.reason}); no state changed"
+        )
+    else:
+        quarantine = result.quarantine_path
+        name = "" if quarantine is None else quarantine.name
+        print(
+            f"cockpit-control: quarantined control lock {result.lock_id} as "
+            f"{LOCKS_DIR_NAME}/{name} ({result.reason})"
+        )
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the small control-store CLI used by humans and controller commands."""
 
@@ -1295,11 +1592,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="cockpit-control",
-        description="initialize and validate the versioned cockpit control store",
+        description=(
+            "initialize, validate, and guardedly repair the versioned cockpit control store"
+        ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     subcommands.add_parser("init", help="atomically initialize an explicit control root")
     subcommands.add_parser("validate", help="validate an explicit control root without mutation")
+    repair = subcommands.add_parser(
+        "repair-lock",
+        help="quarantine one provably stale control lock under the transition guard",
+    )
+    repair.add_argument(
+        "--authorize",
+        metavar="LOCK_ID",
+        default=None,
+        help=(
+            "explicitly authorize repairing this exact owner UUID when same-host "
+            "owner death cannot be proven"
+        ),
+    )
+    repair.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the guarded repair decision without changing any state",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1309,6 +1626,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             verb = "initialized" if result.created else "validated"
             print(f"cockpit-control: {verb} {result.root} (source: {result.source})")
             return 0
+        if args.command == "repair-lock":
+            return _report_lock_repair(
+                repair_stale_control_lock(
+                    resolved.path,
+                    authorized_lock_id=args.authorize,
+                    dry_run=args.dry_run,
+                )
+            )
         validate_control_store(resolved.path)
         print(f"cockpit-control: valid {resolved.path} (source: {resolved.source})")
         return 0
