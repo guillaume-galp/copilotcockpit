@@ -1,0 +1,33 @@
+# tests/unit/control-interruption-matrix.tsv — declared TH3.E1.US6 coverage registry.
+#
+# Every row of architecture section 8.4 (required interruption matrix) and every
+# required concurrent interleaving names the exact test that proves it, plus the
+# deterministic coordination boundary that test targets.  The registry is
+# mechanically enforced by tests/unit/check-interruption-matrix.sh, which is run
+# by tests/unit/cmd-control-interruption.bats in test category 1 (unit).
+#
+# Columns are tab separated:
+#   kind          boundary | interleaving
+#   key           slug of the architecture section 8.4 boundary, or interleaving name
+#   suite         bats suite under tests/unit/ that contains the proving test
+#   test          exact @test name
+#   coordination  named fault-hook boundary the test parks or crashes at
+#
+# kind	key	suite	test	coordination
+boundary	before-candidate-owner-write	cmd-control-interruption.bats	a writer killed before the candidate owner write leaves diagnosable private debris	candidate-directory-created
+boundary	after-candidate-flush-before-lock-rename	cmd-control-interruption.bats	a writer killed after the candidate flush leaves no authoritative lock	candidate-prepared
+boundary	after-lock-rename-before-guard-release	cmd-control.bats	the kernel releases the transition guard when its process dies	lock-published
+boundary	during-release-repair-validation	cmd-control.bats	repair killed before the quarantine rename leaves the exact lock unchanged	repair-validated
+boundary	during-release-repair-validation	cmd-control-interruption.bats	a releaser killed during release validation leaves the exact lock unchanged	release-validated
+boundary	after-quarantine-rename-before-cleanup	cmd-control.bats	repair killed after the quarantine rename leaves evidence and permits acquisition	repair-quarantined
+boundary	after-quarantine-rename-before-cleanup	cmd-control-interruption.bats	a releaser killed after the release quarantine rename preserves evidence	release-quarantined
+boundary	during-private-event-write	cmd-control.bats	a writer killed during private publication leaves reported debris that never commits	revision-allocated
+boundary	after-event-rename-before-ledger-replace	cmd-control.bats	a writer killed after the event rename leaves one committed revision counted once	event-committed
+boundary	during-ledger-temporary-write	cmd-control.bats	a writer killed during the ledger temporary write keeps committed events authoritative	ledger-temporary-written
+boundary	after-ledger-replace-before-lock-release	cmd-control.bats	a writer killed after the ledger replacement agrees with committed events	ledger-replaced
+interleaving	acquire-acquire	cmd-control-interruption.bats	two real acquisitions serialize on the shared transition guard and exactly one publishes	acquire-guard-held
+interleaving	acquire-repair	cmd-control-interruption.bats	an acquisition holding the transition guard blocks repair until it publishes a live owner	acquire-guard-held
+interleaving	release-acquire	cmd-control-interruption.bats	a blocked acquirer publishes the moment the holder releases	candidate-prepared
+interleaving	repair-acquire	cmd-control.bats	repair and acquisition cannot interleave under the shared transition guard	repair-validated
+interleaving	bounded-timeout	cmd-control.bats	a real contending process times out boundedly and removes only its candidate	candidate-prepared
+interleaving	replacement-preservation	cmd-control-interruption.bats	a stale handle cannot remove the replacement lock published after owner death	lock-published

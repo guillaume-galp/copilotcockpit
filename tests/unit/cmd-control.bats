@@ -556,6 +556,7 @@ guard = locks / cockpit_control.CONTROL_GUARD_NAME
 assert guard.is_file() and not guard.is_symlink()
 assert stat.S_IMODE(guard.stat().st_mode) & 0o077 == 0
 assert boundaries == [
+    "candidate-directory-created",
     "candidate-prepared",
     "acquire-guard-held",
     "lock-published-before-observed",
@@ -672,6 +673,11 @@ print("two-process timeout cleaned only the contender candidate")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "two-process timeout cleaned only the contender candidate"
+
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the bounded acquisition timeout.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 1"
 }
 
 @test "the kernel releases the transition guard when its process dies" {
@@ -773,6 +779,11 @@ print("process death released the kernel transition guard")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "process death released the kernel transition guard"
+
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the kernel-released transition guard.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 1"
 }
 
 @test "exact release fails closed when the authoritative path has a replacement owner" {
@@ -1463,6 +1474,11 @@ print("killed repair retained quarantine evidence and permitted a new writer")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "killed repair retained quarantine evidence and permitted a new writer"
+
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the abandoned repair quarantine.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 1"
 }
 
 @test "repair killed before the quarantine rename leaves the exact lock unchanged" {
@@ -1557,6 +1573,11 @@ print("repair killed before the rename left the exact lock recoverable")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "repair killed before the rename left the exact lock recoverable"
+
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the interrupted repair validation.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 1"
 }
 
 @test "repair and acquisition cannot interleave under the shared transition guard" {
@@ -1676,6 +1697,11 @@ print("the shared transition guard serialized repair against acquisition")
 ' "$root" "$BATS_TEST_DIRNAME/../../bin"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "the shared transition guard serialized repair against acquisition"
+
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the guarded repair/acquisition interleaving.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 1"
 }
 
 @test "repair refuses a live same-host owner even with explicit authorization" {
@@ -2880,6 +2906,10 @@ print("the interrupted ledger temporary never overrode committed events")
 	run "$CONTROL_BIN" list-events
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "1 committed events in $root (latest revision 1)"
+	# TH3.E1.US6 liveness: a later writer completes a real mutation after the interrupted ledger temporary write.
+	run "$CONTROL_BIN" publish-event --type liveness-after-interruption
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 2"
 }
 
 @test "a writer killed after the ledger replacement agrees with committed events" {

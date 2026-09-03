@@ -1229,6 +1229,9 @@ class PortableControlLock(AbstractContextManager):
 
         self._candidate_path = candidate_path
         try:
+            # Interruption here leaves an owner-less private directory that no
+            # reader treats as authority; it is diagnosable debris only.
+            _lock_transition_fault("candidate-directory-created", self)
             _write_json(candidate_path / LOCK_OWNER_NAME, owner)
             _fsync_directory(candidate_path)
             _validate_owned_directory(
