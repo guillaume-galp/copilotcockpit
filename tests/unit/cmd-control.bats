@@ -1966,3 +1966,674 @@ print(owner["lock_id"])
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is empty"
 }
+
+@test "one atomic rename commits a validated private candidate and advances one revision" {
+	local root="$BATS_TEST_TMPDIR/event-commit"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+root = Path(sys.argv[1])
+events = root / cockpit_control.EVENTS_DIR_NAME
+pending = root / cockpit_control.PENDING_DIR_NAME
+locks = root / cockpit_control.LOCKS_DIR_NAME
+authoritative = locks / cockpit_control.CONTROL_LOCK_NAME
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+ledger_before = (root / cockpit_control.LEDGER_NAME).read_bytes()
+compatibility_view_before = (root / cockpit_control.EVENTS_NAME).read_bytes()
+
+boundaries = []
+candidate = {}
+
+def fault(boundary, publication):
+    boundaries.append(boundary)
+    assert authoritative.is_dir(), "event publication must hold the control lock"
+    owner = json.loads((authoritative / cockpit_control.LOCK_OWNER_NAME).read_text())
+    assert owner["command"] == "commit-boundary-test"
+    if boundary == "revision-allocated":
+        assert publication.revision == 1
+        assert list(events.iterdir()) == []
+        assert list(pending.iterdir()) == []
+    elif boundary == "candidate-written":
+        private = publication.candidate_path
+        assert list(pending.iterdir()) == [private]
+        assert list(events.iterdir()) == [], "nothing is authoritative before the rename"
+        expected = cockpit_control._serialized_record(publication.record).encode("utf-8")
+        assert private.read_bytes() == expected
+        candidate["identity"] = private.lstat()
+        candidate["bytes"] = expected
+        candidate["name"] = private.name
+    elif boundary == "event-committed":
+        committed = publication.committed_path
+        assert publication.candidate_path is None
+        assert list(pending.iterdir()) == []
+        assert list(events.iterdir()) == [committed]
+        assert committed.name == candidate["name"]
+        assert committed.read_bytes() == candidate["bytes"]
+        assert cockpit_control._same_filesystem_identity(
+            committed.lstat(), candidate["identity"]
+        ), "the exact validated candidate inode must be the committed event"
+
+cockpit_control._event_publication_fault = fault
+first = cockpit_control.publish_control_event(
+    root,
+    "mission-dispatched",
+    actor="overseer",
+    payload={"queue_item_id": "QI-1"},
+    command="commit-boundary-test",
+    timeout_seconds=1,
+    poll_seconds=0.01,
+)
+assert boundaries == [
+    "revision-allocated",
+    "candidate-written",
+    "candidate-validated",
+    "event-committed",
+], boundaries
+assert first.committed
+assert first.revision == 1
+assert first.pending_debris == ()
+assert first.path.name == cockpit_control._event_filename(1, first.event_id)
+assert not authoritative.exists(), "the control lock is released after publication"
+assert sorted(entry.name for entry in locks.iterdir()) == [
+    cockpit_control.CONTROL_GUARD_NAME
+]
+
+next_boundaries = []
+
+def observe(boundary, publication):
+    next_boundaries.append(boundary)
+    assert publication.revision == 2, publication.revision
+
+cockpit_control._event_publication_fault = observe
+second = cockpit_control.publish_control_event(
+    root,
+    "mission-completed",
+    actor="overseer",
+    command="commit-boundary-test",
+    timeout_seconds=1,
+    poll_seconds=0.01,
+)
+assert next_boundaries == boundaries, next_boundaries
+assert second.revision == 2, second.revision
+assert second.event_id != first.event_id
+
+history = cockpit_control.read_committed_events(root, control_id)
+assert history.latest_revision == 2
+assert [event.revision for event in history.events] == [1, 2]
+assert history.pending == ()
+assert [event.path.name for event in history.events] == sorted(
+    entry.name for entry in events.iterdir()
+), "committed names sort in revision order"
+for event in history.events:
+    named_revision, named_event_id = cockpit_control._parse_event_filename(
+        event.path.name, event.path.name
+    )
+    assert named_revision == event.record["revision"] == event.revision
+    assert named_event_id == event.record["event_id"] == event.event_id
+    assert event.record["control_id"] == control_id
+    assert event.record["schema_version"] == cockpit_control.CONTROL_SCHEMA_VERSION
+assert history.events[0].record["payload"] == {"queue_item_id": "QI-1"}
+
+assert (root / cockpit_control.LEDGER_NAME).read_bytes() == ledger_before
+assert (root / cockpit_control.EVENTS_NAME).read_bytes() == compatibility_view_before
+print("one atomic rename per revision verified")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "one atomic rename per revision verified"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 committed events in $root (latest revision 2)"
+	echo "$output" | grep -q "^events/000000000001-.*revision 1 type mission-dispatched actor overseer$"
+	echo "$output" | grep -q "^events/000000000002-.*revision 2 type mission-completed actor overseer$"
+}
+
+@test "a writer killed during private publication leaves reported debris that never commits" {
+	local root="$BATS_TEST_TMPDIR/event-torn-candidate"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+events = root / cockpit_control.EVENTS_DIR_NAME
+pending = root / cockpit_control.PENDING_DIR_NAME
+authoritative = root / cockpit_control.LOCKS_DIR_NAME / cockpit_control.CONTROL_LOCK_NAME
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+
+writer_code = r"""
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+TORN_PREFIX_BYTES = 24
+
+def torn_write(path, record):
+    partial = cockpit_control._serialized_record(record).encode("utf-8")[:TORN_PREFIX_BYTES]
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(descriptor, partial)
+    os.fsync(descriptor)
+    os.close(descriptor)
+    print("TORN " + path.name + " " + partial.hex(), flush=True)
+    sys.stdin.readline()
+    raise AssertionError("the torn candidate barrier was released instead of killed")
+
+def fault(boundary, publication):
+    if boundary == "revision-allocated":
+        cockpit_control._write_json = torn_write
+
+cockpit_control._event_publication_fault = fault
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "interrupted-publication",
+    actor="killed-writer",
+    command="killed-writer",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    torn = writer.stdout.readline().split()
+    assert torn and torn[0] == "TORN", writer.stderr.read()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+debris = pending / torn[1]
+assert debris.is_file()
+assert debris.read_bytes() == bytes.fromhex(torn[2])
+assert 0 < debris.stat().st_size < 64, "the killed writer left an incomplete candidate"
+try:
+    json.loads(debris.read_text())
+except json.JSONDecodeError:
+    pass
+else:
+    raise AssertionError("the torn candidate was unexpectedly complete JSON")
+
+interrupted = cockpit_control.read_committed_events(root, control_id)
+assert list(events.iterdir()) == []
+assert interrupted.events == ()
+assert interrupted.latest_revision == 0, "a private candidate never advances the revision"
+assert interrupted.pending == (debris,)
+assert authoritative.is_dir(), "the killed writer still holds the control lock"
+
+repair = cockpit_control.repair_stale_control_lock(root, timeout_seconds=5, poll_seconds=0.01)
+assert repair.repaired
+
+published = cockpit_control.publish_control_event(
+    root,
+    "publication-after-debris",
+    actor="overseer",
+    command="writer-after-debris",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+assert published.committed
+assert published.revision == 1, "the debris did not consume a revision"
+assert published.pending_debris == (debris,), "publication reports retained debris"
+assert published.path != debris
+assert published.path.name != debris.name
+
+assert debris.is_file(), "debris is retained as diagnosable evidence"
+assert debris.read_bytes() == bytes.fromhex(torn[2])
+after = cockpit_control.read_committed_events(root, control_id)
+assert after.latest_revision == 1
+assert after.pending == (debris,)
+assert [event.path for event in after.events] == [published.path]
+print("killed private publication left reported non-authoritative debris")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "killed private publication left reported non-authoritative debris"
+
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "1 committed events in $root (latest revision 1)"
+	echo "$output" | grep -q "^cockpit-control: pending/000000000001-.* is non-authoritative debris from an interrupted publication; it is retained for diagnosis$"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "is non-authoritative debris"
+	[ "$(find "$root/pending" -type f | wc -l)" -eq 1 ]
+}
+
+@test "a committed revision gap fails closed names the missing revision and blocks mutation" {
+	local root="$BATS_TEST_TMPDIR/event-revision-gap"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run "$CONTROL_BIN" publish-event --type first --actor overseer
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" publish-event --type second --actor overseer
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" publish-event --type third --actor overseer
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 3"
+
+	local second
+	second="$(find "$root/events" -maxdepth 1 -name '000000000002-*.json')"
+	[ -n "$second" ]
+	local removed="$BATS_TEST_TMPDIR/removed-revision-2.json"
+	mv "$second" "$removed"
+	[ "$(find "$root/events" -maxdepth 1 -type f | wc -l)" -eq 2 ]
+
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "events is missing revision 2"
+	echo "$output" | grep -Fq "cannot become authority until the gap is repaired"
+
+	run "$CONTROL_BIN" publish-event --type blocked-by-gap
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "events is missing revision 2"
+	[ "$(find "$root/events" -maxdepth 1 -type f | wc -l)" -eq 2 ]
+	[ "$(find "$root/pending" -type f | wc -l)" -eq 0 ]
+
+	run "$CONTROL_BIN" publish-event --type blocked-by-gap --dry-run
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "events is missing revision 2"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "events is missing revision 2"
+
+	run "$OVERSEER_BIN" start
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -Fq "missing revision 2"
+
+	[ ! -e "$root/locks/control.lock" ]
+	[ -z "$(find "$root/locks" -maxdepth 1 -name 'control.lock.*')" ]
+
+	mv "$removed" "$second"
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "3 committed events in $root (latest revision 3)"
+
+	run "$CONTROL_BIN" publish-event --type after-repair
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 4"
+}
+
+@test "committed name revision and identifier disagreements fail closed without mutation" {
+	local root="$BATS_TEST_TMPDIR/event-identity"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+from uuid import uuid4
+
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+root = Path(sys.argv[1])
+events = root / cockpit_control.EVENTS_DIR_NAME
+pending = root / cockpit_control.PENDING_DIR_NAME
+locks = root / cockpit_control.LOCKS_DIR_NAME
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+
+def record(revision, event_id, **overrides):
+    event = {
+        "schema_version": cockpit_control.CONTROL_SCHEMA_VERSION,
+        "record_type": "event",
+        "event_id": event_id,
+        "control_id": control_id,
+        "timestamp": cockpit_control.utc_timestamp(),
+        "revision": revision,
+        "event_type": "crafted",
+        "actor": "test",
+        "payload": {},
+    }
+    event.update(overrides)
+    return event
+
+def place(name, event):
+    (events / name).write_text(json.dumps(event, indent=2, sort_keys=True) + "\n")
+
+def reset():
+    for entry in list(events.iterdir()) + list(pending.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            entry.rmdir()
+        else:
+            entry.unlink()
+
+def refuses(case, fragment):
+    try:
+        cockpit_control.read_committed_events(root, control_id)
+    except cockpit_control.ControlStoreError as error:
+        assert fragment in str(error), (case, str(error))
+    else:
+        raise AssertionError("discovery accepted " + case)
+    try:
+        cockpit_control.publish_control_event(
+            root, "blocked-mutation", command="identity-test",
+            timeout_seconds=1, poll_seconds=0.01,
+        )
+    except cockpit_control.ControlStoreError as error:
+        assert fragment in str(error), (case, str(error))
+    else:
+        raise AssertionError("publication accepted " + case)
+    assert list(pending.iterdir()) == [], case
+    assert sorted(entry.name for entry in locks.iterdir()) == [
+        cockpit_control.CONTROL_GUARD_NAME
+    ], case
+    reset()
+
+first_id = str(uuid4())
+second_id = str(uuid4())
+
+place(cockpit_control._event_filename(1, first_id), record(2, first_id))
+refuses("declared revision mismatch", "declares revision 2 but its filename commits revision 1")
+
+place(cockpit_control._event_filename(1, first_id), record(1, second_id))
+refuses("declared event_id mismatch", "declares event_id " + second_id)
+
+place(cockpit_control._event_filename(1, first_id), record(1, first_id))
+place(cockpit_control._event_filename(1, second_id), record(1, second_id))
+refuses("duplicate revision", "duplicates revision 1")
+
+place(cockpit_control._event_filename(1, first_id), record(1, first_id))
+place(cockpit_control._event_filename(2, first_id), record(2, first_id))
+refuses("duplicate event_id", "duplicates event_id " + first_id)
+
+place(cockpit_control._event_filename(1, first_id), record(1, first_id))
+place(cockpit_control._event_filename(3, second_id), record(3, second_id))
+refuses("revision gap", "is missing revision 2")
+
+place(cockpit_control._event_filename(2, first_id), record(2, first_id))
+refuses("first revision missing", "is missing revision 1")
+
+place("1-" + first_id + ".json", record(1, first_id))
+refuses("unpadded revision", "is not a committed event")
+
+place("00000000000x-" + first_id + ".json", record(1, first_id))
+refuses("non-numeric revision", "does not name a zero-padded revision")
+
+place("000000000000-" + first_id + ".json", record(1, first_id))
+refuses("zero revision", "does not name a positive revision")
+
+place("000000000001-not-a-uuid.json", record(1, first_id))
+refuses("non-uuid name", "does not name a UUID event_id")
+
+place("000000000001-" + first_id.upper() + ".json", record(1, first_id))
+refuses("uppercase uuid name", "does not name a canonical lowercase UUID event_id")
+
+place("." + cockpit_control._event_filename(1, first_id), record(1, first_id))
+refuses("hidden entry", "is not a committed event")
+
+(events / "notes.txt").write_text("not an event\n")
+refuses("unsupported extension", "is not a committed event")
+
+place(cockpit_control._event_filename(1, first_id), record(1, first_id, control_id=str(uuid4())))
+refuses("foreign control_id", "control_id does not match")
+
+place(
+    cockpit_control._event_filename(1, first_id),
+    record(1, first_id, schema_version=cockpit_control.CONTROL_SCHEMA_VERSION + 1),
+)
+refuses("future schema", "unsupported future schema_version")
+
+(events / cockpit_control._event_filename(1, first_id)).symlink_to(root / cockpit_control.LEDGER_NAME)
+refuses("symlinked event", "must be a regular file")
+
+(events / cockpit_control._event_filename(1, first_id)).mkdir()
+refuses("directory event", "must be a regular file")
+
+assert list(events.iterdir()) == []
+assert cockpit_control.read_committed_events(root, control_id).latest_revision == 0
+print("committed identity disagreements failed closed")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "committed identity disagreements failed closed"
+}
+
+@test "event publication dry run and malformed payloads change no committed state" {
+	local root="$BATS_TEST_TMPDIR/event-dry-run"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run "$CONTROL_BIN" publish-event --type would-commit --dry-run
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "would commit events/000000000001-"
+	echo "$output" | grep -Fq "at revision 1; no state changed"
+	[ "$(find "$root/events" -type f | wc -l)" -eq 0 ]
+	[ "$(find "$root/pending" -type f | wc -l)" -eq 0 ]
+	[ ! -e "$root/locks/control.lock" ]
+
+	run "$CONTROL_BIN" publish-event --type broken-payload --payload 'not json'
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "event payload is not valid JSON"
+	run "$CONTROL_BIN" publish-event --type broken-payload --payload '[1, 2]'
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "event payload must be a JSON object of structured metadata"
+	run "$CONTROL_BIN" publish-event --type "   " --actor overseer
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "event requires non-empty event_type"
+	[ "$(find "$root/events" -type f | wc -l)" -eq 0 ]
+	[ "$(find "$root/pending" -type f | wc -l)" -eq 0 ]
+
+	run "$CONTROL_BIN" publish-event --type committed-once --payload '{"queue_item_id": "QI-7"}'
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "committed events/000000000001-"
+	[ "$(find "$root/events" -type f | wc -l)" -eq 1 ]
+
+	local before
+	before="$(cd "$root/events" && cksum ./*)"
+	run "$CONTROL_BIN" publish-event --type would-commit-next --dry-run
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 2; no state changed"
+	[ "$(cd "$root/events" && cksum ./*)" = "$before" ]
+	[ "$(find "$root/events" -type f | wc -l)" -eq 1 ]
+}
+
+@test "event publication waits for the control lock and commits nothing when it times out" {
+	local root="$BATS_TEST_TMPDIR/event-lock-required"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+events = root / cockpit_control.EVENTS_DIR_NAME
+pending = root / cockpit_control.PENDING_DIR_NAME
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+
+holder_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+with cockpit_control.PortableControlLock(
+    Path(sys.argv[1]), "publication-holder", timeout_seconds=5, poll_seconds=0.01
+) as lock:
+    print("HOLDER_READY " + lock.owner["lock_id"], flush=True)
+    if sys.stdin.readline().strip() != "release":
+        raise RuntimeError("holder release barrier was not received")
+print("HOLDER_RELEASED", flush=True)
+"""
+
+holder = subprocess.Popen(
+    [sys.executable, "-c", holder_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    ready = holder.stdout.readline().strip()
+    assert ready.startswith("HOLDER_READY "), holder.stderr.read()
+    started = time.monotonic()
+    try:
+        cockpit_control.publish_control_event(
+            root, "needs-the-lock", command="contending-publisher",
+            timeout_seconds=0.15, poll_seconds=0.01,
+        )
+    except cockpit_control.ControlStoreError as error:
+        assert "timed out after 0.15s waiting for locks/control.lock" in str(error), str(error)
+        assert time.monotonic() - started < 2.0
+    else:
+        raise AssertionError("publication proceeded without the control lock")
+    assert list(events.iterdir()) == []
+    assert list(pending.iterdir()) == []
+    assert cockpit_control.read_committed_events(root, control_id).latest_revision == 0
+finally:
+    if holder.poll() is None:
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "HOLDER_RELEASED", holder.stderr.read()
+    holder.wait(timeout=5)
+    assert holder.returncode == 0, holder.stderr.read()
+
+published = cockpit_control.publish_control_event(
+    root, "after-the-holder", command="publisher-after-holder",
+    timeout_seconds=5, poll_seconds=0.01,
+)
+assert published.committed
+assert published.revision == 1
+assert [entry.name for entry in events.iterdir()] == [published.path.name]
+assert list(pending.iterdir()) == []
+print("event publication required the control lock")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "event publication required the control lock"
+}
+
+@test "a writer killed after the event rename leaves one committed revision counted once" {
+	local root="$BATS_TEST_TMPDIR/event-crash-after-rename"
+	export COCKPIT_CONTROL_ROOT="$root"
+	"$CONTROL_BIN" init >/dev/null
+
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+events = root / cockpit_control.EVENTS_DIR_NAME
+pending = root / cockpit_control.PENDING_DIR_NAME
+authoritative = root / cockpit_control.LOCKS_DIR_NAME / cockpit_control.CONTROL_LOCK_NAME
+control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
+ledger_before = (root / cockpit_control.LEDGER_NAME).read_bytes()
+
+writer_code = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+def park(boundary, publication):
+    if boundary == "event-committed":
+        print("EVENT_COMMITTED " + publication.committed_path.name, flush=True)
+        sys.stdin.readline()
+        raise AssertionError("the commit barrier was released instead of killed")
+
+cockpit_control._event_publication_fault = park
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "committed-then-killed",
+    actor="killed-writer",
+    command="killed-after-rename",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    parked = writer.stdout.readline().split()
+    assert parked and parked[0] == "EVENT_COMMITTED", writer.stderr.read()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+committed = events / parked[1]
+assert committed.is_file()
+assert list(pending.iterdir()) == [], "the private candidate became the committed event"
+history = cockpit_control.read_committed_events(root, control_id)
+assert [event.path for event in history.events] == [committed]
+assert history.latest_revision == 1, "the rename alone committed exactly one revision"
+assert history.events[0].record["event_type"] == "committed-then-killed"
+assert history.events[0].record["actor"] == "killed-writer"
+assert history.pending == ()
+committed_bytes = committed.read_bytes()
+assert committed_bytes == cockpit_control._serialized_record(
+    history.events[0].record
+).encode("utf-8")
+assert (root / cockpit_control.LEDGER_NAME).read_bytes() == ledger_before
+assert authoritative.is_dir(), "the killed writer still holds the control lock"
+
+assert cockpit_control.repair_stale_control_lock(
+    root, timeout_seconds=5, poll_seconds=0.01
+).repaired
+published = cockpit_control.publish_control_event(
+    root, "after-committed-crash", command="writer-after-commit-crash",
+    timeout_seconds=5, poll_seconds=0.01,
+)
+assert published.revision == 2, "the committed event is counted exactly once"
+assert committed.read_bytes() == committed_bytes, "committed events are immutable"
+assert cockpit_control.read_committed_events(root, control_id).latest_revision == 2
+print("commit-boundary crash left one immutable committed revision")
+' "$root" "$BATS_TEST_DIRNAME/../../bin"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "commit-boundary crash left one immutable committed revision"
+
+	run "$CONTROL_BIN" list-events
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 committed events in $root (latest revision 2)"
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+}
