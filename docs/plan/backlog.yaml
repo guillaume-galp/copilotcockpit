@@ -1,4 +1,5 @@
 version: "1.0"
+last-updated: "2026-09-03T19:43:23+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -338,7 +339,7 @@ themes:
             depends_on: []
           - id: TH3.E1.US2
             title: "Portable lock acquisition and exact release"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US2-journal-locking.md

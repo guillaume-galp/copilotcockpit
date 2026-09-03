@@ -7,16 +7,22 @@ share one fail-closed definition of the VP3 control-store boundary.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
+import math
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
+import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from uuid import UUID, uuid4
 
 CONTROL_SCHEMA_VERSION = 1
@@ -26,6 +32,13 @@ EVENTS_NAME = "events.jsonl"
 COMMANDS_DIR_NAME = "commands"
 ESCALATIONS_DIR_NAME = "escalations"
 LOCKS_DIR_NAME = "locks"
+CONTROL_GUARD_NAME = "control.guard"
+CONTROL_LOCK_NAME = "control.lock"
+LOCK_OWNER_NAME = "owner.json"
+LOCK_CANDIDATE_PREFIX = f".{CONTROL_LOCK_NAME}.candidate-"
+LOCK_RELEASED_PREFIX = f"{CONTROL_LOCK_NAME}.released-"
+DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
+DEFAULT_LOCK_POLL_SECONDS = 0.05
 
 
 class ControlStoreError(RuntimeError):
@@ -509,6 +522,639 @@ def _fsync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def _validated_seconds(value: Any, label: str, *, allow_zero: bool) -> float:
+    """Return one finite lock duration without accepting booleans or infinities."""
+
+    minimum_description = "non-negative" if allow_zero else "positive"
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or (value < 0 if allow_zero else value <= 0)
+    ):
+        raise ControlStoreError(f"{label} must be a {minimum_description} number of seconds")
+    return float(value)
+
+
+def _configured_lock_timeout(timeout_seconds: Optional[float]) -> float:
+    if timeout_seconds is not None:
+        return _validated_seconds(
+            timeout_seconds,
+            "control lock timeout",
+            allow_zero=True,
+        )
+    raw = os.environ.get("COCKPIT_CONTROL_LOCK_TIMEOUT_SECONDS")
+    if raw is None:
+        return DEFAULT_LOCK_TIMEOUT_SECONDS
+    try:
+        configured = float(raw)
+    except ValueError:
+        raise ControlStoreError(
+            "COCKPIT_CONTROL_LOCK_TIMEOUT_SECONDS must be a non-negative number of seconds"
+        ) from None
+    return _validated_seconds(
+        configured,
+        "COCKPIT_CONTROL_LOCK_TIMEOUT_SECONDS",
+        allow_zero=True,
+    )
+
+
+def _same_filesystem_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def _lock_transition_fault(boundary: str, lock: "PortableControlLock") -> None:
+    """No-op named transition hook used by deterministic protocol tests."""
+
+    del boundary, lock
+
+
+def _validate_lock_owner(record: Any, label: str = "control lock owner") -> Dict[str, Any]:
+    """Validate the complete identity record published with a control lock."""
+
+    owner = _require_object(record, label)
+    _require_schema_version(owner, label)
+    _require_record_type(owner, "control-lock", label)
+    _require_uuid(owner, "lock_id", label)
+    pid = owner.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise ControlStoreError(f"{label} requires positive integer pid")
+    _require_string(owner, "host", label)
+    _require_string(owner, "command", label)
+    _require_timestamp(owner, "acquired_at", label)
+    return owner
+
+
+def _new_lock_owner(command: str) -> Dict[str, Any]:
+    return _validate_lock_owner(
+        {
+            "schema_version": CONTROL_SCHEMA_VERSION,
+            "record_type": "control-lock",
+            "lock_id": str(uuid4()),
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "command": command,
+            "acquired_at": utc_timestamp(),
+        }
+    )
+
+
+def _directory_open_flags() -> int:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    return flags
+
+
+def _open_exact_directory(
+    path: Path,
+    expected: os.stat_result,
+    label: str,
+) -> int:
+    """Open only the directory inode previously identified by the caller."""
+
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise ControlStoreError(
+            f"cannot inspect {label}; replacement retained: {exc}"
+        ) from None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise ControlStoreError(f"{label} is not the expected directory; replacement retained")
+    if not _same_filesystem_identity(before, expected):
+        raise ControlStoreError(f"{label} changed filesystem identity; replacement retained")
+
+    try:
+        descriptor = os.open(str(path), _directory_open_flags())
+    except OSError as exc:
+        raise ControlStoreError(f"cannot open {label}; replacement retained: {exc}") from None
+
+    try:
+        opened = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as exc:
+        os.close(descriptor)
+        raise ControlStoreError(f"cannot verify {label}; replacement retained: {exc}") from None
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not _same_filesystem_identity(opened, expected)
+        or not _same_filesystem_identity(current, expected)
+    ):
+        os.close(descriptor)
+        raise ControlStoreError(f"{label} changed filesystem identity; replacement retained")
+    return descriptor
+
+
+def _read_lock_owner_from_directory(descriptor: int, label: str) -> Dict[str, Any]:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    owner_descriptor: Optional[int] = None
+    try:
+        owner_descriptor = os.open(LOCK_OWNER_NAME, flags, dir_fd=descriptor)
+        owner_stat = os.fstat(owner_descriptor)
+        if not stat.S_ISREG(owner_stat.st_mode):
+            raise ControlStoreError(f"{label}/{LOCK_OWNER_NAME} must be a regular file")
+        with os.fdopen(owner_descriptor, "r", encoding="utf-8") as handle:
+            owner_descriptor = None
+            record = json.load(handle)
+    except ControlStoreError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControlStoreError(f"malformed {label}/{LOCK_OWNER_NAME}: {exc}") from None
+    finally:
+        if owner_descriptor is not None:
+            os.close(owner_descriptor)
+    return _validate_lock_owner(record, f"{label}/{LOCK_OWNER_NAME}")
+
+
+def _validate_owned_directory(
+    path: Path,
+    expected_owner: Mapping[str, Any],
+    expected_identity: os.stat_result,
+    label: str,
+    *,
+    require_complete_match: bool = False,
+) -> None:
+    """Require exact directory identity, one owner file, and the expected UUID."""
+
+    descriptor = _open_exact_directory(path, expected_identity, label)
+    try:
+        try:
+            entries = os.listdir(descriptor)
+        except OSError as exc:
+            raise ControlStoreError(f"cannot inspect {label}; lock retained: {exc}") from None
+        if entries != [LOCK_OWNER_NAME]:
+            raise ControlStoreError(
+                f"{label} contains unexpected evidence; lock retained"
+            )
+        current_owner = _read_lock_owner_from_directory(descriptor, label)
+        if current_owner["lock_id"] != expected_owner.get("lock_id"):
+            raise ControlStoreError(f"{label} has another owner UUID; replacement retained")
+        if require_complete_match and current_owner != dict(expected_owner):
+            raise ControlStoreError(f"{label} owner metadata does not match its publisher")
+    finally:
+        os.close(descriptor)
+
+
+def _cleanup_owned_directory(
+    path: Path,
+    expected_owner: Mapping[str, Any],
+    expected_identity: os.stat_result,
+    label: str,
+    *,
+    allow_empty: bool = False,
+) -> bool:
+    """Remove only one exact private candidate or quarantine owned by the caller."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label}; evidence retained: {exc}") from None
+
+    descriptor = _open_exact_directory(path, expected_identity, label)
+    remove_owner = False
+    try:
+        try:
+            entries = os.listdir(descriptor)
+        except OSError as exc:
+            raise ControlStoreError(f"cannot inspect {label}; evidence retained: {exc}") from None
+        if not entries and allow_empty:
+            pass
+        elif entries == [LOCK_OWNER_NAME]:
+            current_owner = _read_lock_owner_from_directory(descriptor, label)
+            if current_owner["lock_id"] != expected_owner.get("lock_id"):
+                raise ControlStoreError(f"{label} has another owner UUID; replacement retained")
+            remove_owner = True
+        else:
+            raise ControlStoreError(f"{label} contains unexpected evidence; evidence retained")
+
+        if remove_owner:
+            try:
+                os.unlink(LOCK_OWNER_NAME, dir_fd=descriptor)
+            except OSError as exc:
+                raise ControlStoreError(
+                    f"cannot clean {label}/{LOCK_OWNER_NAME}; evidence retained: {exc}"
+                ) from None
+
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise ControlStoreError(
+                f"cannot recheck {label}; replacement retained: {exc}"
+            ) from None
+        if not _same_filesystem_identity(current, expected_identity):
+            raise ControlStoreError(f"{label} changed filesystem identity; replacement retained")
+        try:
+            path.rmdir()
+        except OSError as exc:
+            raise ControlStoreError(f"cannot clean {label}; evidence retained: {exc}") from None
+        _fsync_directory(path.parent)
+        return True
+    finally:
+        os.close(descriptor)
+
+
+class ControlTransitionGuard(AbstractContextManager):
+    """Bounded process-scoped flock serializing lock ownership transitions."""
+
+    def __init__(
+        self,
+        locks_path: Path,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    ) -> None:
+        self.locks_path = locks_path
+        self.path = locks_path / CONTROL_GUARD_NAME
+        self.timeout_seconds = _configured_lock_timeout(timeout_seconds)
+        self.poll_seconds = _validated_seconds(
+            poll_seconds,
+            "control guard poll interval",
+            allow_zero=False,
+        )
+        self._descriptor: Optional[int] = None
+
+    def acquire(self) -> "ControlTransitionGuard":
+        if self._descriptor is not None:
+            raise ControlStoreError("control transition guard is already held by this object")
+        _require_directory(self.locks_path, LOCKS_DIR_NAME)
+
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            descriptor = os.open(str(self.path), flags, 0o600)
+        except OSError as exc:
+            raise ControlStoreError(f"cannot open {LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}: {exc}") from None
+
+        acquired = False
+        try:
+            try:
+                opened = os.fstat(descriptor)
+                current = self.path.lstat()
+            except OSError as exc:
+                raise ControlStoreError(
+                    f"cannot verify {LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}: {exc}"
+                ) from None
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not _same_filesystem_identity(opened, current)
+            ):
+                raise ControlStoreError(
+                    f"{LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME} must be one stable regular file"
+                )
+            _fsync_directory(self.locks_path)
+
+            deadline = time.monotonic() + self.timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EINTR, errno.EACCES, errno.EAGAIN):
+                        raise ControlStoreError(
+                            f"cannot acquire {LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}: {exc}"
+                        ) from None
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise ControlStoreError(
+                            f"timed out after {self.timeout_seconds:g}s waiting for "
+                            f"{LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}"
+                        ) from None
+                    if exc.errno == errno.EINTR:
+                        continue
+                    time.sleep(min(self.poll_seconds, remaining))
+
+            try:
+                opened = os.fstat(descriptor)
+                current = self.path.lstat()
+            except OSError as exc:
+                raise ControlStoreError(
+                    f"cannot recheck {LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}: {exc}"
+                ) from None
+            if not _same_filesystem_identity(opened, current):
+                raise ControlStoreError(
+                    f"{LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME} changed while waiting; "
+                    "transition refused"
+                )
+            self._descriptor = descriptor
+            return self
+        except BaseException:
+            if acquired:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            os.close(descriptor)
+            raise
+
+    def release(self) -> None:
+        if self._descriptor is None:
+            return
+        descriptor = self._descriptor
+        self._descriptor = None
+        unlock_error: Optional[OSError] = None
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError as exc:
+            unlock_error = exc
+        finally:
+            os.close(descriptor)
+        if unlock_error is not None:
+            raise ControlStoreError(
+                f"cannot release {LOCKS_DIR_NAME}/{CONTROL_GUARD_NAME}: {unlock_error}"
+            )
+
+    def __enter__(self) -> "ControlTransitionGuard":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        self.release()
+        return False
+
+
+def _quarantine_owned_lock_while_guarded(
+    lock_path: Path,
+    locks_path: Path,
+    owner: Mapping[str, Any],
+    observed: os.stat_result,
+) -> Tuple[Path, os.stat_result]:
+    """Atomically move one exact authoritative owner to a private quarantine."""
+
+    _validate_owned_directory(lock_path, owner, observed, f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}")
+    quarantine_path = locks_path / (
+        f"{LOCK_RELEASED_PREFIX}{owner['lock_id']}-{uuid4()}"
+    )
+    try:
+        quarantine_path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ControlStoreError(f"cannot prepare release quarantine: {exc}") from None
+    else:
+        raise ControlStoreError("cannot prepare unique release quarantine")
+
+    try:
+        os.rename(str(lock_path), str(quarantine_path))
+        quarantined = quarantine_path.lstat()
+    except OSError as exc:
+        raise ControlStoreError(
+            f"cannot quarantine exact control lock; lock retained: {exc}"
+        ) from None
+    if not _same_filesystem_identity(quarantined, observed):
+        raise ControlStoreError("released quarantine changed filesystem identity; evidence retained")
+    _fsync_directory(locks_path)
+    return quarantine_path, quarantined
+
+
+class PortableControlLock(AbstractContextManager):
+    """Portable bounded control lock with complete publication and exact release."""
+
+    def __init__(
+        self,
+        root: Path,
+        command: str,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    ) -> None:
+        self.root = _require_absolute_root(str(root), "configured")
+        self.locks_path = self.root / LOCKS_DIR_NAME
+        self.path = self.locks_path / CONTROL_LOCK_NAME
+        self.command = command.strip() if isinstance(command, str) else ""
+        if not self.command:
+            raise ControlStoreError("control lock requires a non-empty command")
+        self.timeout_seconds = _configured_lock_timeout(timeout_seconds)
+        self.poll_seconds = _validated_seconds(
+            poll_seconds,
+            "control lock poll interval",
+            allow_zero=False,
+        )
+        self.owner: Optional[Dict[str, Any]] = None
+        self.observed: Optional[os.stat_result] = None
+        self._candidate_path: Optional[Path] = None
+        self._quarantine_path: Optional[Path] = None
+
+    def _prepare_candidate(
+        self,
+    ) -> Tuple[Dict[str, Any], Path, os.stat_result]:
+        owner = _new_lock_owner(self.command)
+        candidate_path = self.locks_path / f"{LOCK_CANDIDATE_PREFIX}{owner['lock_id']}"
+        try:
+            candidate_path.mkdir(mode=0o700)
+            candidate_identity = candidate_path.lstat()
+        except OSError as exc:
+            raise ControlStoreError(f"cannot create private control lock candidate: {exc}") from None
+
+        self._candidate_path = candidate_path
+        try:
+            _write_json(candidate_path / LOCK_OWNER_NAME, owner)
+            _fsync_directory(candidate_path)
+            _validate_owned_directory(
+                candidate_path,
+                owner,
+                candidate_identity,
+                "private control lock candidate",
+                require_complete_match=True,
+            )
+            _lock_transition_fault("candidate-prepared", self)
+            return owner, candidate_path, candidate_identity
+        except BaseException as exc:
+            try:
+                _cleanup_owned_directory(
+                    candidate_path,
+                    owner,
+                    candidate_identity,
+                    "private control lock candidate",
+                    allow_empty=True,
+                )
+            except ControlStoreError as cleanup_error:
+                raise ControlStoreError(
+                    f"control lock candidate preparation failed: {exc}; "
+                    f"safe unwind was incomplete: {cleanup_error}"
+                ) from exc
+            finally:
+                self._candidate_path = None
+            raise
+
+    def acquire(self) -> "PortableControlLock":
+        if self.owner is not None:
+            raise ControlStoreError("control lock is already held by this object")
+        _require_directory(self.root, "COCKPIT_CONTROL_ROOT")
+        _require_directory(self.locks_path, LOCKS_DIR_NAME)
+        owner, candidate_path, candidate_identity = self._prepare_candidate()
+        deadline = time.monotonic() + self.timeout_seconds
+        candidate_published = False
+
+        try:
+            while True:
+                remaining = max(0.0, deadline - time.monotonic())
+                acquired = False
+
+                with ControlTransitionGuard(
+                    self.locks_path,
+                    timeout_seconds=remaining,
+                    poll_seconds=self.poll_seconds,
+                ):
+                    _lock_transition_fault("acquire-guard-held", self)
+                    try:
+                        self.path.lstat()
+                    except FileNotFoundError:
+                        os.rename(str(candidate_path), str(self.path))
+                        candidate_published = True
+                        self._candidate_path = None
+                        _validate_owned_directory(
+                            self.path,
+                            owner,
+                            candidate_identity,
+                            f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}",
+                            require_complete_match=True,
+                        )
+                        _fsync_directory(self.locks_path)
+                        _lock_transition_fault(
+                            "lock-published-before-observed",
+                            self,
+                        )
+                        self.owner = owner
+                        self.observed = candidate_identity
+                        _lock_transition_fault("lock-published", self)
+                        acquired = True
+                    except OSError as exc:
+                        raise ControlStoreError(f"cannot inspect control lock: {exc}") from None
+
+                if acquired:
+                    return self
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ControlStoreError(
+                        f"timed out after {self.timeout_seconds:g}s waiting for "
+                        f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}"
+                    )
+                time.sleep(min(self.poll_seconds, remaining))
+        except BaseException as exc:
+            cleanup_errors: List[str] = []
+            quarantine_path: Optional[Path] = None
+            quarantine_identity: Optional[os.stat_result] = None
+            self.owner = None
+            self.observed = None
+
+            if candidate_published:
+                try:
+                    with ControlTransitionGuard(
+                        self.locks_path,
+                        timeout_seconds=self.timeout_seconds,
+                        poll_seconds=self.poll_seconds,
+                    ):
+                        quarantine_path, quarantine_identity = (
+                            _quarantine_owned_lock_while_guarded(
+                                self.path,
+                                self.locks_path,
+                                owner,
+                                candidate_identity,
+                            )
+                        )
+                        self._quarantine_path = quarantine_path
+                except BaseException as unwind_error:
+                    cleanup_errors.append(str(unwind_error))
+
+                if (
+                    quarantine_path is not None
+                    and quarantine_identity is not None
+                ):
+                    try:
+                        _cleanup_owned_directory(
+                            quarantine_path,
+                            owner,
+                            quarantine_identity,
+                            "released control lock quarantine",
+                        )
+                        self._quarantine_path = None
+                    except ControlStoreError as cleanup_error:
+                        cleanup_errors.append(str(cleanup_error))
+            else:
+                try:
+                    _cleanup_owned_directory(
+                        candidate_path,
+                        owner,
+                        candidate_identity,
+                        "private control lock candidate",
+                    )
+                except ControlStoreError as cleanup_error:
+                    cleanup_errors.append(str(cleanup_error))
+            self._candidate_path = None
+            if cleanup_errors:
+                raise ControlStoreError(
+                    f"control lock acquisition failed: {exc}; "
+                    f"safe unwind was incomplete: {'; '.join(cleanup_errors)}"
+                ) from exc
+            raise
+
+    def release(self) -> None:
+        if self.owner is None:
+            return
+        if self.observed is None:
+            raise ControlStoreError("cannot release control lock without filesystem identity")
+
+        owner = self.owner
+        observed = self.observed
+        quarantine_path: Optional[Path] = None
+        quarantine_identity: Optional[os.stat_result] = None
+        with ControlTransitionGuard(
+            self.locks_path,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        ):
+            _lock_transition_fault("release-guard-held", self)
+            _validate_owned_directory(
+                self.path,
+                owner,
+                observed,
+                f"{LOCKS_DIR_NAME}/{CONTROL_LOCK_NAME}",
+            )
+            _lock_transition_fault("release-validated", self)
+            quarantine_path, quarantine_identity = _quarantine_owned_lock_while_guarded(
+                self.path,
+                self.locks_path,
+                owner,
+                observed,
+            )
+            self.owner = None
+            self.observed = None
+            self._quarantine_path = quarantine_path
+            _lock_transition_fault("release-quarantined", self)
+
+        try:
+            _cleanup_owned_directory(
+                quarantine_path,
+                owner,
+                quarantine_identity,
+                "released control lock quarantine",
+            )
+        except ControlStoreError as exc:
+            raise ControlStoreError(
+                f"control lock released; quarantine evidence retained: {exc}"
+            ) from None
+        self._quarantine_path = None
+
+    def __enter__(self) -> "PortableControlLock":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        self.release()
+        return False
 
 
 def _session_identity() -> str:
