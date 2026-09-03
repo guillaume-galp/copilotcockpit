@@ -1,13 +1,20 @@
 # Architecture — `copilotcockpit`
 
-> Status: Proposed · Date: 2026-06-16 · Theme: TH1 · Deciders: [architect agent]
-> Implements: [VP1](../vision_of_product/VP1-e2e-bootstrap/VP1.md)
+> Status: Accepted · Date: 2026-09-03 · Themes: TH1 and future VP3 theme · Deciders: [architect agent]
+> Implements: [VP1](../vision_of_product/VP1-e2e-bootstrap/VP1.md) and
+> [VP3](../vision_of_product/VP3-overseer-orchestration-resilience/VP3.md)
 
 This document describes the architecture of the `copilotcockpit` bootstrap repo:
 what lives in it, how the two bootstrap phases work, how the e2e template is
 parameterised, and how idempotency and updates are guaranteed.
 
 Every significant decision is recorded as an ADR and linked inline.
+
+VP3 extends this baseline with a local, file-backed
+[holistic cockpit control plane](overseer-control-plane.md). The extension
+preserves tmux and the current lightweight distribution model while adding
+durable missions, structured worker lifecycle, deterministic reconciliation,
+intent-aware wakes, and correlated evidence.
 
 ---
 
@@ -22,6 +29,9 @@ Every significant decision is recorded as an ADR and linked inline.
 | P5 | **No external dependencies** beyond what the harness already needs: `bash`, `git`, `node`/`npm`, `docker`, `python3`. | Installs on a near-fresh machine; works behind corporate proxies. |
 | P6 | **Self-explaining.** | `bootstrap.sh` with no args prints usage; every script keeps `--help`. |
 | P7 | **Queue-first cockpit operations.** | The overseer can persist build requests and process them FIFO without disturbing active worker missions. ([ADR-010](../ADRs/ADR-010-fifo-queue-persistence.md)) |
+| P8 | **Externalized control state.** | Model memory and pane text are never authoritative; mission state is durable and replayable. ([ADR-012](../ADRs/ADR-012-control-store-persistence.md)) |
+| P9 | **Managed, idempotent control.** | Worker operations use lifecycle events and acknowledged command IDs rather than raw tmux manipulation. ([ADR-013](../ADRs/ADR-013-worker-lifecycle-command-protocol.md)) |
+| P10 | **Bounded autonomy.** | Each controller tick takes at most one state-changing action and recurrent wakes terminate or escalate within finite limits. ([ADR-014](../ADRs/ADR-014-deterministic-reconciliation.md), [ADR-015](../ADRs/ADR-015-intent-aware-wake-leases.md)) |
 
 ---
 
