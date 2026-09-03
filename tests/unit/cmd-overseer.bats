@@ -8,6 +8,8 @@ setup() {
 	export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
 	mkdir -p "$BATS_TEST_TMPDIR/bin"
 	cc_setup_tmux_stub
+	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/control-root"
+	"$BATS_TEST_DIRNAME/../../bin/cockpit-control" init >/dev/null
 }
 
 cc_setup_tmux_stub() {
@@ -102,4 +104,16 @@ EOF
 	grep -q '"action": "dispatch"' "$archive_dir/index.jsonl"
 	grep -q '"trace_id":' "$archive_dir/index.jsonl"
 	grep -q 'trim loop traffic' "$archive_dir/sessions/ulysses.jsonl"
+}
+
+@test "cockpit-overseer refuses legacy mutation when no explicit control root exists" {
+	unset COCKPIT_CONTROL_ROOT
+
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-overseer" dispatch \
+		--session ulysses \
+		--window worker-dev \
+		--message "TASK: must not dispatch"
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -q "COCKPIT_CONTROL_ROOT is required"
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" ]
 }

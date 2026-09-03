@@ -311,19 +311,19 @@ themes:
     slug: holistic-cockpit-control-plane
     vision: VP3-overseer-orchestration-resilience
     title: "Holistic cockpit control plane"
-    status: todo
+    status: in-progress
     locked: false
     readme: docs/themes/TH3-holistic-cockpit-control-plane/README.md
     epics:
       - id: TH3.E1
         title: "Control store and preflight foundations"
         slug: control-store-preflight
-        status: todo
+        status: in-progress
         depends_on: []
         stories:
           - id: TH3.E1.US1
             title: "Control root and versioned schemas"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US1-control-root-schemas.md

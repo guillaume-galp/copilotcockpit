@@ -19,6 +19,13 @@ func main() {
 	}
 
 	var err error
+	if !isHelpCommand(os.Args[1]) {
+		err = validateControlStore()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cockpit-protocol: %v\n", err)
+		os.Exit(1)
+	}
 	switch os.Args[1] {
 	case "meta":
 		err = cmdMeta(os.Args[2:])
@@ -59,6 +66,32 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cockpit-protocol: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func isHelpCommand(command string) bool {
+	return command == "-h" || command == "--help" || command == "help"
+}
+
+func validateControlStore() error {
+	controlBin := strings.TrimSpace(os.Getenv("COCKPIT_CONTROL_BIN"))
+	if controlBin == "" {
+		return errors.New("control root validation is unavailable: cockpit-protocol must run through its managed launcher")
+	}
+	if !filepath.IsAbs(controlBin) {
+		return errors.New("control root validation is unavailable: managed cockpit-control path must be absolute")
+	}
+
+	command := exec.Command(controlBin, "validate")
+	command.Env = os.Environ()
+	output, err := command.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	detail := strings.TrimSpace(string(output))
+	if detail == "" {
+		return fmt.Errorf("control root validation failed: %w", err)
+	}
+	return fmt.Errorf("control root validation failed: %s", detail)
 }
 
 func usage() {

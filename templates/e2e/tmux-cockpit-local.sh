@@ -55,7 +55,9 @@ BACKEND_START_CMD="${BACKEND_START_CMD:-printf '[backend placeholder] set BACKEN
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"
+COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"
 export COCKPIT_QUEUE_ROOT
+export COCKPIT_CONTROL_ROOT
 
 if [ -n "${TMUX:-}" ]; then
   SESSION="$(tmux display-message -p '#S')"
@@ -67,6 +69,7 @@ else
   fi
 fi
 tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
+tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 window_exists() {
@@ -113,6 +116,7 @@ printf "------------------------------------------------------------------\n"
 printf "  Frontend:       http://localhost:%s\n" "$FRONTEND_PORT"
 printf "  Backend health: curl -sk http://localhost:%s%s\n" "$BACKEND_PORT" "$HEALTH_PATH"
 printf "  FIFO queue:     COCKPIT_QUEUE_ROOT=%s\n" "$COCKPIT_QUEUE_ROOT"
+printf "  Control store:  COCKPIT_CONTROL_ROOT=%s\n" "$COCKPIT_CONTROL_ROOT"
 printf "  Run (governed): ./run-audit.sh --scope \"@smoke\"\n"
 printf "  Next step:      run /setup-e2e-cockpit to complete the topology\n"
 printf "==================================================================\n"

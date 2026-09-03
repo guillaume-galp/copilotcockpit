@@ -17,6 +17,10 @@ When a tmux cockpit is running, treat it as managed state. Use
 Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
 checks and short-loop polling.
 
+Before VP3 controller work, use the launcher-exported absolute
+`COCKPIT_CONTROL_ROOT` and run `cockpit-overseer start`. It may be read from the
+active tmux session only when absent from the shell; never derive it from `cwd`.
+
 Do not inspect or control the cockpit with ad-hoc raw `tmux` commands. This
 applies to read-only status requests as well as worker coordination. Do not
 improvise `tmux ls`, `tmux list-windows`, `tmux list-panes`,

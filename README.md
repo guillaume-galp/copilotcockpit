@@ -99,7 +99,8 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 | Tool | Purpose | Managed here? |
 |------|---------|---------------|
 | `cockpit-protocol` | Semantic tmux communication CLI for cockpit discovery, worker addressing, dispatch/send/tail/watch, status JSON, nudges, and report extraction. | yes |
-| `cockpit-overseer` | Compact overseer loop helper: delta polling, dispatch, reset, append-only trace archive. | yes |
+| `cockpit-overseer` | Compact overseer loop helper: control-store initialization plus root-validated delta polling, dispatch, reset, and append-only trace archive. | yes |
+| `cockpit-control` | Initialize and validate the explicit versioned VP3 control store. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
 | `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | yes |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
@@ -155,13 +156,14 @@ Installed user-scoped files:
 - `~/.local/bin/cockpit-protocol` + `~/.local/bin/cockpit-protocol.go`
 - `~/.local/bin/cockpit-overseer`
 - `~/.local/bin/cockpit-trace`
+- `~/.local/bin/cockpit-control` (+ its `cockpit_control.py` shared module)
 
 Managed roles:
 `e2e-cockpit` · `e2e-operator` · `setup-e2e-cockpit` · `setup-e2e-runbook` ·
 `worker-dev` · `worker-fix` · `worker-test` · `copilotcockpit-dev`
 
-…and `cockpit-protocol`, `cockpit-wake`, `cockpit-overseer`, and
-`cockpit-trace` into `~/.local/bin/`.
+…and `cockpit-protocol`, `cockpit-wake`, `cockpit-overseer`, `cockpit-trace`,
+`cockpit-queue`, and `cockpit-control` into `~/.local/bin/`.
 
 Or from a clone (no network call):
 

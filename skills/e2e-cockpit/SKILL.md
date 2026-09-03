@@ -256,12 +256,17 @@ current directory, because a machine may host multiple independent FIFO queues:
 
 ```bash
 export COCKPIT_QUEUE_ROOT="<repo-or-cockpit>/docs/queue"
+export COCKPIT_CONTROL_ROOT="<absolute-repo-or-cockpit>/.cockpit/control"
 tmux set-environment -t "<session>" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
+tmux set-environment -t "<session>" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"
 ```
 
 Generated cockpit launchers should set this tmux session environment when the
 session starts. `cockpit-queue` may read `COCKPIT_QUEUE_ROOT` from the shell or
 from the current tmux session environment, but it must never infer it from `cwd`.
+Before VP3 controller work, run `cockpit-overseer start`; it requires an absolute
+`COCKPIT_CONTROL_ROOT` from the shell, or (only when absent from the shell) the
+active tmux session. Never derive the control root from `cwd`.
 
 ### Queue intake
 

@@ -3,6 +3,7 @@
 cockpit-overseer — compact overseer helper for delta-only cockpit loops.
 
 Subcommands:
+  start     Atomically initialize and validate the explicit VP3 control store.
   loop      Print only changed worker pane tails since the last snapshot.
   status    Print a one-shot compact snapshot without updating state.
   dispatch  Paste a mission brief into a worker pane from a reference file.
@@ -26,6 +27,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
+
+from cockpit_control import (
+    ControlStoreError,
+    initialize_control_store,
+    resolve_control_root,
+    validate_control_store,
+)
 
 STATE_DIR = Path.home() / ".config" / "cockpit-overseer"
 STATE_FILE = STATE_DIR / "state.json"
@@ -317,6 +325,19 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_start(args: argparse.Namespace) -> int:
+    """Initialize the durable control root before controller work begins."""
+
+    try:
+        result = initialize_control_store()
+    except ControlStoreError as exc:
+        print(f"cockpit-overseer: {exc}", file=sys.stderr)
+        return 1
+    action = "initialized" if result.created else "validated"
+    print(f"cockpit-overseer: control store {action}: {result.root} (source: {result.source})")
+    return 0
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     args.session = args.session or current_session()
     if not args.session:
@@ -411,6 +432,9 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("-n", "--lines", type=int, default=5)
     common.add_argument("--mode", choices=["normal", "minimal"], default="normal")
 
+    start = sub.add_parser("start", help="initialize the explicit versioned control store")
+    start.set_defaults(func=cmd_start)
+
     loop = sub.add_parser("loop", parents=[common], help="delta-only loop snapshot")
     loop.set_defaults(func=cmd_loop)
 
@@ -440,6 +464,17 @@ def main(argv: List[str]) -> int:
     if not getattr(args, "cmd", None):
         parser.print_help()
         return 0
+
+    # `start` is the only command permitted to create the control root.  Every
+    # other overseer command is fail-closed until it resolves and validates the
+    # same explicit root, so no command can fall back to its working directory
+    # or silently operate on incompatible control state.
+    if args.cmd != "start":
+        try:
+            validate_control_store(resolve_control_root().path)
+        except ControlStoreError as exc:
+            print(f"cockpit-overseer: {exc}", file=sys.stderr)
+            return 1
 
     if args.cmd in {"loop", "status"} and not args.window:
         args.window = list(DEFAULT_WINDOWS)

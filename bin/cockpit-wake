@@ -30,11 +30,14 @@ Examples:
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+
+from cockpit_control import ControlStoreError, resolve_control_root, validate_control_store
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 WAKE_DIR   = Path.home() / ".config" / "cockpit-wake"
@@ -42,8 +45,11 @@ STATE_FILE = WAKE_DIR / "awakenings.json"
 JOBS_DIR   = WAKE_DIR / "jobs"
 SELF       = str(Path(sys.argv[0]).resolve())
 
-for d in (WAKE_DIR, JOBS_DIR):
-    d.mkdir(parents=True, exist_ok=True)
+def ensure_wake_dirs():
+    """Create wake state directories only after command validation succeeds."""
+
+    for directory in (WAKE_DIR, JOBS_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
 
 # Resolve binaries at schedule-time so fire scripts work in minimal environments
 def _bin(name):
@@ -62,6 +68,7 @@ def load_state():
         return json.load(f)
 
 def save_state(state):
+    ensure_wake_dirs()
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -144,13 +151,15 @@ def parse_once_timespec(once_str):
 INBOX_FILE = WAKE_DIR / "inbox.md"
 
 def write_inbox(id_, label, message, fired_at):
+    ensure_wake_dirs()
     entry = f"## [{fired_at}] {label or id_}\n\n{message}\n\n---\n\n"
     with open(INBOX_FILE, "a") as f:
         f.write(entry)
 
 # ── Fire script ────────────────────────────────────────────────────────────────
-def make_fire_script(id_, session, window, message, label=""):
+def make_fire_script(id_, session, window, message, control_root, label=""):
     """Write a standalone bash fire script. Used by both at and cron."""
+    ensure_wake_dirs()
     script  = JOBS_DIR / f"{id_}.sh"
     msg_file = JOBS_DIR / f"{id_}.msg"
     msg_file.write_text(message)          # pre-written message file for load-buffer
@@ -170,10 +179,11 @@ TMUX_BIN="{TMUX_BIN}"
 PYTHON="{PYTHON_BIN}"
 SELF="{SELF}"
 MSG_FILE="{msg_file}"
+export COCKPIT_CONTROL_ROOT={shlex.quote(str(control_root))}
 FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
 # 1. Write to persistent inbox — readable by any future Copilot session
-"$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT"
+"$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT" || exit $?
 
 # 2. Desktop notification (if available)
 {notify_line}
@@ -225,7 +235,14 @@ def cmd_schedule(args):
     id_   = gen_id()
     once  = args.once is not None
 
-    job_script = make_fire_script(id_, args.s, args.w, args.m, label=args.label or "")
+    job_script = make_fire_script(
+        id_,
+        args.s,
+        args.w,
+        args.m,
+        args.control_root,
+        label=args.label or "",
+    )
 
     if once:
         at_timespec, iso_dt = parse_once_timespec(args.once)
@@ -392,6 +409,21 @@ def main():
     if args.command not in dispatch:
         p.print_help()
         sys.exit(1)
+    if args.command in {
+        "schedule",
+        "cancel",
+        "fire",
+        "clean",
+        "inbox-clear",
+        "_mark-fired",
+        "_write-inbox",
+    }:
+        try:
+            resolved_root = resolve_control_root()
+            validate_control_store(resolved_root.path)
+        except ControlStoreError as exc:
+            p.exit(1, f"cockpit-wake: {exc}\n")
+        args.control_root = resolved_root.path
     dispatch[args.command](args)
 
 if __name__ == "__main__":

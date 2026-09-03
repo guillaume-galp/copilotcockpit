@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""cockpit-control — versioned VP3 control-store initialization and validation."""
+
+from cockpit_control import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
