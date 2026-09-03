@@ -15,20 +15,24 @@ and queue files. VP3 needs durable local state without adding a database server.
 Use an explicit absolute `COCKPIT_CONTROL_ROOT` containing:
 
 - versioned root metadata;
-- an append-only JSONL control event journal;
+- immutable committed control event records;
 - a replayable JSON ledger projection;
 - per-command JSON envelopes and acknowledgements;
 - escalation records;
-- an atomic `mkdir` lock with owner metadata.
+- a portable lock with owner metadata.
 
-The event journal is authoritative for mission runtime history. The ledger is a
-materialized projection with a monotonic revision. Writers share one bounded
-lock, append an event, then atomically replace the ledger through a sibling
-temporary file.
+Committed event records are authoritative for mission runtime history. The
+ledger is a materialized projection with a monotonic revision. Writers share one
+bounded lock, atomically publish an event, then atomically replace the ledger
+through a sibling temporary file.
 
-Malformed authoritative journal data fails closed. A corrupt ledger is rebuilt
-by replay. Schema migration creates a backup, and unknown future versions block
+Malformed authoritative event data fails closed. A corrupt ledger is rebuilt by
+replay. Schema migration creates a backup, and unknown future versions block
 mutation.
+
+ADR-018 refines the lock acquisition, release, and repair protocol. ADR-019
+refines event publication and makes any JSONL representation a derived
+compatibility view rather than canonical authority.
 
 ## Consequences
 
@@ -40,7 +44,7 @@ mutation.
 
 ### Negative
 
-- JSONL queries are less flexible than database queries.
+- File-backed event queries are less flexible than database queries.
 - Lock contention serializes state-changing operations.
 
 ### Risks

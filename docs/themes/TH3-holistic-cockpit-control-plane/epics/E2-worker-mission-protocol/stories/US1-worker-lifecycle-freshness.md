@@ -10,7 +10,7 @@ acceptance-criteria:
   - AC1: "Workers emit versioned accepted, running, blocked, completed, failed, cancelled, and replaced lifecycle events with mission and trace identifiers."
   - AC2: "Lifecycle sequence numbers cannot regress a terminal or newer materialized state."
   - AC3: "Heartbeat expiry produces a stale observation with a recoverable reason and never directly claims mission failure."
-depends-on: [TH3.E1.US3]
+depends-on: [TH3.E1.US7]
 ---
 
 As an overseer, I want structured worker lifecycle evidence so that availability

@@ -21,8 +21,8 @@ deterministically, and terminate recurrent wakes within bounded limits.
 
 ## Recommended Execution Order
 
-1. Establish the control root, event journal, locking, ledger replay, and
-   preflight.
+1. Establish the control root, atomic lock ownership and repair, immutable event
+   publication, ledger replay, deterministic crash proof, and preflight.
 2. Add structured worker lifecycle and idempotent commands.
 3. Implement one-action controller ticks, reconciliation, and bounded recovery.
 4. Make wakes mission-aware and connect traces and declared boundaries.
@@ -40,6 +40,8 @@ execute one story per session.
 - [ADR-015](../../ADRs/ADR-015-intent-aware-wake-leases.md)
 - [ADR-016](../../ADRs/ADR-016-trace-and-boundary-correlation.md)
 - [ADR-017](../../ADRs/ADR-017-control-plane-compatibility.md)
+- [ADR-018](../../ADRs/ADR-018-portable-lock-repair-protocol.md)
+- [ADR-019](../../ADRs/ADR-019-immutable-event-publication.md)
 
 ## Definition of Done
 

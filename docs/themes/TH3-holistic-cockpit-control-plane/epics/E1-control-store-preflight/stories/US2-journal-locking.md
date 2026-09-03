@@ -1,43 +1,44 @@
 ---
 id: TH3.E1.US2
-title: "Atomic event journal and portable locking"
+title: "Portable lock acquisition and exact release"
 type: standard
 priority: high
 size: M
 agents: [developer]
 skills: [bdd-stories]
 acceptance-criteria:
-  - AC1: "Every mutation acquires one bounded portable lock containing owner, host, command, and acquisition time."
-  - AC2: "A successful mutation appends one revisioned event and atomically replaces any affected materialized record."
-  - AC3: "Lock contention, stale-lock ambiguity, or write interruption surfaces an error without silently discarding authoritative data."
+  - AC1: "Acquisition, release, and later repair transitions are serialized by a bounded process-scoped guard that is released automatically on process death."
+  - AC2: "A complete private owner directory is flushed and atomically published as control.lock, so an authoritative owner-less lock is impossible."
+  - AC3: "Release, timeout, and error unwind remove only the exact caller-owned candidate or lock and preserve any replacement owner."
 depends-on: [TH3.E1.US1]
 ---
 
-As an overseer, I want serialized atomic control writes so that overlapping
-commands and recurrent wakes cannot corrupt mission history.
+As an overseer, I want portable lock acquisition and exact release so that a
+writer either owns one completely identified lock or leaves no authoritative
+lock behind.
 
 ## Acceptance criteria
 
-- [ ] AC1: Mutations use one bounded `mkdir` lock with owner metadata.
-- [ ] AC2: Events and projections advance through one monotonic revision.
-- [ ] AC3: Contention and interrupted writes fail visibly and preserve evidence.
+- [ ] AC1: A kernel-released transition guard serializes ownership changes.
+- [ ] AC2: Lock publication is complete and atomic.
+- [ ] AC3: Unwind and release preserve replacement ownership.
 
 ## BDD scenarios
 
-### Happy path: mutation advances one revision
+### Happy path: prepared owner becomes authoritative
 
-Given a valid control root with no active writer
-When a lifecycle event is persisted
-Then the journal gains one valid event and the projection has the same revision.
+Given a complete private owner candidate and no authoritative lock
+When acquisition publishes the candidate under the transition guard
+Then `control.lock` atomically appears with complete matching owner metadata.
 
 ### Edge case: two writers contend
 
 Given one process holds the control lock
 When a second writer reaches its bounded wait
-Then it exits without appending a duplicate event.
+Then it removes only its private candidate and leaves the owner's lock intact.
 
-### Error case: lock ownership is ambiguous
+### Error case: release sees a replacement owner
 
-Given a lock appears old but its owner cannot be proven absent
-When automatic recovery runs
-Then the lock is retained and guarded repair is required.
+Given the caller's original lock path was replaced by another owner
+When the caller attempts release
+Then release fails closed and does not rename or delete the replacement.

@@ -89,6 +89,14 @@ architecture:
       title: "Additive control-plane adoption and migration"
       status: accepted
       path: docs/ADRs/ADR-017-control-plane-compatibility.md
+    - id: ADR-018
+      title: "Portable lock acquisition and recoverable repair"
+      status: accepted
+      path: docs/ADRs/ADR-018-portable-lock-repair-protocol.md
+    - id: ADR-019
+      title: "Immutable event publication and projection replay"
+      status: accepted
+      path: docs/ADRs/ADR-019-immutable-event-publication.md
 
 themes:
   - id: TH1
@@ -329,19 +337,47 @@ themes:
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US1-control-root-schemas.md
             depends_on: []
           - id: TH3.E1.US2
-            title: "Atomic event journal and portable locking"
+            title: "Portable lock acquisition and exact release"
             status: todo
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US2-journal-locking.md
             depends_on: [TH3.E1.US1]
           - id: TH3.E1.US3
-            title: "Ledger replay and control-plane preflight"
+            title: "Recoverable guarded stale-lock repair"
             status: todo
             priority: high
             size: M
-            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US3-ledger-replay-preflight.md
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US3-stale-lock-repair.md
             depends_on: [TH3.E1.US2]
+          - id: TH3.E1.US4
+            title: "Immutable authoritative event publication"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US4-immutable-event-publication.md
+            depends_on: [TH3.E1.US2]
+          - id: TH3.E1.US5
+            title: "Materialized ledger projection and replay"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US5-ledger-projection-replay.md
+            depends_on: [TH3.E1.US4]
+          - id: TH3.E1.US6
+            title: "Deterministic crash-consistency and interleaving proof"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US6-crash-consistency-proof.md
+            depends_on: [TH3.E1.US3, TH3.E1.US5]
+          - id: TH3.E1.US7
+            title: "Control-plane preflight and guarded repair diagnostics"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US7-control-plane-preflight.md
+            depends_on: [TH3.E1.US6]
 
       - id: TH3.E2
         title: "Worker lifecycle and idempotent mission protocol"
@@ -355,7 +391,7 @@ themes:
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US1-worker-lifecycle-freshness.md
-            depends_on: [TH3.E1.US3]
+            depends_on: [TH3.E1.US7]
           - id: TH3.E2.US2
             title: "Idempotent command envelopes and acknowledgements"
             status: todo
@@ -383,7 +419,7 @@ themes:
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US1-controller-tick-precedence.md
-            depends_on: [TH3.E1.US3, TH3.E2.US2]
+            depends_on: [TH3.E1.US7, TH3.E2.US2]
           - id: TH3.E3.US2
             title: "Stale-worker recovery and conflict reconciliation"
             status: todo
@@ -411,7 +447,7 @@ themes:
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E4-wakes-evidence-boundaries/stories/US1-mission-aware-wakes.md
-            depends_on: [TH3.E1.US3, TH3.E3.US1]
+            depends_on: [TH3.E1.US7, TH3.E3.US1]
           - id: TH3.E4.US2
             title: "Wake leases and duplicate suppression"
             status: todo
@@ -439,7 +475,7 @@ themes:
             priority: medium
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US1-additive-migration.md
-            depends_on: [TH3.E1.US3, TH3.E2.US3, TH3.E4.US1]
+            depends_on: [TH3.E1.US7, TH3.E2.US3, TH3.E4.US1]
           - id: TH3.E5.US2
             title: "Control-plane contract and fault-injection coverage"
             status: todo

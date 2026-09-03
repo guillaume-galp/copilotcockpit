@@ -10,7 +10,7 @@ acceptance-criteria:
   - AC1: "A VP3 wake stores mission, queue item, owner, intent, stop condition, cadence, blocker threshold, and lifecycle state."
   - AC2: "Scheduled jobs invoke a controller tick rather than directly pasting an autonomous mission prompt."
   - AC3: "Completion, cancellation, supersession, terminal queue state, fulfilled stop condition, or human suspension terminates or skips future action."
-depends-on: [TH3.E1.US3, TH3.E3.US1]
+depends-on: [TH3.E1.US7, TH3.E3.US1]
 ---
 
 As an overseer, I want recurrent wakes bound to durable mission intent so that

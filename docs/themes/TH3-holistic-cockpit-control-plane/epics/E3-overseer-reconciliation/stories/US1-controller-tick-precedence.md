@@ -10,7 +10,7 @@ acceptance-criteria:
   - AC1: "A controller tick validates roots, replays new events, reads queue and worker state, and selects at most one state-changing action."
   - AC2: "Human decisions, queue state, durable events, ledger, validated reports, live status, and pane text follow ADR-014 precedence."
   - AC3: "A tick with no valid action persists its observation or escalation state and exits without repeated investigation."
-depends-on: [TH3.E1.US3, TH3.E2.US2]
+depends-on: [TH3.E1.US7, TH3.E2.US2]
 ---
 
 As an overseer, I want a deterministic short controller tick so that recurrent
