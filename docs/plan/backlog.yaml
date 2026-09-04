@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-03T21:33:50+01:00"
+last-updated: "2026-09-03T22:40:20+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -374,7 +374,7 @@ themes:
             depends_on: [TH3.E1.US3, TH3.E1.US5]
           - id: TH3.E1.US7
             title: "Control-plane preflight and guarded repair diagnostics"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E1-control-store-preflight/stories/US7-control-plane-preflight.md

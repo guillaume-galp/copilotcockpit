@@ -41,3 +41,81 @@ cc_make_project_dir() {
 cc_count_backups() {
 	find "$1" -name '*.bak-*' 2>/dev/null | grep -c . || true
 }
+
+# cc_control_snapshot <root> — print one stable, sorted description of every path
+# under <root>: relative name, device, inode, mode, size, nanosecond mtime, and
+# the SHA-256 of every regular file. Two snapshots compare equal only when the
+# store is byte-identical *and* nothing was created, replaced, or re-timestamped,
+# which is how the read-only control preflight contract is proven.
+cc_control_snapshot() {
+	python3 -c '
+import hashlib
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+paths = set()
+for directory, directories, files in os.walk(root):
+    paths.add(directory)
+    for name in directories + files:
+        paths.add(os.path.join(directory, name))
+
+rows = []
+for path in sorted(paths):
+    info = os.lstat(path)
+    digest = "-"
+    if stat.S_ISREG(info.st_mode):
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+    rows.append(
+        "%s dev=%d ino=%d mode=%o size=%d mtime=%d sha=%s"
+        % (
+            os.path.relpath(path, root),
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_size,
+            info.st_mtime_ns,
+            digest,
+        )
+    )
+print("\n".join(rows))
+' "$1"
+}
+
+# cc_control_contents <root> — print one stable description of every path under
+# <root> that ignores directory timestamps: acquiring and releasing the control
+# lock legitimately re-timestamps locks/, so an idempotency proof compares the
+# set of paths plus the inode, size, and SHA-256 of every regular file instead.
+cc_control_contents() {
+	python3 -c '
+import hashlib
+import os
+import stat
+import sys
+
+root = sys.argv[1]
+paths = set()
+for directory, directories, files in os.walk(root):
+    paths.add(directory)
+    for name in directories + files:
+        paths.add(os.path.join(directory, name))
+
+rows = []
+for path in sorted(paths):
+    info = os.lstat(path)
+    if stat.S_ISREG(info.st_mode):
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        rows.append(
+            "%s file ino=%d size=%d sha=%s"
+            % (os.path.relpath(path, root), info.st_ino, info.st_size, digest)
+        )
+    else:
+        rows.append(
+            "%s other mode=%o" % (os.path.relpath(path, root), info.st_mode)
+        )
+print("\n".join(rows))
+' "$1"
+}

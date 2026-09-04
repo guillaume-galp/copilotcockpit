@@ -100,7 +100,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 |------|---------|---------------|
 | `cockpit-protocol` | Semantic tmux communication CLI for cockpit discovery, worker addressing, dispatch/send/tail/watch, status JSON, nudges, and report extraction. | yes |
 | `cockpit-overseer` | Compact overseer loop helper: control-store initialization plus root-validated delta polling, dispatch, reset, and append-only trace archive. | yes |
-| `cockpit-control` | Initialize and validate the explicit versioned VP3 control store. | yes |
+| `cockpit-control` | Own the explicit versioned VP3 control store: `init`, `validate`, `publish-event`, `list-events`, `replay-ledger`, read-only `preflight`, and the guarded `repair-lock` / `repair-store` diagnostics. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
 | `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | yes |
 | `cockpit-wake` | Fire scheduled messages into tmux panes. | yes |
