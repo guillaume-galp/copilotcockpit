@@ -5,14 +5,17 @@ This module is deliberately dependency-free so installed cockpit commands can
 share one fail-closed definition of the VP3 control-store boundary, one portable
 control-lock protocol, one immutable event-publication protocol, one versioned
 worker lifecycle vocabulary with monotonic sequence and freshness semantics, one
-read-only readiness diagnosis, and one explicit guarded repair that never
-deletes anything.
+versioned command envelope and acknowledgement protocol whose redelivery is
+idempotent and whose identifier reuse is a recorded conflict, one read-only
+readiness diagnosis, and one explicit guarded repair that never deletes
+anything.
 """
 
 from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -233,6 +236,201 @@ LIFECYCLE_STALE_RECOVERY = "awaiting-bounded-recovery"
 
 DEFAULT_LIFECYCLE_COMMAND = "cockpit-control record-lifecycle"
 DEFAULT_LIFECYCLE_STATUS_COMMAND = "cockpit-control lifecycle-status"
+
+
+# --- versioned mission commands and acknowledgements (ADR-013, section 10) ---
+
+# The command contract is versioned independently of the control-store schema
+# and of the worker lifecycle vocabulary, so a controller or worker speaking an
+# older or newer command protocol is refused explicitly instead of being
+# partially understood.
+COMMAND_SCHEMA_VERSION = 1
+COMMAND_ENVELOPE_RECORD_TYPE = "command-envelope"
+COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE = "command-acknowledgement"
+# One committed event carries at most one command record, always under one of
+# these payload fields, and its event type is fixed by that record.  Neither
+# half can exist without the other, so a command record cannot be smuggled in
+# under an unrelated event type and a command event type cannot be empty.
+COMMAND_ENVELOPE_PAYLOAD_FIELD = "command_envelope"
+COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD = "command_acknowledgement"
+COMMAND_REGISTERED_EVENT_TYPE = "command-registered"
+COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX = "command-acknowledged-"
+
+# A payload digest is computed over one canonical serialization, so the same
+# logical payload always yields the same digest in every process and any
+# difference in the payload yields a different one.
+COMMAND_DIGEST_ALGORITHM = "sha256"
+COMMAND_DIGEST_PREFIX = f"{COMMAND_DIGEST_ALGORITHM}:"
+COMMAND_DIGEST_HEX_DIGITS = 64
+COMMAND_DIGEST_HEX_ALPHABET = "0123456789abcdef"
+
+# A command names exactly one target: the worker that must apply it, or the
+# queue surface it addresses.  The vocabulary is closed so an unknown target
+# kind is refused rather than delivered somewhere unintended.
+COMMAND_TARGET_WORKER = "worker"
+COMMAND_TARGET_QUEUE = "queue"
+COMMAND_TARGET_KINDS = (COMMAND_TARGET_WORKER, COMMAND_TARGET_QUEUE)
+COMMAND_TARGET_FIELDS = ("kind", "id")
+
+# ADR-016 mission boundaries: every command declares the roots it may work in
+# and the runtime boundaries it may not cross.  US2 persists the declaration on
+# the envelope; enforcing it against observed evidence is a later story.
+COMMAND_BOUNDARY_FIELDS = (
+    "control_root",
+    "queue_root",
+    "planning_root",
+    "implementation_roots",
+    "runtime_boundaries",
+)
+
+# The complete, closed field set of one command envelope.  Every field is always
+# present, so a partially written envelope is malformed rather than defaulted.
+COMMAND_ENVELOPE_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "command_type",
+    "mission_id",
+    "queue_item_id",
+    "target",
+    "trace_id",
+    "parent_trace_id",
+    "payload_digest",
+    "boundaries",
+    "created_at",
+    "deadline_at",
+)
+# One command ID always describes exactly one command.  Everything except the
+# delivery timestamp is therefore part of command identity: a redelivery that
+# changes any of it is a conflict rather than a retry.
+COMMAND_ENVELOPE_IDENTITY_FIELDS = tuple(
+    field for field in COMMAND_ENVELOPE_FIELDS if field != "created_at"
+)
+
+# The complete, closed field set of one acknowledgement.  Acknowledgements carry
+# no sequence of their own: the committed revision that published them is the
+# only ordering the control plane trusts.
+COMMAND_ACKNOWLEDGEMENT_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "payload_digest",
+    "outcome",
+    "acknowledged_by",
+    "acknowledged_at",
+    "reason",
+    "result_refs",
+)
+
+# The complete, closed acknowledgement vocabulary of ADR-013.
+COMMAND_ACCEPTED = "accepted"
+COMMAND_APPLIED = "applied"
+COMMAND_REJECTED = "rejected"
+COMMAND_DUPLICATE = "duplicate"
+COMMAND_ACKNOWLEDGEMENT_OUTCOMES = (
+    COMMAND_ACCEPTED,
+    COMMAND_APPLIED,
+    COMMAND_REJECTED,
+    COMMAND_DUPLICATE,
+)
+# Outcomes that must explain themselves: nothing is refused or deduplicated
+# silently.
+COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED = (COMMAND_REJECTED, COMMAND_DUPLICATE)
+
+# Materialized command status.  A command is registered when its envelope is
+# committed and then moves only through acknowledgements.
+COMMAND_STATUS_REGISTERED = "registered"
+COMMAND_STATUSES = (
+    COMMAND_STATUS_REGISTERED,
+    COMMAND_ACCEPTED,
+    COMMAND_APPLIED,
+    COMMAND_REJECTED,
+)
+
+# The closed acknowledgement order.  `applied` is reachable exactly once and
+# only from `accepted`, so no redelivery, retry, or concurrent acknowledgement
+# can apply one command twice.  `duplicate` is always recordable and never
+# advances anything, which is precisely what makes redelivery safe.
+COMMAND_ACKNOWLEDGEMENT_TRANSITIONS = {
+    COMMAND_STATUS_REGISTERED: {
+        COMMAND_ACCEPTED: COMMAND_ACCEPTED,
+        COMMAND_REJECTED: COMMAND_REJECTED,
+        COMMAND_DUPLICATE: COMMAND_STATUS_REGISTERED,
+    },
+    COMMAND_ACCEPTED: {
+        COMMAND_APPLIED: COMMAND_APPLIED,
+        COMMAND_REJECTED: COMMAND_REJECTED,
+        COMMAND_DUPLICATE: COMMAND_ACCEPTED,
+    },
+    COMMAND_APPLIED: {COMMAND_DUPLICATE: COMMAND_APPLIED},
+    COMMAND_REJECTED: {COMMAND_DUPLICATE: COMMAND_REJECTED},
+}
+
+# Materialized command slots live in the derived ledger under this field.
+LEDGER_COMMANDS_FIELD = "commands"
+LEDGER_COMMAND_FIELDS = (
+    "envelope",
+    "status",
+    "deliveries",
+    "acknowledgements",
+    "conflicts",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_COMMAND_DELIVERY_FIELDS = ("revision", "event_id", "recorded_at")
+LEDGER_COMMAND_ACKNOWLEDGEMENT_FIELDS = (
+    "acknowledgement",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_COMMAND_CONFLICT_FIELDS = (
+    "payload_digest",
+    "reason",
+    "source",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+
+# Why one delivery or acknowledgement conflicted with the stored command, and
+# which half of the protocol observed it.  Both vocabularies are closed, so a
+# conflict is a structured fact rather than a sentence to be parsed.
+COMMAND_CONFLICT_DIGEST = "digest-conflict"
+COMMAND_CONFLICT_ENVELOPE = "envelope-conflict"
+COMMAND_CONFLICT_REASONS = (COMMAND_CONFLICT_DIGEST, COMMAND_CONFLICT_ENVELOPE)
+COMMAND_CONFLICT_DELIVERY = "delivery"
+COMMAND_CONFLICT_ACKNOWLEDGEMENT = "acknowledgement"
+COMMAND_CONFLICT_SOURCES = (COMMAND_CONFLICT_DELIVERY, COMMAND_CONFLICT_ACKNOWLEDGEMENT)
+
+# How the deterministic fold treated one committed command event.  Every
+# committed event is retained forever; these outcomes only say whether it also
+# moved the materialized command state.
+COMMAND_FOLD_REGISTERED = "registered"
+COMMAND_FOLD_ACKNOWLEDGED = "acknowledged"
+COMMAND_FOLD_CONFLICT_RECORDED = "conflict-recorded"
+COMMAND_FOLD_RETAINED_DUPLICATE = "retained-duplicate-delivery"
+COMMAND_FOLD_RETAINED_UNKNOWN = "retained-unknown-command"
+COMMAND_FOLD_RETAINED_DIGEST = "retained-digest-mismatch"
+COMMAND_FOLD_RETAINED_ORDER = "retained-invalid-outcome"
+
+# Protocol-authored acknowledgement and conflict explanations.  They are fixed
+# strings so a redelivery or a conflict always reads the same way.
+COMMAND_DUPLICATE_REASON = (
+    "redelivery of a command already registered with the same payload digest"
+)
+COMMAND_CONFLICT_EXPLANATIONS = {
+    COMMAND_CONFLICT_DIGEST: (
+        "the command ID already belongs to a different payload digest"
+    ),
+    COMMAND_CONFLICT_ENVELOPE: (
+        "the command ID already belongs to a different command envelope"
+    ),
+}
+
+DEFAULT_COMMAND_REGISTER_COMMAND = "cockpit-control register-command"
+DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND = "cockpit-control acknowledge-command"
 
 
 class ControlStoreError(RuntimeError):
@@ -537,6 +735,99 @@ def validate_worker_missions(value: Any, label: str) -> Dict[str, Any]:
     return value
 
 
+def validate_commands(value: Any, label: str) -> Dict[str, Any]:
+    """Validate the materialized command slots the derived ledger holds.
+
+    Each slot is keyed by its command ID and embeds the exact envelope that
+    registered it, every delivery of it, every acknowledgement of it, and every
+    conflict recorded against it, each with the committed revision and event
+    that published it.  The projection is therefore auditable back to immutable
+    event files, and a hand-edited ledger fails closed instead of being trusted.
+    """
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_COMMANDS_FIELD}")
+    for command_id in sorted(value):
+        slot_label = f"{label} {LEDGER_COMMANDS_FIELD}[{command_id}]"
+        slot = value[command_id]
+        if not isinstance(slot, dict):
+            raise ControlStoreError(f"{slot_label} must be a JSON object")
+        _require_closed_fields(slot, LEDGER_COMMAND_FIELDS, slot_label)
+        envelope = validate_command_envelope(slot["envelope"], f"{slot_label} envelope")
+        if envelope["command_id"] != command_id:
+            raise ControlStoreError(
+                f"{slot_label} holds the envelope of command {envelope['command_id']}"
+            )
+        status = _require_string(slot, "status", slot_label)
+        if status not in COMMAND_STATUSES:
+            raise ControlStoreError(
+                f"{slot_label} declares unknown status {status!r}; expected one of "
+                f"{', '.join(COMMAND_STATUSES)}"
+            )
+        _require_positive_integer(slot, "revision", slot_label)
+        _require_uuid(slot, "event_id", slot_label)
+        _require_timestamp(slot, "recorded_at", slot_label)
+
+        deliveries = slot["deliveries"]
+        if not isinstance(deliveries, list) or not deliveries:
+            raise ControlStoreError(f"{slot_label} requires at least one delivery")
+        for index, delivery in enumerate(deliveries):
+            entry_label = f"{slot_label} deliveries[{index}]"
+            if not isinstance(delivery, dict):
+                raise ControlStoreError(f"{entry_label} must be a JSON object")
+            _require_closed_fields(delivery, LEDGER_COMMAND_DELIVERY_FIELDS, entry_label)
+            _require_positive_integer(delivery, "revision", entry_label)
+            _require_uuid(delivery, "event_id", entry_label)
+            _require_timestamp(delivery, "recorded_at", entry_label)
+
+        acknowledgements = slot["acknowledgements"]
+        if not isinstance(acknowledgements, list):
+            raise ControlStoreError(f"{slot_label} requires array acknowledgements")
+        for index, entry in enumerate(acknowledgements):
+            entry_label = f"{slot_label} acknowledgements[{index}]"
+            if not isinstance(entry, dict):
+                raise ControlStoreError(f"{entry_label} must be a JSON object")
+            _require_closed_fields(
+                entry, LEDGER_COMMAND_ACKNOWLEDGEMENT_FIELDS, entry_label
+            )
+            acknowledgement = validate_command_acknowledgement(
+                entry["acknowledgement"], f"{entry_label} acknowledgement"
+            )
+            if acknowledgement["command_id"] != command_id:
+                raise ControlStoreError(
+                    f"{entry_label} acknowledges command {acknowledgement['command_id']}"
+                )
+            _require_positive_integer(entry, "revision", entry_label)
+            _require_uuid(entry, "event_id", entry_label)
+            _require_timestamp(entry, "recorded_at", entry_label)
+
+        conflicts = slot["conflicts"]
+        if not isinstance(conflicts, list):
+            raise ControlStoreError(f"{slot_label} requires array conflicts")
+        for index, conflict in enumerate(conflicts):
+            entry_label = f"{slot_label} conflicts[{index}]"
+            if not isinstance(conflict, dict):
+                raise ControlStoreError(f"{entry_label} must be a JSON object")
+            _require_closed_fields(conflict, LEDGER_COMMAND_CONFLICT_FIELDS, entry_label)
+            _require_digest(conflict, "payload_digest", entry_label)
+            reason = _require_string(conflict, "reason", entry_label)
+            if reason not in COMMAND_CONFLICT_REASONS:
+                raise ControlStoreError(
+                    f"{entry_label} declares unknown reason {reason!r}; expected one of "
+                    f"{', '.join(COMMAND_CONFLICT_REASONS)}"
+                )
+            conflict_source = _require_string(conflict, "source", entry_label)
+            if conflict_source not in COMMAND_CONFLICT_SOURCES:
+                raise ControlStoreError(
+                    f"{entry_label} declares unknown source {conflict_source!r}; expected "
+                    f"one of {', '.join(COMMAND_CONFLICT_SOURCES)}"
+                )
+            _require_positive_integer(conflict, "revision", entry_label)
+            _require_uuid(conflict, "event_id", entry_label)
+            _require_timestamp(conflict, "recorded_at", entry_label)
+    return value
+
+
 def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -> Dict[str, Any]:
     """Validate the root-level materialized ledger schema."""
 
@@ -560,6 +851,9 @@ def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -
     if LEDGER_WORKER_MISSIONS_FIELD not in data:
         raise ControlStoreError(f"{label} requires {LEDGER_WORKER_MISSIONS_FIELD}")
     validate_worker_missions(data[LEDGER_WORKER_MISSIONS_FIELD], label)
+    if LEDGER_COMMANDS_FIELD not in data:
+        raise ControlStoreError(f"{label} requires {LEDGER_COMMANDS_FIELD}")
+    validate_commands(data[LEDGER_COMMANDS_FIELD], label)
     return data
 
 
@@ -619,24 +913,33 @@ def _shifted_timestamp(base: str, seconds: float) -> str:
     return shifted.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _require_evidence_refs(record: Mapping[str, Any], label: str, *, required: bool) -> List[str]:
-    """Require typed `<type>:<value>` evidence references rather than free text.
+def _require_typed_references(
+    record: Mapping[str, Any],
+    name: str,
+    label: str,
+    *,
+    required: bool,
+    noun: str,
+) -> List[str]:
+    """Require typed `<type>:<value>` references rather than free text.
 
-    ADR-016 keeps canonical records metadata-only, so evidence is carried as a
-    typed reference an operator can resolve later.  Anything shapeless, blank,
-    whitespace-bearing, or duplicated is refused before it can be committed.
+    ADR-016 keeps canonical records metadata-only, so evidence, declared runtime
+    boundaries, and stored results are all carried as typed references an
+    operator can resolve later.  Anything shapeless, blank, whitespace-bearing,
+    or duplicated is refused before it can be committed, which also keeps every
+    such value safe to render into a line-oriented payload.
     """
 
-    if "evidence_refs" not in record:
-        raise ControlStoreError(f"{label} requires evidence_refs")
-    value = record["evidence_refs"]
+    if name not in record:
+        raise ControlStoreError(f"{label} requires {name}")
+    value = record[name]
     if not isinstance(value, list):
-        raise ControlStoreError(f"{label} requires array evidence_refs")
+        raise ControlStoreError(f"{label} requires array {name}")
     if required and not value:
-        raise ControlStoreError(f"{label} requires at least one evidence reference")
+        raise ControlStoreError(f"{label} requires at least one {noun} reference")
     accepted: List[str] = []
     for index, reference in enumerate(value):
-        field = f"evidence_refs[{index}]"
+        field = f"{name}[{index}]"
         if not isinstance(reference, str) or not reference:
             raise ControlStoreError(f"{label} requires non-empty string {field}")
         if reference.split() != [reference]:
@@ -644,19 +947,27 @@ def _require_evidence_refs(record: Mapping[str, Any], label: str, *, required: b
         kind, separator, identifier = reference.partition(":")
         if not separator or not identifier:
             raise ControlStoreError(
-                f"{label} {field} must be a typed '<type>:<value>' evidence reference"
+                f"{label} {field} must be a typed '<type>:<value>' {noun} reference"
             )
         if not kind[:1].isascii() or not kind[:1].isalpha() or not all(
             character.isascii() and (character.islower() or character.isdigit() or character == "-")
             for character in kind
         ):
             raise ControlStoreError(
-                f"{label} {field} must name a lowercase evidence type before ':'"
+                f"{label} {field} must name a lowercase {noun} type before ':'"
             )
         if reference in accepted:
-            raise ControlStoreError(f"{label} duplicates evidence reference {reference}")
+            raise ControlStoreError(f"{label} duplicates {noun} reference {reference}")
         accepted.append(reference)
     return accepted
+
+
+def _require_evidence_refs(record: Mapping[str, Any], label: str, *, required: bool) -> List[str]:
+    """Require the typed evidence references a lifecycle record carries."""
+
+    return _require_typed_references(
+        record, "evidence_refs", label, required=required, noun="evidence"
+    )
 
 
 def _require_blocker(record: Mapping[str, Any], label: str, state: str) -> Optional[Dict[str, Any]]:
@@ -802,6 +1113,329 @@ def event_worker_lifecycle(record: Mapping[str, Any], label: str) -> Optional[Di
     return lifecycle
 
 
+def _require_string_keys(value: Any, label: str) -> None:
+    """Refuse any payload whose object keys are not strings.
+
+    A non-string key would either be refused by the serializer or silently
+    coerced, and a coerced key would let two different payloads share one
+    digest.  Refusing it keeps the digest a total, injective-by-construction
+    function of the canonical serialization.
+    """
+
+    if isinstance(value, dict):
+        for key in value:
+            if not isinstance(key, str):
+                raise ControlStoreError(f"{label} requires string field names")
+            _require_string_keys(value[key], label)
+    elif isinstance(value, list):
+        for item in value:
+            _require_string_keys(item, label)
+
+
+def canonical_command_payload(payload: Any, label: str = "command payload") -> str:
+    """Render the one canonical serialization a command payload is digested from.
+
+    Keys are sorted, separators are fixed, non-ASCII characters are escaped, and
+    non-finite numbers are refused, so two processes on two hosts serialize the
+    same logical payload into exactly the same bytes.
+    """
+
+    if not isinstance(payload, dict):
+        raise ControlStoreError(f"{label} must be a JSON object of structured metadata")
+    try:
+        _require_string_keys(payload, label)
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    # A payload nested more deeply than the interpreter can walk is refused with
+    # a diagnostic instead of escaping as a RecursionError traceback that would
+    # leak internal paths and break the fail-closed contract.
+    except RecursionError:
+        raise ControlStoreError(
+            f"{label} is nested too deeply to serialize canonically"
+        ) from None
+    except (TypeError, ValueError) as exc:
+        raise ControlStoreError(f"cannot serialize {label}: {exc}") from None
+
+
+def command_payload_digest(payload: Any, label: str = "command payload") -> str:
+    """Return the deterministic `sha256:<hex>` digest of one command payload."""
+
+    canonical = canonical_command_payload(payload, label).encode("utf-8")
+    return f"{COMMAND_DIGEST_PREFIX}{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _require_digest(record: Mapping[str, Any], field: str, label: str) -> str:
+    """Require one exactly-shaped payload digest and nothing else."""
+
+    expected = f"'{COMMAND_DIGEST_PREFIX}<{COMMAND_DIGEST_HEX_DIGITS} lowercase hex digits>'"
+    value = _require_string(record, field, label)
+    if not value.startswith(COMMAND_DIGEST_PREFIX):
+        raise ControlStoreError(f"{label} requires a {expected} {field}")
+    digits = value[len(COMMAND_DIGEST_PREFIX) :]
+    if len(digits) != COMMAND_DIGEST_HEX_DIGITS or not all(
+        character in COMMAND_DIGEST_HEX_ALPHABET for character in digits
+    ):
+        raise ControlStoreError(f"{label} requires a {expected} {field}")
+    return value
+
+
+def _require_command_target(record: Mapping[str, Any], label: str) -> Dict[str, Any]:
+    """Require one closed, identifier-safe delivery target."""
+
+    if "target" not in record:
+        raise ControlStoreError(f"{label} requires target")
+    value = record["target"]
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object target")
+    unknown = sorted(set(value) - set(COMMAND_TARGET_FIELDS))
+    if unknown:
+        raise ControlStoreError(f"{label} target declares unknown field(s) {', '.join(unknown)}")
+    missing = [field for field in COMMAND_TARGET_FIELDS if field not in value]
+    if missing:
+        raise ControlStoreError(f"{label} target requires {', '.join(missing)}")
+    kind = _require_string(value, "kind", f"{label} target")
+    if kind not in COMMAND_TARGET_KINDS:
+        raise ControlStoreError(
+            f"{label} declares unknown target kind {kind!r}; expected one of "
+            f"{', '.join(COMMAND_TARGET_KINDS)}"
+        )
+    # The target identifier is rendered into a parseable position of the
+    # line-oriented command payload, so it is constrained exactly like every
+    # other correlation identifier.
+    _require_identifier(value, "id", f"{label} target")
+    return value
+
+
+def _require_boundary_root(value: Any, field: str, label: str) -> str:
+    """Require one declared mission root that cannot forge a record boundary.
+
+    A declared boundary is operator- or worker-supplied, so besides being a
+    normalized absolute path it must contain no control character: a newline in
+    a declared root would otherwise be able to forge a whole additional record
+    in a line-oriented payload.
+    """
+
+    root = _require_root_path(value, field, label)
+    for character in root:
+        if not character.isprintable():
+            raise ControlStoreError(
+                f"{label} requires a printable {field}; {root!r} contains a control "
+                "character that could forge a record boundary"
+            )
+    return root
+
+
+def _require_command_boundaries(record: Mapping[str, Any], label: str) -> Dict[str, Any]:
+    """Require the complete ADR-016 mission boundary declaration.
+
+    The declaration itself is never optional: a command that declares no
+    boundaries at all is refused.  Individual roots may be explicitly
+    unassigned, because a store can be initialized before a mission declares a
+    queue, planning, or implementation boundary, but an unassigned root is an
+    explicit `null` rather than an absent field.
+    """
+
+    if "boundaries" not in record:
+        raise ControlStoreError(f"{label} requires boundaries")
+    value = record["boundaries"]
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object boundaries")
+    unknown = sorted(set(value) - set(COMMAND_BOUNDARY_FIELDS))
+    if unknown:
+        raise ControlStoreError(
+            f"{label} boundaries declares unknown field(s) {', '.join(unknown)}"
+        )
+    missing = [field for field in COMMAND_BOUNDARY_FIELDS if field not in value]
+    if missing:
+        raise ControlStoreError(f"{label} boundaries requires {', '.join(missing)}")
+
+    sub = f"{label} boundaries"
+    _require_boundary_root(value["control_root"], "control_root", sub)
+    for field in ("queue_root", "planning_root"):
+        if value[field] is not None:
+            _require_boundary_root(value[field], field, sub)
+    implementation_roots = value["implementation_roots"]
+    if not isinstance(implementation_roots, list):
+        raise ControlStoreError(f"{sub} requires array implementation_roots")
+    seen: List[str] = []
+    for index, implementation_root in enumerate(implementation_roots):
+        normalized = _require_boundary_root(
+            implementation_root, f"implementation_roots[{index}]", sub
+        )
+        if normalized in seen:
+            raise ControlStoreError(
+                f"{sub} duplicates implementation root {normalized}"
+            )
+        seen.append(normalized)
+    _require_typed_references(
+        value, "runtime_boundaries", sub, required=False, noun="boundary"
+    )
+    return value
+
+
+def _require_command_schema_version(record: Mapping[str, Any], label: str) -> None:
+    """Require the exact command-protocol version this tool implements."""
+
+    version = record.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ControlStoreError(f"{label} requires integer schema_version")
+    if version > COMMAND_SCHEMA_VERSION:
+        raise ControlStoreError(
+            f"{label} uses unsupported future schema_version {version}; upgrade cockpit "
+            "tools before mutation"
+        )
+    if version != COMMAND_SCHEMA_VERSION:
+        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+
+
+def _require_closed_fields(record: Mapping[str, Any], fields: Sequence[str], label: str) -> None:
+    """Require exactly the closed field set a versioned record declares."""
+
+    unknown = sorted(set(record) - set(fields))
+    if unknown:
+        raise ControlStoreError(f"{label} declares unknown field(s) {', '.join(unknown)}")
+    missing = [field for field in fields if field not in record]
+    if missing:
+        raise ControlStoreError(f"{label} requires {', '.join(missing)}")
+
+
+def validate_command_envelope(record: Any, label: str = "command envelope") -> Dict[str, Any]:
+    """Validate one versioned command envelope, failing closed throughout.
+
+    The envelope is the durable record of one state-changing worker operation:
+    its command ID, mission and queue item, delivery target, trace and parent
+    trace, schema version, payload digest, and declared mission boundaries.  An
+    unknown or missing field, an unversioned or future-versioned record, a
+    malformed digest, an unknown target kind, or a boundary declaration that is
+    not a normalized absolute path is refused rather than partially understood.
+    """
+
+    data = _require_object(record, label)
+    _require_command_schema_version(data, label)
+    _require_record_type(data, COMMAND_ENVELOPE_RECORD_TYPE, label)
+    _require_closed_fields(data, COMMAND_ENVELOPE_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    # `command_type`, `queue_item_id`, and the target identifier are rendered
+    # into parseable positions of the line-oriented command payload, so they are
+    # constrained to identifier characters that cannot forge a record boundary.
+    _require_identifier(data, "command_type", label)
+    _require_uuid(data, "mission_id", label)
+    _require_identifier(data, "queue_item_id", label)
+    _require_command_target(data, label)
+    trace_id = _require_uuid(data, "trace_id", label)
+    parent_trace_id = _require_optional_uuid(data, "parent_trace_id", label)
+    if parent_trace_id is not None and parent_trace_id == trace_id:
+        raise ControlStoreError(f"{label} requires parent_trace_id to name a different trace")
+    _require_digest(data, "payload_digest", label)
+    _require_command_boundaries(data, label)
+    created_at = _require_timestamp(data, "created_at", label)
+    if data["deadline_at"] is not None:
+        deadline = _parsed_timestamp(data["deadline_at"], "deadline_at", label)
+        if deadline <= _parsed_timestamp(created_at, "created_at", label):
+            raise ControlStoreError(f"{label} requires deadline_at after created_at")
+    return data
+
+
+def validate_command_acknowledgement(
+    record: Any,
+    label: str = "command acknowledgement",
+) -> Dict[str, Any]:
+    """Validate one versioned command acknowledgement, failing closed throughout.
+
+    An acknowledgement names the command it answers, the exact payload digest
+    the acknowledger observed, one outcome from the closed ADR-013 vocabulary,
+    and who acknowledged it.  A refusal or a deduplication must explain itself,
+    and an application must carry at least one typed reference to the result it
+    stored, so a later redelivery has a stored result to return.
+    """
+
+    data = _require_object(record, label)
+    _require_command_schema_version(data, label)
+    _require_record_type(data, COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE, label)
+    _require_closed_fields(data, COMMAND_ACKNOWLEDGEMENT_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    _require_digest(data, "payload_digest", label)
+    outcome = _require_string(data, "outcome", label)
+    if outcome not in COMMAND_ACKNOWLEDGEMENT_OUTCOMES:
+        raise ControlStoreError(
+            f"{label} declares unknown outcome {outcome!r}; expected one of "
+            f"{', '.join(COMMAND_ACKNOWLEDGEMENT_OUTCOMES)}"
+        )
+    # The acknowledger identity is rendered into a parseable position of the
+    # line-oriented command payload; `reason` is prose that no command renders
+    # into a parseable position, so it stays free text.
+    _require_identifier(data, "acknowledged_by", label)
+    _require_timestamp(data, "acknowledged_at", label)
+    if _require_optional_string(data, "reason", label) is None:
+        if outcome in COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED:
+            raise ControlStoreError(f"{label} requires a reason for outcome {outcome!r}")
+    _require_typed_references(
+        data, "result_refs", label, required=outcome == COMMAND_APPLIED, noun="result"
+    )
+    return data
+
+
+def event_command_envelope(record: Mapping[str, Any], label: str) -> Optional[Dict[str, Any]]:
+    """Return the command envelope one event declares, or None, failing closed."""
+
+    event_type = _require_string(record, "event_type", label)
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if COMMAND_ENVELOPE_PAYLOAD_FIELD not in payload:
+        if event_type == COMMAND_REGISTERED_EVENT_TYPE:
+            raise ControlStoreError(
+                f"{label} declares event_type {event_type!r} without a "
+                f"payload.{COMMAND_ENVELOPE_PAYLOAD_FIELD} record"
+            )
+        return None
+    envelope = validate_command_envelope(
+        payload[COMMAND_ENVELOPE_PAYLOAD_FIELD],
+        f"{label} payload.{COMMAND_ENVELOPE_PAYLOAD_FIELD}",
+    )
+    if event_type != COMMAND_REGISTERED_EVENT_TYPE:
+        raise ControlStoreError(
+            f"{label} carries a {COMMAND_ENVELOPE_PAYLOAD_FIELD} record but event_type "
+            f"{event_type!r}; expected event_type {COMMAND_REGISTERED_EVENT_TYPE!r}"
+        )
+    return envelope
+
+
+def event_command_acknowledgement(
+    record: Mapping[str, Any],
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the acknowledgement one event declares, or None, failing closed."""
+
+    event_type = _require_string(record, "event_type", label)
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD not in payload:
+        if event_type.startswith(COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX):
+            raise ControlStoreError(
+                f"{label} declares acknowledgement event_type {event_type!r} without a "
+                f"payload.{COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD} record"
+            )
+        return None
+    acknowledgement = validate_command_acknowledgement(
+        payload[COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD],
+        f"{label} payload.{COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD}",
+    )
+    expected = f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{acknowledgement['outcome']}"
+    if event_type != expected:
+        raise ControlStoreError(
+            f"{label} declares acknowledgement outcome {acknowledgement['outcome']!r} but "
+            f"event_type {event_type!r}; expected event_type {expected!r}"
+        )
+    return acknowledgement
+
+
 def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[str, Any]:
     """Validate an authoritative journal event before it can affect state."""
 
@@ -821,10 +1455,12 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
     # unstructured payload is refused before it can wedge a projection rebuild.
     if "payload" in data and not isinstance(data["payload"], dict):
         raise ControlStoreError(f"{label} requires an object payload")
-    # A lifecycle event is validated as part of the event, so a malformed,
-    # unversioned, or future-versioned lifecycle record can never be committed
-    # and can never be read back as if it were understood.
+    # A lifecycle, envelope, or acknowledgement record is validated as part of
+    # the event, so a malformed, unversioned, or future-versioned record can
+    # never be committed and can never be read back as if it were understood.
     event_worker_lifecycle(data, label)
+    event_command_envelope(data, label)
+    event_command_acknowledgement(data, label)
     return data
 
 
@@ -872,11 +1508,20 @@ def _require_regular_file(path: Path, label: str) -> None:
 
 def _load_json(path: Path, label: str) -> Dict[str, Any]:
     _require_regular_file(path, label)
+    # `json.JSONDecodeError` subclasses `ValueError`, so naming `ValueError`
+    # covers every malformed document plus the numeric literals CPython refuses
+    # to convert at all (an integer longer than its 4300-digit `int` conversion
+    # limit).  A pathologically nested document exhausts the interpreter stack
+    # instead.  Both are corruption of a stored record, so both are stated as
+    # the same fail-closed diagnostic rather than a traceback naming internal
+    # filesystem paths.
     try:
         with path.open(encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ControlStoreError(f"malformed {label}: {exc}") from None
+    except RecursionError:
+        raise ControlStoreError(f"malformed {label}: nested too deeply to parse") from None
 
 
 def _require_directory(path: Path, label: str) -> None:
@@ -898,8 +1543,12 @@ def _validate_events(path: Path, control_id: str) -> None:
                     raise ControlStoreError(f"{EVENTS_NAME}:{number} is blank; authoritative records cannot be skipped")
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError as exc:
+                except ValueError as exc:
                     raise ControlStoreError(f"malformed {EVENTS_NAME}:{number}: {exc}") from None
+                except RecursionError:
+                    raise ControlStoreError(
+                        f"malformed {EVENTS_NAME}:{number}: nested too deeply to parse"
+                    ) from None
                 event = validate_event(record, control_id, f"{EVENTS_NAME}:{number}")
                 if event["event_id"] in event_ids:
                     raise ControlStoreError(f"{EVENTS_NAME}:{number} duplicates event_id {event['event_id']}")
@@ -1357,8 +2006,12 @@ def _read_lock_owner_from_directory(descriptor: int, label: str) -> Dict[str, An
             record = json.load(handle)
     except ControlStoreError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ControlStoreError(f"malformed {label}/{LOCK_OWNER_NAME}: {exc}") from None
+    except RecursionError:
+        raise ControlStoreError(
+            f"malformed {label}/{LOCK_OWNER_NAME}: nested too deeply to parse"
+        ) from None
     finally:
         if owner_descriptor is not None:
             os.close(owner_descriptor)
@@ -2166,6 +2819,153 @@ def fold_worker_missions(
     return slots, outcomes
 
 
+def _command_conflict_reason(
+    stored: Mapping[str, Any],
+    offered: Mapping[str, Any],
+) -> Optional[str]:
+    """Say whether an offered envelope conflicts with the stored one, and how."""
+
+    if stored["payload_digest"] != offered["payload_digest"]:
+        return COMMAND_CONFLICT_DIGEST
+    for field in COMMAND_ENVELOPE_IDENTITY_FIELDS:
+        if stored[field] != offered[field]:
+            return COMMAND_CONFLICT_ENVELOPE
+    return None
+
+
+def _command_conflict_entry(
+    payload_digest: str,
+    reason: str,
+    conflict_source: str,
+    event: "CommittedEvent",
+) -> Dict[str, Any]:
+    """Build one materialized conflict entry from the event that recorded it."""
+
+    return {
+        "payload_digest": payload_digest,
+        "reason": reason,
+        "source": conflict_source,
+        "revision": event.revision,
+        "event_id": event.event_id,
+        "recorded_at": event.record["timestamp"],
+    }
+
+
+def apply_command_envelope(
+    slots: Dict[str, Dict[str, Any]],
+    envelope: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed command delivery into the materialized command slots.
+
+    A command ID is claimed exactly once.  The first committed envelope for an
+    ID registers it; a later delivery of the identical envelope is a redelivery
+    that is retained as evidence and applies nothing; a delivery that changes the
+    payload digest or any other identity field is a hard conflict that is
+    recorded against the stored command and never replaces it.
+    """
+
+    command_id = envelope["command_id"]
+    delivery = {
+        "revision": event.revision,
+        "event_id": event.event_id,
+        "recorded_at": event.record["timestamp"],
+    }
+    slot = slots.get(command_id)
+    if slot is None:
+        slots[command_id] = {
+            "envelope": dict(envelope),
+            "status": COMMAND_STATUS_REGISTERED,
+            "deliveries": [delivery],
+            "acknowledgements": [],
+            "conflicts": [],
+            "revision": event.revision,
+            "event_id": event.event_id,
+            "recorded_at": event.record["timestamp"],
+        }
+        return True, COMMAND_FOLD_REGISTERED
+
+    reason = _command_conflict_reason(slot["envelope"], envelope)
+    if reason is not None:
+        slot["conflicts"].append(
+            _command_conflict_entry(
+                envelope["payload_digest"], reason, COMMAND_CONFLICT_DELIVERY, event
+            )
+        )
+        return True, COMMAND_FOLD_CONFLICT_RECORDED
+    slot["deliveries"].append(delivery)
+    return False, COMMAND_FOLD_RETAINED_DUPLICATE
+
+
+def apply_command_acknowledgement(
+    slots: Dict[str, Dict[str, Any]],
+    acknowledgement: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed acknowledgement into the materialized command slots.
+
+    An acknowledgement of an unknown command, of a payload the stored command
+    never carried, or of an outcome the closed order does not allow is retained
+    as durable audit evidence and moves nothing.  A rejection that names a
+    different payload digest is the worker-side half of a reuse conflict and is
+    recorded as one.
+    """
+
+    command_id = acknowledgement["command_id"]
+    slot = slots.get(command_id)
+    if slot is None:
+        return False, COMMAND_FOLD_RETAINED_UNKNOWN
+
+    entry = {
+        "acknowledgement": dict(acknowledgement),
+        "revision": event.revision,
+        "event_id": event.event_id,
+        "recorded_at": event.record["timestamp"],
+    }
+    if acknowledgement["payload_digest"] != slot["envelope"]["payload_digest"]:
+        if acknowledgement["outcome"] != COMMAND_REJECTED:
+            return False, COMMAND_FOLD_RETAINED_DIGEST
+        slot["acknowledgements"].append(entry)
+        slot["conflicts"].append(
+            _command_conflict_entry(
+                acknowledgement["payload_digest"],
+                COMMAND_CONFLICT_DIGEST,
+                COMMAND_CONFLICT_ACKNOWLEDGEMENT,
+                event,
+            )
+        )
+        return True, COMMAND_FOLD_CONFLICT_RECORDED
+
+    allowed = COMMAND_ACKNOWLEDGEMENT_TRANSITIONS.get(slot["status"], {})
+    next_status = allowed.get(acknowledgement["outcome"])
+    if next_status is None:
+        return False, COMMAND_FOLD_RETAINED_ORDER
+    slot["acknowledgements"].append(entry)
+    slot["status"] = next_status
+    return True, COMMAND_FOLD_ACKNOWLEDGED
+
+
+def fold_commands(
+    events: Sequence["CommittedEvent"] = (),
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
+    """Replay committed events into command slots and per-event fold outcomes."""
+
+    slots: Dict[str, Dict[str, Any]] = {}
+    outcomes: Dict[str, Tuple[bool, str]] = {}
+    for event in events:
+        label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        envelope = event_command_envelope(event.record, label)
+        if envelope is not None:
+            outcomes[event.event_id] = apply_command_envelope(slots, envelope, event)
+            continue
+        acknowledgement = event_command_acknowledgement(event.record, label)
+        if acknowledgement is not None:
+            outcomes[event.event_id] = apply_command_acknowledgement(
+                slots, acknowledgement, event
+            )
+    return slots, outcomes
+
+
 def build_ledger_projection(
     metadata: Mapping[str, Any],
     events: Sequence[CommittedEvent] = (),
@@ -2186,7 +2986,8 @@ def build_ledger_projection(
     revision = 0
     updated_at = created_at
     state: Dict[str, Any] = {field: None for field in LEDGER_PROJECTION_FIELDS}
-    worker_missions, _outcomes = fold_worker_missions(events)
+    worker_missions, _lifecycle_outcomes = fold_worker_missions(events)
+    commands, _command_outcomes = fold_commands(events)
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         state.update(_event_ledger_declarations(event.record, label))
@@ -2206,6 +3007,7 @@ def build_ledger_projection(
         "active_queue_item_id": state["active_queue_item_id"],
         "active_mission_id": state["active_mission_id"],
         LEDGER_WORKER_MISSIONS_FIELD: worker_missions,
+        LEDGER_COMMANDS_FIELD: commands,
         "canonical_roots": {
             "control_root": roots["control_root"],
             "queue_root": roots["queue_root"],
@@ -2424,7 +3226,7 @@ class ControlLedgerProjection:
             existing = validate_ledger(
                 json.loads(published.decode("utf-8")), control_id, self.root
             )
-        except (ControlStoreError, UnicodeDecodeError, json.JSONDecodeError):
+        except (ControlStoreError, UnicodeDecodeError, ValueError, RecursionError):
             return None, PROJECTION_REASON_CORRUPT
         observed = existing["revision"]
         rebuilt_revision = json.loads(expected.decode("utf-8"))["revision"]
@@ -3119,6 +3921,338 @@ def observe_worker_lifecycle(
             continue
         observations.append(_observed_slot(slots[key], now, moment))
     return tuple(observations)
+
+
+# --- versioned command envelopes, acknowledgements, and idempotent delivery --
+
+
+@dataclass(frozen=True)
+class CommandRecordResult:
+    """Outcome of committing one command delivery or one acknowledgement."""
+
+    root: Path
+    publication: EventPublicationResult
+    command_id: str
+    envelope: Dict[str, Any]
+    acknowledgement: Optional[Dict[str, Any]]
+    applied: bool
+    outcome: str
+    materialized: Optional[Dict[str, Any]]
+
+    @property
+    def committed(self) -> bool:
+        return self.publication.committed
+
+    @property
+    def conflicted(self) -> bool:
+        """Report a delivery or acknowledgement recorded as a durable conflict."""
+
+        return self.outcome == COMMAND_FOLD_CONFLICT_RECORDED
+
+
+def build_command_envelope(
+    command_id: str,
+    command_type: str,
+    mission_id: str,
+    queue_item_id: str,
+    target_kind: str,
+    target_id: str,
+    trace_id: str,
+    payload_digest: str,
+    control_root: str,
+    parent_trace_id: Optional[str] = None,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
+    runtime_boundaries: Sequence[str] = (),
+    created_at: Optional[str] = None,
+    deadline_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete command envelope and validate it before use."""
+
+    record = {
+        "schema_version": COMMAND_SCHEMA_VERSION,
+        "record_type": COMMAND_ENVELOPE_RECORD_TYPE,
+        "command_id": command_id,
+        "command_type": command_type,
+        "mission_id": mission_id,
+        "queue_item_id": queue_item_id,
+        "target": {"kind": target_kind, "id": target_id},
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "payload_digest": payload_digest,
+        "boundaries": {
+            "control_root": control_root,
+            "queue_root": queue_root,
+            "planning_root": planning_root,
+            "implementation_roots": list(implementation_roots),
+            "runtime_boundaries": list(runtime_boundaries),
+        },
+        "created_at": created_at if created_at is not None else utc_timestamp(),
+        "deadline_at": deadline_at,
+    }
+    return validate_command_envelope(record)
+
+
+def build_command_acknowledgement(
+    command_id: str,
+    payload_digest: str,
+    outcome: str,
+    acknowledged_by: str,
+    reason: Optional[str] = None,
+    result_refs: Sequence[str] = (),
+    acknowledged_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete acknowledgement and validate it before use."""
+
+    record = {
+        "schema_version": COMMAND_SCHEMA_VERSION,
+        "record_type": COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE,
+        "command_id": command_id,
+        "payload_digest": payload_digest,
+        "outcome": outcome,
+        "acknowledged_by": acknowledged_by,
+        "acknowledged_at": (
+            acknowledged_at if acknowledged_at is not None else utc_timestamp()
+        ),
+        "reason": reason,
+        "result_refs": list(result_refs),
+    }
+    return validate_command_acknowledgement(record)
+
+
+def read_command_slots(root: Path) -> Dict[str, Dict[str, Any]]:
+    """Fold the committed events of a control root into command slots.
+
+    Every reader starts from the committed event files on disk, so a command,
+    its acknowledgements, and its conflicts are answerable by any cold process
+    and never depend on memory retained by the process that recorded them.
+    """
+
+    _metadata, history = inspect_control_events(root)
+    slots, _outcomes = fold_commands(history.events)
+    return slots
+
+
+def _folded_commands_after_publication(
+    publication: EventPublicationResult,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
+    """Re-derive the command fold from committed authority after publication."""
+
+    try:
+        _metadata, history = inspect_control_events(publication.root)
+    except ControlStoreError as exc:
+        if not publication.committed:
+            raise
+        raise ControlStoreError(
+            f"{EVENTS_DIR_NAME}/{publication.path.name} is committed at revision "
+            f"{publication.revision}; only its materialization could not be reported: {exc}"
+        ) from None
+    events = history.events
+    if not publication.committed:
+        events = events + (
+            CommittedEvent(
+                path=publication.path,
+                revision=history.latest_revision + 1,
+                event_id=publication.event_id,
+                record=publication.record,
+            ),
+        )
+    return fold_commands(events)
+
+
+def register_command(
+    root: Path,
+    envelope: Mapping[str, Any],
+    actor: str = DEFAULT_EVENT_ACTOR,
+    command: str = DEFAULT_COMMAND_REGISTER_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> CommandRecordResult:
+    """Deliver one command envelope exactly once, whatever the delivery count.
+
+    Delivery is uncertain by nature, so this operation is defined for retries
+    rather than for first attempts only:
+
+    * an unknown command ID commits the envelope and registers the command;
+    * a redelivery of the identical envelope commits a `duplicate`
+      acknowledgement and returns the stored result without applying anything
+      again;
+    * a delivery that reuses the ID for a different payload digest or a
+      different envelope is committed and recorded as a durable conflict, and
+      the caller is refused.
+
+    The committed fold, not this pre-read, is authoritative: two concurrent
+    deliveries of the same new command both commit, and exactly one of them
+    registers it.
+    """
+
+    validated = validate_command_envelope(dict(envelope))
+    # The actor is rendered verbatim into the line-oriented `list-events`
+    # payload, so a command deliverer is constrained exactly like every other
+    # identifier this protocol accepts.
+    actor = _require_identifier({"actor": actor}, "actor", "command delivery")
+    root = _require_absolute_root(str(root), "configured")
+    stored_slot = read_command_slots(root).get(validated["command_id"])
+
+    acknowledgement: Optional[Dict[str, Any]] = None
+    if stored_slot is None:
+        event_type = COMMAND_REGISTERED_EVENT_TYPE
+        payload: Dict[str, Any] = {COMMAND_ENVELOPE_PAYLOAD_FIELD: validated}
+    elif _command_conflict_reason(stored_slot["envelope"], validated) is not None:
+        # A reused ID is committed as the delivery it actually is, so the
+        # conflict is recorded against the stored command by the same
+        # deterministic fold that would resolve a concurrent race.
+        event_type = COMMAND_REGISTERED_EVENT_TYPE
+        payload = {COMMAND_ENVELOPE_PAYLOAD_FIELD: validated}
+    else:
+        acknowledgement = build_command_acknowledgement(
+            validated["command_id"],
+            stored_slot["envelope"]["payload_digest"],
+            COMMAND_DUPLICATE,
+            acknowledged_by=stored_slot["envelope"]["target"]["id"],
+            reason=COMMAND_DUPLICATE_REASON,
+        )
+        event_type = f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{COMMAND_DUPLICATE}"
+        payload = {COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD: acknowledgement}
+
+    publication = publish_control_event(
+        root,
+        event_type,
+        actor=actor,
+        payload=payload,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    )
+    slots, outcomes = _folded_commands_after_publication(publication)
+    applied, outcome = outcomes.get(
+        publication.event_id, (False, COMMAND_FOLD_RETAINED_UNKNOWN)
+    )
+    materialized = slots.get(validated["command_id"])
+    return CommandRecordResult(
+        root=publication.root,
+        publication=publication,
+        command_id=validated["command_id"],
+        envelope=dict(validated),
+        acknowledgement=acknowledgement,
+        applied=applied,
+        outcome=outcome,
+        materialized=materialized,
+    )
+
+
+def acknowledge_command(
+    root: Path,
+    acknowledgement: Mapping[str, Any],
+    actor: Optional[str] = None,
+    command: str = DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> CommandRecordResult:
+    """Commit one acknowledgement of a registered command, failing closed first.
+
+    An acknowledgement of a command this control root never registered, of a
+    payload the stored command never carried, or of an outcome the closed
+    acknowledgement order does not allow is refused before any candidate event
+    exists.  A rejection naming a different digest is allowed exactly because it
+    is how a worker reports a reused command ID.
+    """
+
+    validated = validate_command_acknowledgement(dict(acknowledgement))
+    actor = _require_identifier(
+        {"actor": actor if actor is not None else validated["acknowledged_by"]},
+        "actor",
+        "command acknowledgement",
+    )
+    root = _require_absolute_root(str(root), "configured")
+    command_id = validated["command_id"]
+    outcome = validated["outcome"]
+    slot = read_command_slots(root).get(command_id)
+    if slot is None:
+        raise ControlStoreError(
+            f"command acknowledgement names command {command_id}, which this control "
+            "root has never registered"
+        )
+    stored_digest = slot["envelope"]["payload_digest"]
+    if validated["payload_digest"] != stored_digest and outcome != COMMAND_REJECTED:
+        raise ControlStoreError(
+            f"command acknowledgement declares payload digest {validated['payload_digest']} "
+            f"but command {command_id} was registered with {stored_digest}; only a "
+            f"{COMMAND_REJECTED!r} acknowledgement may name a different digest"
+        )
+    if validated["payload_digest"] == stored_digest:
+        allowed = COMMAND_ACKNOWLEDGEMENT_TRANSITIONS.get(slot["status"], {})
+        if outcome not in allowed:
+            raise ControlStoreError(
+                f"command {command_id} is {slot['status']}; a {outcome!r} acknowledgement "
+                f"is not allowed from that status (allowed: "
+                f"{', '.join(sorted(allowed)) or 'none'})"
+            )
+
+    publication = publish_control_event(
+        root,
+        f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{outcome}",
+        actor=actor,
+        payload={COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD: validated},
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    )
+    slots, outcomes = _folded_commands_after_publication(publication)
+    applied, fold_outcome = outcomes.get(
+        publication.event_id, (False, COMMAND_FOLD_RETAINED_UNKNOWN)
+    )
+    materialized = slots.get(command_id)
+    return CommandRecordResult(
+        root=publication.root,
+        publication=publication,
+        command_id=command_id,
+        envelope=dict(slot["envelope"]),
+        acknowledgement=dict(validated),
+        applied=applied,
+        outcome=fold_outcome,
+        materialized=materialized,
+    )
+
+
+def observe_commands(
+    root: Path,
+    command_id: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    target_id: Optional[str] = None,
+) -> Tuple[Dict[str, Any], ...]:
+    """Report materialized commands from committed events without mutation.
+
+    The report is derived from committed event files rather than from the
+    published projection, so a stale, corrupt, or hand-edited `ledger.json`
+    can never answer for a command.
+    """
+
+    root = _require_absolute_root(str(root), "configured")
+    if command_id is not None:
+        command_id = _require_uuid({"command_id": command_id}, "command_id", "command status")
+    if mission_id is not None:
+        mission_id = _require_uuid({"mission_id": mission_id}, "mission_id", "command status")
+    if target_id is not None:
+        target_id = _require_identifier({"target": target_id}, "target", "command status")
+
+    slots = read_command_slots(root)
+    observed: List[Dict[str, Any]] = []
+    for key in sorted(slots):
+        envelope = slots[key]["envelope"]
+        if command_id is not None and envelope["command_id"] != command_id:
+            continue
+        if mission_id is not None and envelope["mission_id"] != mission_id:
+            continue
+        if target_id is not None and envelope["target"]["id"] != target_id:
+            continue
+        observed.append(slots[key])
+    return tuple(observed)
 
 
 # --- read-only preflight and explicit guarded store repair -------------------
@@ -4989,13 +6123,320 @@ def _parsed_payload(value: Optional[str]) -> Optional[Dict[str, Any]]:
 
     if value is None:
         return None
+    # Clause order is load-bearing: `json.JSONDecodeError` subclasses
+    # `ValueError`, so the precise decode diagnostic must be matched before the
+    # broad guard below.
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ControlStoreError(f"event payload is not valid JSON: {exc}") from None
+    except RecursionError:
+        raise ControlStoreError("event payload is nested too deeply to parse") from None
+    except ValueError as exc:
+        # CPython refuses to convert an integer literal longer than its 4300
+        # digit `int` conversion limit and raises a bare `ValueError` rather
+        # than a `JSONDecodeError`, which would otherwise escape as a traceback
+        # naming internal filesystem paths instead of a fail-closed diagnostic.
+        raise ControlStoreError(f"event payload is not valid JSON: {exc}") from None
     if not isinstance(parsed, dict):
         raise ControlStoreError("event payload must be a JSON object of structured metadata")
     return parsed
+
+
+def _command_summary_line(slot: Mapping[str, Any]) -> str:
+    """Render one materialized command as one machine-readable record.
+
+    Every value rendered here is a UUID, a digest, an integer, a UTC timestamp,
+    or an identifier constrained to printable non-whitespace ASCII, so no
+    caller- or worker-supplied string can forge a field or record boundary.
+    Free-text `reason` values are deliberately absent from this payload.
+    """
+
+    envelope = slot["envelope"]
+    return (
+        f"command {envelope['command_id']} type {envelope['command_type']} "
+        f"mission {envelope['mission_id']} queue-item {envelope['queue_item_id']} "
+        f"target {envelope['target']['kind']}/{envelope['target']['id']} "
+        f"trace {envelope['trace_id']} "
+        f"parent-trace {envelope['parent_trace_id'] or '-'} "
+        f"digest {envelope['payload_digest']} "
+        f"schema-version {envelope['schema_version']} "
+        f"status {slot['status']} "
+        f"deliveries {len(slot['deliveries'])} "
+        f"acknowledgements {len(slot['acknowledgements'])} "
+        f"conflicts {len(slot['conflicts'])} "
+        f"created {envelope['created_at']} "
+        f"deadline {envelope['deadline_at'] or '-'}"
+    )
+
+
+def _command_boundary_line(envelope: Mapping[str, Any]) -> str:
+    """Render the declared mission boundaries a command carries.
+
+    Declared roots are reported as declared or unassigned rather than printed:
+    a filesystem path may legitimately contain spaces, and this payload is
+    field-delimited.  The exact roots stay in the JSON records, which no
+    delimiter can confuse.
+    """
+
+    boundaries = envelope["boundaries"]
+    return (
+        f"boundaries {envelope['command_id']} control-root declared "
+        f"queue-root {'declared' if boundaries['queue_root'] else '-'} "
+        f"planning-root {'declared' if boundaries['planning_root'] else '-'} "
+        f"implementation-roots {len(boundaries['implementation_roots'])} "
+        f"runtime {','.join(boundaries['runtime_boundaries']) or '-'}"
+    )
+
+
+def _command_acknowledgement_line(command_id: str, entry: Mapping[str, Any]) -> str:
+    """Render one durable acknowledgement of a command."""
+
+    acknowledgement = entry["acknowledgement"]
+    return (
+        f"acknowledgement {command_id} outcome {acknowledgement['outcome']} "
+        f"by {acknowledgement['acknowledged_by']} "
+        f"digest {acknowledgement['payload_digest']} "
+        f"revision {entry['revision']} at {acknowledgement['acknowledged_at']} "
+        f"result-refs {','.join(acknowledgement['result_refs']) or '-'}"
+    )
+
+
+def _command_conflict_line(command_id: str, conflict: Mapping[str, Any]) -> str:
+    """Render one durable conflict recorded against a command."""
+
+    return (
+        f"conflict {command_id} reason {conflict['reason']} "
+        f"source {conflict['source']} digest {conflict['payload_digest']} "
+        f"revision {conflict['revision']} at {conflict['recorded_at']}"
+    )
+
+
+def _command_slot_lines(slot: Mapping[str, Any]) -> List[str]:
+    """Render one command, its boundaries, acknowledgements, and conflicts."""
+
+    command_id = slot["envelope"]["command_id"]
+    lines = [_command_summary_line(slot), _command_boundary_line(slot["envelope"])]
+    for entry in slot["acknowledgements"]:
+        lines.append(_command_acknowledgement_line(command_id, entry))
+    for conflict in slot["conflicts"]:
+        lines.append(_command_conflict_line(command_id, conflict))
+    return lines
+
+
+def _recorded_conflict(
+    slot: Optional[Mapping[str, Any]],
+    event_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the conflict one published event recorded, if it recorded one."""
+
+    if slot is None:
+        return None
+    for conflict in slot["conflicts"]:
+        if conflict["event_id"] == event_id:
+            return dict(conflict)
+    return None
+
+
+def _report_command_record(result: CommandRecordResult) -> int:
+    """Print the publication outcome and, separately, the protocol one.
+
+    Publication and materialization are separate answers exactly as they are for
+    lifecycle events: a redelivery, a conflicting reuse, and a losing concurrent
+    delivery are all committed as durable evidence, and only the deterministic
+    fold decides whether any of them moved the command state.
+    """
+
+    publication = result.publication
+    location = f"{EVENTS_DIR_NAME}/{publication.path.name}"
+    if publication.committed:
+        print(f"cockpit-control: committed {location} at revision {publication.revision}")
+    else:
+        print(
+            f"cockpit-control: would commit {location} at revision {publication.revision}; "
+            "no state changed"
+        )
+    if publication.projection is not None:
+        print(
+            f"cockpit-control: projected {LEDGER_NAME} at revision "
+            f"{publication.projection.revision}"
+        )
+
+    command_id = result.command_id
+    materialized = result.materialized
+    status = "-" if materialized is None else materialized["status"]
+    verb = "is" if publication.committed else "would be"
+    exit_code = 0
+    if result.outcome == COMMAND_FOLD_REGISTERED:
+        print(
+            f"cockpit-control: command {command_id} {verb} registered with digest "
+            f"{result.envelope['payload_digest']} (status {status})"
+        )
+    elif result.outcome == COMMAND_FOLD_ACKNOWLEDGED:
+        acknowledgement = result.acknowledgement or {}
+        if acknowledgement.get("outcome") == COMMAND_DUPLICATE:
+            print(
+                f"cockpit-control: command {command_id} {verb} acknowledged duplicate; "
+                f"the stored result is returned without applying it again (status {status})"
+            )
+        else:
+            print(
+                f"cockpit-control: command {command_id} {verb} acknowledged "
+                f"{acknowledgement.get('outcome')} by "
+                f"{acknowledgement.get('acknowledged_by')} (status {status})"
+            )
+    elif result.conflicted:
+        conflict = _recorded_conflict(materialized, publication.event_id) or {}
+        reason = conflict.get("reason", COMMAND_CONFLICT_DIGEST)
+        print(
+            f"cockpit-control: command {command_id} {verb} refused as a {reason}; "
+            f"the conflict {verb} recorded (status {status})"
+        )
+        stored = "-" if materialized is None else materialized["envelope"]["payload_digest"]
+        print(
+            f"cockpit-control: command {command_id} {verb} refused as a {reason}: "
+            f"{COMMAND_CONFLICT_EXPLANATIONS.get(reason, reason)}; the stored command keeps "
+            f"digest {stored} and the offered delivery declared "
+            f"{conflict.get('payload_digest', '-')}",
+            file=os.sys.stderr,
+        )
+        exit_code = 1
+    elif result.outcome == COMMAND_FOLD_RETAINED_DUPLICATE:
+        print(
+            f"cockpit-control: command {command_id} {verb} a duplicate delivery retained "
+            f"for audit only; the stored result is returned without applying it again "
+            f"(status {status})"
+        )
+    else:
+        print(
+            f"cockpit-control: command {command_id} {verb} retained for audit only "
+            f"({result.outcome}; status {status})"
+        )
+        if publication.committed:
+            print(
+                f"cockpit-control: {location} is durable audit evidence that did not change "
+                f"the materialized command state ({result.outcome})",
+                file=os.sys.stderr,
+            )
+        exit_code = 1
+
+    if materialized is not None:
+        for line in _command_slot_lines(materialized):
+            print(line)
+    if publication.projection is not None:
+        _report_projection_debris(publication.projection.interrupted_temporaries)
+    _report_pending_debris(publication.pending_debris)
+    return exit_code
+
+
+def _report_command_status(root: Path, observations: Sequence[Mapping[str, Any]]) -> int:
+    """Print every materialized command and succeed.
+
+    A recorded conflict is durable evidence about a rejected delivery, not a
+    failure of the stored command, so this read-only query always exits 0 and
+    names the conflicts on stderr.
+    """
+
+    conflicted = [slot for slot in observations if slot["conflicts"]]
+    print(
+        f"cockpit-control: {len(observations)} command(s) in {root}; "
+        f"{len(conflicted)} with recorded conflict(s)"
+    )
+    for slot in observations:
+        for line in _command_slot_lines(slot):
+            print(line)
+    for slot in conflicted:
+        envelope = slot["envelope"]
+        print(
+            f"cockpit-control: command {envelope['command_id']} has "
+            f"{len(slot['conflicts'])} recorded conflict(s); the stored command keeps "
+            f"digest {envelope['payload_digest']} and status {slot['status']}",
+            file=os.sys.stderr,
+        )
+    return 0
+
+
+def _parsed_command_payload(value: str) -> Dict[str, Any]:
+    """Parse the structured payload a command digest is computed over."""
+
+    # Clause order is load-bearing: `json.JSONDecodeError` subclasses
+    # `ValueError`, so the precise decode diagnostic must be matched before the
+    # broad guard below.
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ControlStoreError(f"command payload is not valid JSON: {exc}") from None
+    except RecursionError:
+        raise ControlStoreError("command payload is nested too deeply to parse") from None
+    except ValueError as exc:
+        # CPython refuses to convert an integer literal longer than its 4300
+        # digit `int` conversion limit and raises a bare `ValueError` rather
+        # than a `JSONDecodeError`, which would otherwise escape as a traceback
+        # naming internal filesystem paths instead of a fail-closed diagnostic.
+        # A caller that needs such a payload digests it itself and passes
+        # `--digest`, which is a pure string and never converted to a number.
+        raise ControlStoreError(f"command payload is not valid JSON: {exc}") from None
+    if not isinstance(parsed, dict):
+        raise ControlStoreError("command payload must be a JSON object of structured metadata")
+    return parsed
+
+
+def _command_digest_from_arguments(args: Any) -> str:
+    """Return the payload digest one invocation declares, refusing ambiguity.
+
+    A caller either hands over the payload, which is digested here so every
+    process agrees, or hands over a digest it already computed.  Doing both
+    would be two sources of truth for one value, so it is refused.
+    """
+
+    if args.payload is not None and args.digest is not None:
+        raise ControlStoreError("--payload and --digest cannot be combined")
+    if args.payload is not None:
+        return command_payload_digest(_parsed_command_payload(args.payload))
+    if args.digest is not None:
+        return _require_digest({"payload_digest": args.digest}, "payload_digest", "command")
+    raise ControlStoreError(
+        "a command payload digest is required; pass --payload or --digest"
+    )
+
+
+def _envelope_from_arguments(args: Any, control_root: Path) -> Dict[str, Any]:
+    """Build one complete command envelope from explicit command arguments.
+
+    Nothing is guessed.  The declared control root is always the resolved
+    control root this command is being delivered into, so no *caller of this
+    CLI* can mint an envelope declaring a boundary around a different store:
+    there is deliberately no `--control-root` argument to override it.
+
+    That is a minting guarantee, not a read-back one.  `boundaries.control_root`
+    is validated as a normalized absolute path wherever a command envelope is
+    read, but it is not cross-checked against the store the record was found
+    in, so a hand-written committed event can still declare an unrelated root
+    and be read back.  Deciding whether a declared boundary is legitimate for
+    the store, the mission, and the actor is ADR-016 boundary enforcement, which
+    this story does not own; asserting it here would also make relocating a
+    control store turn its immutable committed history into permanently
+    unreadable and unrepairable authority, because committed events are never
+    rewritten.
+    """
+
+    return build_command_envelope(
+        command_id=args.command_id,
+        command_type=args.command_type,
+        mission_id=args.mission,
+        queue_item_id=args.queue_item,
+        target_kind=args.target_kind,
+        target_id=args.target,
+        trace_id=args.trace,
+        payload_digest=_command_digest_from_arguments(args),
+        control_root=str(control_root),
+        parent_trace_id=args.parent_trace,
+        queue_root=args.queue_root,
+        planning_root=args.planning_root,
+        implementation_roots=tuple(args.implementation_root or ()),
+        runtime_boundaries=tuple(args.runtime_boundary or ()),
+        deadline_at=args.deadline,
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -5007,8 +6448,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="cockpit-control",
         description=(
             "initialize, validate, publish immutable events into, record versioned worker "
-            "lifecycle evidence in, replay the derived ledger of, preflight, and guardedly "
-            "repair the versioned cockpit control store"
+            "lifecycle evidence in, deliver idempotent worker commands through, replay the "
+            "derived ledger of, preflight, and guardedly repair the versioned cockpit "
+            "control store"
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -5185,6 +6627,156 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         metavar="UTC",
         help="evaluate freshness at this explicit UTC moment instead of now",
     )
+    register = subcommands.add_parser(
+        "register-command",
+        help=(
+            "deliver one durable idempotent command envelope; a redelivery "
+            "returns the stored result and a reused ID records a conflict"
+        ),
+    )
+    register.add_argument(
+        "--command-id",
+        required=True,
+        metavar="UUID",
+        help="the durable command identifier every redelivery of this command reuses",
+    )
+    register.add_argument(
+        "--type",
+        dest="command_type",
+        required=True,
+        metavar="COMMAND_TYPE",
+        help="the structured command type being delivered",
+    )
+    register.add_argument("--mission", required=True, metavar="UUID", help="mission identifier")
+    register.add_argument(
+        "--queue-item", required=True, metavar="QUEUE_ITEM_ID", help="queue item identifier"
+    )
+    register.add_argument(
+        "--target-kind",
+        default=COMMAND_TARGET_WORKER,
+        metavar="KIND",
+        help="delivery target kind: " + ", ".join(COMMAND_TARGET_KINDS),
+    )
+    register.add_argument(
+        "--target", required=True, metavar="TARGET_ID", help="the worker or queue target"
+    )
+    register.add_argument("--trace", required=True, metavar="UUID", help="trace identifier")
+    register.add_argument(
+        "--parent-trace", default=None, metavar="UUID", help="parent trace identifier"
+    )
+    register.add_argument(
+        "--payload",
+        default=None,
+        metavar="JSON",
+        help="the command payload the durable digest is computed over",
+    )
+    register.add_argument(
+        "--digest",
+        default=None,
+        metavar="DIGEST",
+        help="an already computed payload digest instead of the payload itself",
+    )
+    register.add_argument(
+        "--queue-root", default=None, metavar="PATH", help="declared queue boundary"
+    )
+    register.add_argument(
+        "--planning-root", default=None, metavar="PATH", help="declared planning boundary"
+    )
+    register.add_argument(
+        "--implementation-root",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    register.add_argument(
+        "--runtime-boundary",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="declared typed runtime, image, CI, IAM, or deployment boundary; may be repeated",
+    )
+    register.add_argument(
+        "--deadline", default=None, metavar="UTC", help="optional command deadline"
+    )
+    register.add_argument(
+        "--actor",
+        default=DEFAULT_EVENT_ACTOR,
+        help="the actor recorded as the deliverer of the command",
+    )
+    register.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the delivery decision without changing any state",
+    )
+    acknowledge = subcommands.add_parser(
+        "acknowledge-command",
+        help=(
+            "record one durable accepted, applied, rejected, or duplicate "
+            "acknowledgement of a registered command"
+        ),
+    )
+    acknowledge.add_argument(
+        "--command-id", required=True, metavar="UUID", help="the command being acknowledged"
+    )
+    acknowledge.add_argument(
+        "--outcome",
+        required=True,
+        metavar="OUTCOME",
+        help="acknowledgement outcome: " + ", ".join(COMMAND_ACKNOWLEDGEMENT_OUTCOMES),
+    )
+    acknowledge.add_argument(
+        "--by", dest="acknowledged_by", required=True, help="the acknowledging worker"
+    )
+    acknowledge.add_argument(
+        "--payload",
+        default=None,
+        metavar="JSON",
+        help="the payload the acknowledger applied, whose digest must match the command",
+    )
+    acknowledge.add_argument(
+        "--digest",
+        default=None,
+        metavar="DIGEST",
+        help="the payload digest the acknowledger observed",
+    )
+    acknowledge.add_argument(
+        "--reason",
+        default=None,
+        help="required explanation for the rejected and duplicate outcomes",
+    )
+    acknowledge.add_argument(
+        "--result",
+        dest="result_refs",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="typed reference to the stored result; required for applied, may be repeated",
+    )
+    acknowledge.add_argument(
+        "--actor", default=None, help="event actor; defaults to the acknowledging worker"
+    )
+    acknowledge.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the acknowledgement decision without changing any state",
+    )
+    command_status = subcommands.add_parser(
+        "command-status",
+        help=(
+            "report command envelopes, acknowledgements, and conflicts from "
+            "committed events without changing any state"
+        ),
+    )
+    command_status.add_argument(
+        "--command-id", default=None, metavar="UUID", help="report only this command"
+    )
+    command_status.add_argument(
+        "--mission", default=None, metavar="UUID", help="report only this mission"
+    )
+    command_status.add_argument(
+        "--target", default=None, metavar="TARGET_ID", help="report only this target"
+    )
     replay = subcommands.add_parser(
         "replay-ledger",
         help=(
@@ -5236,6 +6828,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     worker_id=args.worker,
                 ),
                 as_of,
+            )
+        if args.command == "register-command":
+            return _report_command_record(
+                register_command(
+                    resolved.path,
+                    _envelope_from_arguments(args, resolved.path),
+                    actor=args.actor,
+                    dry_run=args.dry_run,
+                )
+            )
+        if args.command == "acknowledge-command":
+            return _report_command_record(
+                acknowledge_command(
+                    resolved.path,
+                    build_command_acknowledgement(
+                        args.command_id,
+                        _command_digest_from_arguments(args),
+                        args.outcome,
+                        acknowledged_by=args.acknowledged_by,
+                        reason=args.reason,
+                        result_refs=tuple(args.result_refs or ()),
+                    ),
+                    actor=args.actor,
+                    dry_run=args.dry_run,
+                )
+            )
+        if args.command == "command-status":
+            return _report_command_status(
+                resolved.path,
+                observe_commands(
+                    resolved.path,
+                    command_id=args.command_id,
+                    mission_id=args.mission,
+                    target_id=args.target,
+                ),
             )
         if args.command == "replay-ledger":
             return _report_ledger_projection(

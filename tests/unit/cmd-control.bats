@@ -2487,6 +2487,29 @@ print("committed identity disagreements failed closed")
 	run "$CONTROL_BIN" publish-event --type "   " --actor overseer
 	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "event requires non-empty event_type"
+
+	# A JSON integer literal longer than CPython's 4300-digit int->str
+	# conversion limit raises a bare ValueError rather than a JSONDecodeError,
+	# and a pathologically nested payload raises RecursionError.  Neither is a
+	# decode error, so a decoder-only guard lets both escape as a traceback
+	# leaking absolute internal paths.  Both must refuse as diagnostics.
+	local huge_payload nested_payload
+	huge_payload="$(python3 -c 'print("{\"a\":" + "9" * 5000 + "}")')"
+	nested_payload="$(python3 -c 'print("{\"a\":" * 20000 + "1" + "}" * 20000)')"
+
+	run "$CONTROL_BIN" publish-event --type huge-integer-payload --payload "$huge_payload"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "cockpit-control: event payload is not valid JSON"
+	echo "$output" | grep -Fq "4300 digits"
+	if echo "$output" | grep -q "Traceback (most recent call last)"; then return 1; fi
+	if echo "$output" | grep -q "cockpit_control\.py"; then return 1; fi
+
+	run "$CONTROL_BIN" publish-event --type nested-payload --payload "$nested_payload"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "cockpit-control: event payload is nested too deeply to parse"
+	if echo "$output" | grep -q "Traceback (most recent call last)"; then return 1; fi
+	if echo "$output" | grep -q "cockpit_control\.py"; then return 1; fi
+
 	[ "$(find "$root/events" -type f | wc -l)" -eq 0 ]
 	[ "$(find "$root/pending" -type f | wc -l)" -eq 0 ]
 
