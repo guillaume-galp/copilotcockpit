@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-03T23:12:45+01:00"
+last-updated: "2026-09-04T12:05:30+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -383,12 +383,12 @@ themes:
       - id: TH3.E2
         title: "Worker lifecycle and idempotent mission protocol"
         slug: worker-mission-protocol
-        status: todo
+        status: in-progress
         depends_on: [TH3.E1]
         stories:
           - id: TH3.E2.US1
             title: "Structured worker lifecycle and freshness"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US1-worker-lifecycle-freshness.md

@@ -3,8 +3,10 @@
 
 This module is deliberately dependency-free so installed cockpit commands can
 share one fail-closed definition of the VP3 control-store boundary, one portable
-control-lock protocol, one immutable event-publication protocol, one read-only
-readiness diagnosis, and one explicit guarded repair that never deletes anything.
+control-lock protocol, one immutable event-publication protocol, one versioned
+worker lifecycle vocabulary with monotonic sequence and freshness semantics, one
+read-only readiness diagnosis, and one explicit guarded repair that never
+deletes anything.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import tempfile
 import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4, uuid5
@@ -102,6 +104,135 @@ PROJECTION_REASON_AHEAD = "ahead"
 PROJECTION_REASON_STALE = "stale"
 PROJECTION_REASON_DIVERGENT = "divergent"
 PROJECTION_REASON_VIEW = "derived-view"
+
+# --- versioned worker lifecycle vocabulary (ADR-013, architecture section 9) --
+
+# The worker lifecycle contract is versioned independently of the control-store
+# schema so a worker speaking an older or newer vocabulary is refused explicitly
+# instead of being partially understood.
+WORKER_LIFECYCLE_SCHEMA_VERSION = 1
+WORKER_LIFECYCLE_RECORD_TYPE = "worker-lifecycle"
+# One committed event carries at most one lifecycle record, always under this
+# payload field, and its event type is derived from the declared state.  Neither
+# half can exist without the other, so a lifecycle record cannot be smuggled in
+# under an unrelated event type and a lifecycle event type cannot be empty.
+WORKER_LIFECYCLE_PAYLOAD_FIELD = "worker_lifecycle"
+WORKER_LIFECYCLE_EVENT_PREFIX = "worker-lifecycle-"
+
+# The materialized state a mission holds before any lifecycle event applies.
+LIFECYCLE_PENDING_DISPATCH = "pending-dispatch"
+LIFECYCLE_ACCEPTED = "accepted"
+LIFECYCLE_RUNNING = "running"
+LIFECYCLE_BLOCKED = "blocked"
+LIFECYCLE_COMPLETED = "completed"
+LIFECYCLE_FAILED = "failed"
+LIFECYCLE_CANCELLED = "cancelled"
+LIFECYCLE_REPLACED = "replaced"
+
+# The complete, closed lifecycle vocabulary a worker may emit.
+WORKER_LIFECYCLE_STATES = (
+    LIFECYCLE_ACCEPTED,
+    LIFECYCLE_RUNNING,
+    LIFECYCLE_BLOCKED,
+    LIFECYCLE_COMPLETED,
+    LIFECYCLE_FAILED,
+    LIFECYCLE_CANCELLED,
+    LIFECYCLE_REPLACED,
+)
+# Active states carry a heartbeat and an explicit freshness deadline; terminal
+# states carry neither, because nothing is expected to refresh them again.
+WORKER_LIFECYCLE_ACTIVE_STATES = (
+    LIFECYCLE_ACCEPTED,
+    LIFECYCLE_RUNNING,
+    LIFECYCLE_BLOCKED,
+)
+WORKER_LIFECYCLE_TERMINAL_STATES = (
+    LIFECYCLE_COMPLETED,
+    LIFECYCLE_FAILED,
+    LIFECYCLE_CANCELLED,
+    LIFECYCLE_REPLACED,
+)
+# States that must explain themselves: a mission never blocks or ends silently.
+WORKER_LIFECYCLE_REASON_REQUIRED = (
+    LIFECYCLE_BLOCKED,
+    LIFECYCLE_FAILED,
+    LIFECYCLE_CANCELLED,
+    LIFECYCLE_REPLACED,
+)
+
+# Architecture section 9 transition table.  Re-emitting the same active state is
+# the heartbeat-refresh path, so freshness is renewed through the same versioned
+# record rather than a second, divergent one.  Terminal states have no successor.
+WORKER_LIFECYCLE_TRANSITIONS = {
+    LIFECYCLE_PENDING_DISPATCH: (LIFECYCLE_ACCEPTED,),
+    LIFECYCLE_ACCEPTED: (
+        LIFECYCLE_ACCEPTED,
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_REPLACED,
+    ),
+    LIFECYCLE_RUNNING: (
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_BLOCKED,
+        LIFECYCLE_COMPLETED,
+        LIFECYCLE_FAILED,
+        LIFECYCLE_CANCELLED,
+        LIFECYCLE_REPLACED,
+    ),
+    LIFECYCLE_BLOCKED: (
+        LIFECYCLE_BLOCKED,
+        LIFECYCLE_RUNNING,
+        LIFECYCLE_FAILED,
+        LIFECYCLE_CANCELLED,
+        LIFECYCLE_REPLACED,
+    ),
+}
+
+# The complete, closed field set of one lifecycle record.  Every field is always
+# present, so a partially written record is malformed rather than defaulted.
+WORKER_LIFECYCLE_FIELDS = (
+    "schema_version",
+    "record_type",
+    "state",
+    "worker_id",
+    "mission_id",
+    "queue_item_id",
+    "trace_id",
+    "parent_trace_id",
+    "sequence",
+    "reason",
+    "blocker",
+    "heartbeat_at",
+    "fresh_until",
+    "evidence_refs",
+    "superseded_by_mission_id",
+)
+WORKER_LIFECYCLE_BLOCKER_FIELDS = ("category", "detail")
+
+# Materialized worker mission slots live in the derived ledger under this field.
+LEDGER_WORKER_MISSIONS_FIELD = "worker_missions"
+LEDGER_WORKER_MISSION_FIELDS = ("lifecycle", "revision", "event_id", "recorded_at")
+
+# How the deterministic fold treated one committed lifecycle event.  Every
+# committed event is retained forever; these outcomes only say whether it also
+# moved the materialized mission state.
+LIFECYCLE_APPLIED = "applied"
+LIFECYCLE_RETAINED_TERMINAL = "retained-terminal-state"
+LIFECYCLE_RETAINED_STALE_SEQUENCE = "retained-stale-sequence"
+LIFECYCLE_RETAINED_INVALID_TRANSITION = "retained-invalid-transition"
+LIFECYCLE_RETAINED_UNMATCHED = "retained-unmatched-correlation"
+
+# Freshness observations.  An observation says what the control plane can
+# currently see; it is deliberately not a mission state and never becomes one.
+LIFECYCLE_OBSERVATION_FRESH = "fresh"
+LIFECYCLE_OBSERVATION_STALE = "stale"
+LIFECYCLE_OBSERVATION_TERMINAL = "terminal"
+# Expiry is a recoverable observation with an explicit reason.  It is never
+# `failed`: only a worker event or an explicit decision ends a mission.
+LIFECYCLE_STALE_REASON = "heartbeat-expired"
+LIFECYCLE_STALE_RECOVERY = "awaiting-bounded-recovery"
+
+DEFAULT_LIFECYCLE_COMMAND = "cockpit-control record-lifecycle"
+DEFAULT_LIFECYCLE_STATUS_COMMAND = "cockpit-control lifecycle-status"
 
 
 class ControlStoreError(RuntimeError):
@@ -373,6 +504,39 @@ def validate_root_metadata(record: Any, root: Path) -> Dict[str, Any]:
     return data
 
 
+def validate_worker_missions(value: Any, label: str) -> Dict[str, Any]:
+    """Validate the materialized worker mission slots the derived ledger holds.
+
+    Each slot is keyed by its mission ID and embeds the exact lifecycle record
+    that last advanced it, together with the committed revision and event that
+    published it.  The projection is therefore auditable back to one immutable
+    event file, and a hand-edited ledger fails closed instead of being trusted.
+    """
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_WORKER_MISSIONS_FIELD}")
+    for mission_id in sorted(value):
+        slot_label = f"{label} {LEDGER_WORKER_MISSIONS_FIELD}[{mission_id}]"
+        slot = value[mission_id]
+        if not isinstance(slot, dict):
+            raise ControlStoreError(f"{slot_label} must be a JSON object")
+        unknown = sorted(set(slot) - set(LEDGER_WORKER_MISSION_FIELDS))
+        if unknown:
+            raise ControlStoreError(f"{slot_label} declares unknown field(s) {', '.join(unknown)}")
+        missing = [field for field in LEDGER_WORKER_MISSION_FIELDS if field not in slot]
+        if missing:
+            raise ControlStoreError(f"{slot_label} requires {', '.join(missing)}")
+        lifecycle = validate_worker_lifecycle(slot["lifecycle"], f"{slot_label} lifecycle")
+        if lifecycle["mission_id"] != mission_id:
+            raise ControlStoreError(
+                f"{slot_label} holds lifecycle for mission {lifecycle['mission_id']}"
+            )
+        _require_positive_integer(slot, "revision", slot_label)
+        _require_uuid(slot, "event_id", slot_label)
+        _require_timestamp(slot, "recorded_at", slot_label)
+    return value
+
+
 def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -> Dict[str, Any]:
     """Validate the root-level materialized ledger schema."""
 
@@ -393,7 +557,249 @@ def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -
     active_queue_item_id = _require_optional_string(data, "active_queue_item_id", label)
     if active_mission_id is not None and active_queue_item_id is None:
         raise ControlStoreError(f"{label} requires active_queue_item_id with active_mission_id")
+    if LEDGER_WORKER_MISSIONS_FIELD not in data:
+        raise ControlStoreError(f"{label} requires {LEDGER_WORKER_MISSIONS_FIELD}")
+    validate_worker_missions(data[LEDGER_WORKER_MISSIONS_FIELD], label)
     return data
+
+
+def _require_positive_integer(record: Mapping[str, Any], field: str, label: str) -> int:
+    """Require a counting field that a boolean or a float can never satisfy."""
+
+    value = record.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ControlStoreError(f"{label} requires positive integer {field}")
+    return value
+
+
+def _require_identifier(record: Mapping[str, Any], field: str, label: str) -> str:
+    """Require a correlation identifier that can never forge a record boundary.
+
+    Worker-controlled identity strings are rendered verbatim into the
+    line-oriented `record-lifecycle` and `lifecycle-status` stdout payload, so a
+    value carrying a newline, a tab, or any other control character could forge
+    an entire additional, fully-formed status record and break the
+    machine-readable correlation guarantee.  ADR-013 and architecture section 6
+    reject text-as-protocol, so an identifier is restricted to printable
+    non-whitespace ASCII: nothing outside that set is a legitimate correlation
+    key, and nothing inside it can create a field or record boundary.
+    """
+
+    value = _require_string(record, field, label)
+    for character in value:
+        if not character.isascii() or character.isspace() or not character.isprintable():
+            raise ControlStoreError(
+                f"{label} requires printable non-whitespace ASCII {field}; {value!r} could "
+                "forge a record boundary in the line-oriented lifecycle payload"
+            )
+    return value
+
+
+def _parsed_timestamp(value: Any, field: str, label: str) -> datetime:
+    """Parse one validated UTC timestamp into a comparable aware datetime."""
+
+    _require_timestamp({field: value}, field, label)
+    return datetime.fromisoformat(str(value)[:-1] + "+00:00")
+
+
+def _shifted_timestamp(base: str, seconds: float) -> str:
+    """Return the canonical UTC timestamp `seconds` after a validated base."""
+
+    moment = _parsed_timestamp(base, "heartbeat_at", "worker lifecycle")
+    # A freshness window large enough to leave the representable timestamp range
+    # is a refusal with a diagnostic, never an uncaught OverflowError traceback
+    # that would leak internal paths and escape the fail-closed contract.
+    try:
+        shifted = moment + timedelta(seconds=seconds)
+    except (OverflowError, ValueError, OSError):
+        raise ControlStoreError(
+            "--fresh-for produces a freshness deadline outside the representable "
+            "timestamp range"
+        ) from None
+    return shifted.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _require_evidence_refs(record: Mapping[str, Any], label: str, *, required: bool) -> List[str]:
+    """Require typed `<type>:<value>` evidence references rather than free text.
+
+    ADR-016 keeps canonical records metadata-only, so evidence is carried as a
+    typed reference an operator can resolve later.  Anything shapeless, blank,
+    whitespace-bearing, or duplicated is refused before it can be committed.
+    """
+
+    if "evidence_refs" not in record:
+        raise ControlStoreError(f"{label} requires evidence_refs")
+    value = record["evidence_refs"]
+    if not isinstance(value, list):
+        raise ControlStoreError(f"{label} requires array evidence_refs")
+    if required and not value:
+        raise ControlStoreError(f"{label} requires at least one evidence reference")
+    accepted: List[str] = []
+    for index, reference in enumerate(value):
+        field = f"evidence_refs[{index}]"
+        if not isinstance(reference, str) or not reference:
+            raise ControlStoreError(f"{label} requires non-empty string {field}")
+        if reference.split() != [reference]:
+            raise ControlStoreError(f"{label} {field} must not contain whitespace")
+        kind, separator, identifier = reference.partition(":")
+        if not separator or not identifier:
+            raise ControlStoreError(
+                f"{label} {field} must be a typed '<type>:<value>' evidence reference"
+            )
+        if not kind[:1].isascii() or not kind[:1].isalpha() or not all(
+            character.isascii() and (character.islower() or character.isdigit() or character == "-")
+            for character in kind
+        ):
+            raise ControlStoreError(
+                f"{label} {field} must name a lowercase evidence type before ':'"
+            )
+        if reference in accepted:
+            raise ControlStoreError(f"{label} duplicates evidence reference {reference}")
+        accepted.append(reference)
+    return accepted
+
+
+def _require_blocker(record: Mapping[str, Any], label: str, state: str) -> Optional[Dict[str, Any]]:
+    """Require a categorized blocker for `blocked` and nothing at all elsewhere."""
+
+    if "blocker" not in record:
+        raise ControlStoreError(f"{label} requires blocker")
+    value = record["blocker"]
+    if state != LIFECYCLE_BLOCKED:
+        if value is not None:
+            raise ControlStoreError(f"{label} must not declare a blocker for state {state!r}")
+        return None
+    if not isinstance(value, dict):
+        raise ControlStoreError(
+            f"{label} requires an object blocker for state {LIFECYCLE_BLOCKED!r}"
+        )
+    unknown = sorted(set(value) - set(WORKER_LIFECYCLE_BLOCKER_FIELDS))
+    if unknown:
+        raise ControlStoreError(
+            f"{label} blocker declares unknown field(s) {', '.join(unknown)}"
+        )
+    _require_string(value, "category", f"{label} blocker")
+    _require_optional_string(value, "detail", f"{label} blocker")
+    return value
+
+
+def validate_worker_lifecycle(record: Any, label: str = "worker lifecycle") -> Dict[str, Any]:
+    """Validate one versioned worker lifecycle record, failing closed throughout.
+
+    The record is a closed vocabulary: an unknown or missing field, an unknown
+    state, a missing correlation identifier, an unversioned or future-versioned
+    record, freshness on a terminal state, or a terminal state without a reason
+    is refused rather than partially understood.  Nothing here consults derived
+    state, so the same validation applies to a record about to be published and
+    to one already committed.
+    """
+
+    data = _require_object(record, label)
+    version = data.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ControlStoreError(f"{label} requires integer schema_version")
+    if version > WORKER_LIFECYCLE_SCHEMA_VERSION:
+        raise ControlStoreError(
+            f"{label} uses unsupported future schema_version {version}; upgrade cockpit "
+            "tools before mutation"
+        )
+    if version != WORKER_LIFECYCLE_SCHEMA_VERSION:
+        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+    _require_record_type(data, WORKER_LIFECYCLE_RECORD_TYPE, label)
+
+    unknown = sorted(set(data) - set(WORKER_LIFECYCLE_FIELDS))
+    if unknown:
+        raise ControlStoreError(f"{label} declares unknown field(s) {', '.join(unknown)}")
+    missing = [field for field in WORKER_LIFECYCLE_FIELDS if field not in data]
+    if missing:
+        raise ControlStoreError(f"{label} requires {', '.join(missing)}")
+
+    state = _require_string(data, "state", label)
+    if state not in WORKER_LIFECYCLE_STATES:
+        raise ControlStoreError(
+            f"{label} declares unknown state {state!r}; expected one of "
+            f"{', '.join(WORKER_LIFECYCLE_STATES)}"
+        )
+    # `worker_id` and `queue_item_id` are rendered into a parseable position of
+    # the line-oriented lifecycle payload, so they are constrained to identifier
+    # characters.  `reason`, `blocker.category`, and `blocker.detail` are prose
+    # that no command renders into a parseable position, so they stay free text
+    # rather than being over-constrained; `evidence_refs` are already required to
+    # be whitespace-free typed references.
+    _require_identifier(data, "worker_id", label)
+    mission_id = _require_uuid(data, "mission_id", label)
+    _require_identifier(data, "queue_item_id", label)
+    _require_uuid(data, "trace_id", label)
+    _require_optional_uuid(data, "parent_trace_id", label)
+    _require_positive_integer(data, "sequence", label)
+
+    if _require_optional_string(data, "reason", label) is None:
+        if state in WORKER_LIFECYCLE_REASON_REQUIRED:
+            raise ControlStoreError(f"{label} requires a reason for state {state!r}")
+    _require_blocker(data, label, state)
+    # A completion that references no evidence cannot be reviewed later, so the
+    # happy path is required to carry its own references.
+    _require_evidence_refs(data, label, required=state == LIFECYCLE_COMPLETED)
+
+    if state in WORKER_LIFECYCLE_ACTIVE_STATES:
+        heartbeat = _parsed_timestamp(
+            _require_string(data, "heartbeat_at", label), "heartbeat_at", label
+        )
+        expiry = _parsed_timestamp(
+            _require_string(data, "fresh_until", label), "fresh_until", label
+        )
+        if expiry <= heartbeat:
+            raise ControlStoreError(f"{label} requires fresh_until after heartbeat_at")
+    else:
+        for field in ("heartbeat_at", "fresh_until"):
+            if data[field] is not None:
+                raise ControlStoreError(
+                    f"{label} must not declare {field} for terminal state {state!r}"
+                )
+
+    if state == LIFECYCLE_REPLACED:
+        if _require_uuid(data, "superseded_by_mission_id", label) == mission_id:
+            raise ControlStoreError(
+                f"{label} requires superseded_by_mission_id to name a different mission"
+            )
+    elif data["superseded_by_mission_id"] is not None:
+        raise ControlStoreError(
+            f"{label} must not declare superseded_by_mission_id for state {state!r}"
+        )
+    return data
+
+
+def event_worker_lifecycle(record: Mapping[str, Any], label: str) -> Optional[Dict[str, Any]]:
+    """Return the lifecycle record one event declares, or None, failing closed.
+
+    The lifecycle event type and the lifecycle payload are two halves of one
+    contract.  A lifecycle event type without a record, a record without the
+    matching event type, or a record whose declared state disagrees with its
+    event type is refused, so `list-events` and the projection can never read a
+    different state from the same committed file.
+    """
+
+    event_type = _require_string(record, "event_type", label)
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    if WORKER_LIFECYCLE_PAYLOAD_FIELD not in payload:
+        if event_type.startswith(WORKER_LIFECYCLE_EVENT_PREFIX):
+            raise ControlStoreError(
+                f"{label} declares lifecycle event_type {event_type!r} without a "
+                f"payload.{WORKER_LIFECYCLE_PAYLOAD_FIELD} record"
+            )
+        return None
+    lifecycle = validate_worker_lifecycle(
+        payload[WORKER_LIFECYCLE_PAYLOAD_FIELD],
+        f"{label} payload.{WORKER_LIFECYCLE_PAYLOAD_FIELD}",
+    )
+    expected = f"{WORKER_LIFECYCLE_EVENT_PREFIX}{lifecycle['state']}"
+    if event_type != expected:
+        raise ControlStoreError(
+            f"{label} declares lifecycle state {lifecycle['state']!r} but event_type "
+            f"{event_type!r}; expected event_type {expected!r}"
+        )
+    return lifecycle
 
 
 def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[str, Any]:
@@ -415,6 +821,10 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
     # unstructured payload is refused before it can wedge a projection rebuild.
     if "payload" in data and not isinstance(data["payload"], dict):
         raise ControlStoreError(f"{label} requires an object payload")
+    # A lifecycle event is validated as part of the event, so a malformed,
+    # unversioned, or future-versioned lifecycle record can never be committed
+    # and can never be read back as if it were understood.
+    event_worker_lifecycle(data, label)
     return data
 
 
@@ -1693,6 +2103,69 @@ def _event_ledger_declarations(record: Mapping[str, Any], label: str) -> Dict[st
     return declared
 
 
+def apply_worker_lifecycle(
+    slots: Dict[str, Dict[str, Any]],
+    lifecycle: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed lifecycle event into the materialized mission slots.
+
+    Every committed event is durable audit evidence regardless of this outcome.
+    The fold only decides whether it also *moves* the materialized state, and it
+    never raises for an out-of-order or superseded record: refusing to project a
+    committed event would wedge the whole store.  A record is applied only when
+    it correlates with the same worker and queue item, the mission is not yet
+    terminal, its sequence is strictly newer than the materialized one, and the
+    transition is in the architecture section 9 table.
+    """
+
+    mission_id = lifecycle["mission_id"]
+    slot = slots.get(mission_id)
+    current_state = LIFECYCLE_PENDING_DISPATCH
+    if slot is not None:
+        materialized = slot["lifecycle"]
+        current_state = materialized["state"]
+        if (
+            materialized["worker_id"] != lifecycle["worker_id"]
+            or materialized["queue_item_id"] != lifecycle["queue_item_id"]
+        ):
+            return False, LIFECYCLE_RETAINED_UNMATCHED
+        # A terminal state is absolute: no sequence number, however new, reopens
+        # a mission that already completed, failed, was cancelled, or replaced.
+        if current_state in WORKER_LIFECYCLE_TERMINAL_STATES:
+            return False, LIFECYCLE_RETAINED_TERMINAL
+        # Equal sequences are duplicates and lower ones are late deliveries;
+        # neither may regress or re-apply the newer materialized state.
+        if lifecycle["sequence"] <= materialized["sequence"]:
+            return False, LIFECYCLE_RETAINED_STALE_SEQUENCE
+    if lifecycle["state"] not in WORKER_LIFECYCLE_TRANSITIONS.get(current_state, ()):
+        return False, LIFECYCLE_RETAINED_INVALID_TRANSITION
+
+    slots[mission_id] = {
+        "lifecycle": dict(lifecycle),
+        "revision": event.revision,
+        "event_id": event.event_id,
+        "recorded_at": event.record["timestamp"],
+    }
+    return True, LIFECYCLE_APPLIED
+
+
+def fold_worker_missions(
+    events: Sequence["CommittedEvent"] = (),
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
+    """Replay committed events into mission slots and per-event fold outcomes."""
+
+    slots: Dict[str, Dict[str, Any]] = {}
+    outcomes: Dict[str, Tuple[bool, str]] = {}
+    for event in events:
+        label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        lifecycle = event_worker_lifecycle(event.record, label)
+        if lifecycle is None:
+            continue
+        outcomes[event.event_id] = apply_worker_lifecycle(slots, lifecycle, event)
+    return slots, outcomes
+
+
 def build_ledger_projection(
     metadata: Mapping[str, Any],
     events: Sequence[CommittedEvent] = (),
@@ -1713,6 +2186,7 @@ def build_ledger_projection(
     revision = 0
     updated_at = created_at
     state: Dict[str, Any] = {field: None for field in LEDGER_PROJECTION_FIELDS}
+    worker_missions, _outcomes = fold_worker_missions(events)
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         state.update(_event_ledger_declarations(event.record, label))
@@ -1731,6 +2205,7 @@ def build_ledger_projection(
         "revision": revision,
         "active_queue_item_id": state["active_queue_item_id"],
         "active_mission_id": state["active_mission_id"],
+        LEDGER_WORKER_MISSIONS_FIELD: worker_missions,
         "canonical_roots": {
             "control_root": roots["control_root"],
             "queue_root": roots["queue_root"],
@@ -2413,6 +2888,237 @@ def publish_control_event(
         poll_seconds=poll_seconds,
         dry_run=dry_run,
     ).run()
+
+
+# --- versioned worker lifecycle recording and freshness observation ----------
+
+
+@dataclass(frozen=True)
+class LifecycleRecordResult:
+    """Outcome of committing one versioned worker lifecycle event."""
+
+    root: Path
+    publication: EventPublicationResult
+    lifecycle: Dict[str, Any]
+    applied: bool
+    outcome: str
+    materialized: Optional[Dict[str, Any]]
+
+    @property
+    def committed(self) -> bool:
+        return self.publication.committed
+
+    @property
+    def retained_for_audit(self) -> bool:
+        """Report a durably committed event that did not move materialized state."""
+
+        return not self.applied
+
+
+@dataclass(frozen=True)
+class WorkerLifecycleObservation:
+    """One freshness observation of a materialized worker mission slot.
+
+    An observation is not a mission state.  `stale` says only that the control
+    plane can no longer see a fresh heartbeat, names a recoverable reason, and
+    records that a bounded recovery action is owed.  It never claims `failed`.
+    """
+
+    mission_id: str
+    worker_id: str
+    queue_item_id: str
+    trace_id: str
+    state: str
+    sequence: int
+    terminal: bool
+    observation: str
+    reason: Optional[str]
+    recoverable: bool
+    recovery: Optional[str]
+    heartbeat_at: Optional[str]
+    fresh_until: Optional[str]
+    revision: int
+    event_id: str
+    as_of: str
+
+    @property
+    def stale(self) -> bool:
+        return self.observation == LIFECYCLE_OBSERVATION_STALE
+
+
+def build_worker_lifecycle(
+    state: str,
+    worker_id: str,
+    mission_id: str,
+    queue_item_id: str,
+    trace_id: str,
+    sequence: Any,
+    parent_trace_id: Optional[str] = None,
+    reason: Optional[str] = None,
+    blocker: Optional[Mapping[str, Any]] = None,
+    heartbeat_at: Optional[str] = None,
+    fresh_until: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    superseded_by_mission_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete lifecycle record and validate it before use."""
+
+    record = {
+        "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
+        "record_type": WORKER_LIFECYCLE_RECORD_TYPE,
+        "state": state,
+        "worker_id": worker_id,
+        "mission_id": mission_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "sequence": sequence,
+        "reason": reason,
+        "blocker": None if blocker is None else dict(blocker),
+        "heartbeat_at": heartbeat_at,
+        "fresh_until": fresh_until,
+        "evidence_refs": list(evidence_refs),
+        "superseded_by_mission_id": superseded_by_mission_id,
+    }
+    return validate_worker_lifecycle(record, "worker lifecycle")
+
+
+def record_worker_lifecycle(
+    root: Path,
+    lifecycle: Mapping[str, Any],
+    actor: Optional[str] = None,
+    command: str = DEFAULT_LIFECYCLE_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> LifecycleRecordResult:
+    """Commit one lifecycle event and report whether it moved materialized state.
+
+    Publication and materialization are deliberately separate answers.  A late,
+    duplicate, superseded, or uncorrelated record is still committed as durable
+    audit evidence through the ordinary immutable-event protocol; the fold then
+    reports that it changed nothing.  Only a malformed record is refused, and it
+    is refused before any private candidate exists.
+    """
+
+    validated = validate_worker_lifecycle(dict(lifecycle), "worker lifecycle")
+    publication = publish_control_event(
+        root,
+        f"{WORKER_LIFECYCLE_EVENT_PREFIX}{validated['state']}",
+        actor=actor or validated["worker_id"],
+        payload={WORKER_LIFECYCLE_PAYLOAD_FIELD: validated},
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    )
+
+    # Committed authority answers this, not the in-memory guess made under the
+    # lock: the fold is re-derived from the committed sequence that now exists.
+    try:
+        _metadata, history = inspect_control_events(publication.root)
+    except ControlStoreError as exc:
+        if not publication.committed:
+            raise
+        raise ControlStoreError(
+            f"{EVENTS_DIR_NAME}/{publication.path.name} is committed at revision "
+            f"{publication.revision}; only its materialization could not be reported: {exc}"
+        ) from None
+    events = history.events
+    if not publication.committed:
+        events = events + (
+            CommittedEvent(
+                path=publication.path,
+                revision=history.latest_revision + 1,
+                event_id=publication.event_id,
+                record=publication.record,
+            ),
+        )
+    slots, outcomes = fold_worker_missions(events)
+    applied, outcome = outcomes.get(publication.event_id, (False, LIFECYCLE_RETAINED_UNMATCHED))
+    return LifecycleRecordResult(
+        root=publication.root,
+        publication=publication,
+        lifecycle=dict(validated),
+        applied=applied,
+        outcome=outcome,
+        materialized=slots.get(validated["mission_id"]),
+    )
+
+
+def _observed_slot(slot: Mapping[str, Any], now: datetime, as_of: str) -> WorkerLifecycleObservation:
+    """Classify one materialized slot as fresh, stale, or terminal."""
+
+    lifecycle = slot["lifecycle"]
+    state = lifecycle["state"]
+    terminal = state in WORKER_LIFECYCLE_TERMINAL_STATES
+    observation = LIFECYCLE_OBSERVATION_TERMINAL
+    reason: Optional[str] = None
+    recovery: Optional[str] = None
+    recoverable = False
+    if not terminal:
+        expiry = _parsed_timestamp(lifecycle["fresh_until"], "fresh_until", "worker lifecycle")
+        if now > expiry:
+            observation = LIFECYCLE_OBSERVATION_STALE
+            reason = LIFECYCLE_STALE_REASON
+            recovery = LIFECYCLE_STALE_RECOVERY
+            recoverable = True
+        else:
+            observation = LIFECYCLE_OBSERVATION_FRESH
+    return WorkerLifecycleObservation(
+        mission_id=lifecycle["mission_id"],
+        worker_id=lifecycle["worker_id"],
+        queue_item_id=lifecycle["queue_item_id"],
+        trace_id=lifecycle["trace_id"],
+        state=state,
+        sequence=lifecycle["sequence"],
+        terminal=terminal,
+        observation=observation,
+        reason=reason,
+        recoverable=recoverable,
+        recovery=recovery,
+        heartbeat_at=lifecycle["heartbeat_at"],
+        fresh_until=lifecycle["fresh_until"],
+        revision=slot["revision"],
+        event_id=slot["event_id"],
+        as_of=as_of,
+    )
+
+
+def observe_worker_lifecycle(
+    root: Path,
+    as_of: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+) -> Tuple[WorkerLifecycleObservation, ...]:
+    """Report freshness for every materialized mission without changing a byte.
+
+    The observation is derived from committed events rather than the published
+    projection, so a stale or interrupted `ledger.json` can never make a worker
+    look fresh.  A worker whose `fresh_until` has passed is reported `stale`
+    with a recoverable reason; its mission state is left exactly as the last
+    lifecycle event declared it.
+    """
+
+    root = _require_absolute_root(str(root), "configured")
+    moment = as_of if as_of is not None else utc_timestamp()
+    now = _parsed_timestamp(moment, "as_of", "lifecycle status")
+    if mission_id is not None:
+        mission_id = _require_uuid({"mission_id": mission_id}, "mission_id", "lifecycle status")
+    if worker_id is not None:
+        worker_id = _require_string({"worker_id": worker_id}, "worker_id", "lifecycle status")
+
+    _metadata, history = inspect_control_events(root)
+    slots, _outcomes = fold_worker_missions(history.events)
+    observations: List[WorkerLifecycleObservation] = []
+    for key in sorted(slots):
+        lifecycle = slots[key]["lifecycle"]
+        if mission_id is not None and lifecycle["mission_id"] != mission_id:
+            continue
+        if worker_id is not None and lifecycle["worker_id"] != worker_id:
+            continue
+        observations.append(_observed_slot(slots[key], now, moment))
+    return tuple(observations)
 
 
 # --- read-only preflight and explicit guarded store repair -------------------
@@ -4100,6 +4806,184 @@ def _report_event_history(root: Path, history: EventHistory) -> int:
     return 0
 
 
+def _report_lifecycle_record(result: LifecycleRecordResult) -> int:
+    """Print the publication outcome and, separately, the materialization one."""
+
+    publication = result.publication
+    location = f"{EVENTS_DIR_NAME}/{publication.path.name}"
+    if publication.committed:
+        print(f"cockpit-control: committed {location} at revision {publication.revision}")
+    else:
+        print(
+            f"cockpit-control: would commit {location} at revision {publication.revision}; "
+            "no state changed"
+        )
+    if publication.projection is not None:
+        print(
+            f"cockpit-control: projected {LEDGER_NAME} at revision "
+            f"{publication.projection.revision}"
+        )
+
+    lifecycle = result.lifecycle
+    summary = (
+        f"worker-lifecycle {lifecycle['state']} sequence {lifecycle['sequence']} "
+        f"for mission {lifecycle['mission_id']} worker {lifecycle['worker_id']} "
+        f"trace {lifecycle['trace_id']}"
+    )
+    if result.applied:
+        verb = "advanced" if publication.committed else "would advance"
+        print(f"cockpit-control: {summary} {verb} the materialized mission state")
+    else:
+        materialized = result.materialized
+        detail = "no materialized mission state exists"
+        if materialized is not None:
+            detail = (
+                f"materialized state is {materialized['lifecycle']['state']} at sequence "
+                f"{materialized['lifecycle']['sequence']}"
+            )
+        verb = "is retained" if publication.committed else "would be retained"
+        print(
+            f"cockpit-control: {summary} {verb} for audit only "
+            f"({result.outcome}; {detail})"
+        )
+        if publication.committed:
+            print(
+                f"cockpit-control: {location} is durable audit evidence that did not change "
+                f"the materialized mission state ({result.outcome})",
+                file=os.sys.stderr,
+            )
+    if publication.projection is not None:
+        _report_projection_debris(publication.projection.interrupted_temporaries)
+    _report_pending_debris(publication.pending_debris)
+    return 0
+
+
+def _report_lifecycle_status(
+    root: Path,
+    observations: Sequence[WorkerLifecycleObservation],
+    as_of: str,
+) -> int:
+    """Print one freshness observation per materialized mission and succeed.
+
+    A stale worker is an observation, not a verdict, so this command always
+    exits 0 and says explicitly on stderr that expiry is recoverable and is not
+    a mission failure.
+    """
+
+    stale = [observation for observation in observations if observation.stale]
+    print(
+        f"cockpit-control: {len(observations)} worker mission(s) in {root} as of {as_of}; "
+        f"{len(stale)} stale observation(s)"
+    )
+    for observation in observations:
+        print(
+            f"{observation.mission_id} worker {observation.worker_id} "
+            f"queue-item {observation.queue_item_id} trace {observation.trace_id} "
+            f"state {observation.state} sequence {observation.sequence} "
+            f"observation {observation.observation} "
+            f"reason {observation.reason or '-'} "
+            f"recovery {observation.recovery or '-'} "
+            f"fresh-until {observation.fresh_until or '-'}"
+        )
+    for observation in stale:
+        print(
+            f"cockpit-control: mission {observation.mission_id} on {observation.worker_id} is a "
+            f"stale {observation.state} observation ({observation.reason}); this is recoverable "
+            "and is not a mission failure, and it awaits a bounded recovery action",
+            file=os.sys.stderr,
+        )
+    return 0
+
+
+def _parsed_sequence(value: str) -> int:
+    """Parse an explicit lifecycle sequence without accepting a float or sign."""
+
+    text = value.strip() if isinstance(value, str) else ""
+    if not text.isascii() or not text.isdigit():
+        raise ControlStoreError("worker lifecycle requires positive integer sequence")
+    # CPython refuses to convert an absurdly long digit string at all, so the
+    # refusal is stated as a diagnostic instead of escaping as a ValueError
+    # traceback that would leak internal paths.
+    try:
+        return int(text)
+    except ValueError:
+        raise ControlStoreError(
+            "worker lifecycle requires a sequence within the representable integer range"
+        ) from None
+
+
+def _parsed_freshness_seconds(value: str) -> float:
+    """Parse an explicit freshness window in seconds."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ControlStoreError("--fresh-for must be a positive number of seconds") from None
+    return _validated_seconds(parsed, "--fresh-for", allow_zero=False)
+
+
+def _lifecycle_from_arguments(args: Any) -> Dict[str, Any]:
+    """Build one complete lifecycle record from explicit command arguments.
+
+    Nothing is guessed.  An active state must be given an explicit freshness
+    window, because inventing a default heartbeat timeout would be a policy the
+    control plane has not been told.
+    """
+
+    if args.fresh_until is not None and args.fresh_for is not None:
+        raise ControlStoreError("--fresh-until and --fresh-for cannot be combined")
+    heartbeat_at = args.heartbeat_at
+    fresh_until = args.fresh_until
+    if args.state in WORKER_LIFECYCLE_TERMINAL_STATES:
+        for option, value in (
+            ("--heartbeat-at", heartbeat_at),
+            ("--fresh-until", fresh_until),
+            ("--fresh-for", args.fresh_for),
+        ):
+            if value is not None:
+                raise ControlStoreError(
+                    f"{option} cannot be given for terminal state {args.state!r}; a terminal "
+                    "mission has no freshness to refresh"
+                )
+    if args.state in WORKER_LIFECYCLE_ACTIVE_STATES:
+        if heartbeat_at is None:
+            heartbeat_at = utc_timestamp()
+        if fresh_until is None:
+            if args.fresh_for is None:
+                raise ControlStoreError(
+                    f"state {args.state!r} requires an explicit freshness deadline; "
+                    "pass --fresh-until or --fresh-for"
+                )
+            fresh_until = _shifted_timestamp(
+                heartbeat_at, _parsed_freshness_seconds(args.fresh_for)
+            )
+    blocker: Optional[Dict[str, Any]] = None
+    if args.blocker_category is not None:
+        blocker = {"category": args.blocker_category, "detail": args.blocker_detail}
+    elif args.blocker_detail is not None:
+        raise ControlStoreError("--blocker-detail requires --blocker-category")
+    elif args.state == LIFECYCLE_BLOCKED:
+        raise ControlStoreError(
+            f"state {LIFECYCLE_BLOCKED!r} requires a categorized blocker; pass "
+            "--blocker-category"
+        )
+    return build_worker_lifecycle(
+        state=args.state,
+        worker_id=args.worker,
+        mission_id=args.mission,
+        queue_item_id=args.queue_item,
+        trace_id=args.trace,
+        sequence=_parsed_sequence(args.sequence),
+        parent_trace_id=args.parent_trace,
+        reason=args.reason,
+        blocker=blocker,
+        heartbeat_at=heartbeat_at,
+        fresh_until=fresh_until,
+        evidence_refs=tuple(args.evidence or ()),
+        superseded_by_mission_id=args.superseded_by,
+    )
+
+
 def _parsed_payload(value: Optional[str]) -> Optional[Dict[str, Any]]:
     """Parse an explicit payload argument as one JSON object of metadata."""
 
@@ -4122,8 +5006,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cockpit-control",
         description=(
-            "initialize, validate, publish immutable events into, replay the derived "
-            "ledger of, preflight, and guardedly repair the versioned cockpit control store"
+            "initialize, validate, publish immutable events into, record versioned worker "
+            "lifecycle evidence in, replay the derived ledger of, preflight, and guardedly "
+            "repair the versioned cockpit control store"
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -4208,6 +5093,98 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="report the repair plan without changing any state",
     )
+    lifecycle = subcommands.add_parser(
+        "record-lifecycle",
+        help=(
+            "commit one versioned worker lifecycle event and report whether it "
+            "advanced the materialized mission state"
+        ),
+    )
+    lifecycle.add_argument(
+        "--state",
+        required=True,
+        metavar="STATE",
+        help="lifecycle state: " + ", ".join(WORKER_LIFECYCLE_STATES),
+    )
+    lifecycle.add_argument("--worker", required=True, help="the worker that emitted the event")
+    lifecycle.add_argument("--mission", required=True, metavar="UUID", help="mission identifier")
+    lifecycle.add_argument(
+        "--queue-item", required=True, metavar="QUEUE_ITEM_ID", help="queue item identifier"
+    )
+    lifecycle.add_argument("--trace", required=True, metavar="UUID", help="trace identifier")
+    lifecycle.add_argument(
+        "--parent-trace", default=None, metavar="UUID", help="parent trace identifier"
+    )
+    lifecycle.add_argument(
+        "--sequence",
+        required=True,
+        metavar="N",
+        help="monotonic per-mission lifecycle sequence number",
+    )
+    lifecycle.add_argument(
+        "--reason",
+        default=None,
+        help="required explanation for blocked, failed, cancelled, and replaced",
+    )
+    lifecycle.add_argument(
+        "--blocker-category", default=None, help="blocker category for the blocked state"
+    )
+    lifecycle.add_argument("--blocker-detail", default=None, help="blocker detail text")
+    lifecycle.add_argument(
+        "--heartbeat-at",
+        default=None,
+        metavar="UTC",
+        help="heartbeat timestamp for an active state; defaults to now",
+    )
+    lifecycle.add_argument(
+        "--fresh-until", default=None, metavar="UTC", help="explicit freshness deadline"
+    )
+    lifecycle.add_argument(
+        "--fresh-for",
+        default=None,
+        metavar="SECONDS",
+        help="freshness window measured from the heartbeat",
+    )
+    lifecycle.add_argument(
+        "--evidence",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="typed evidence reference; may be repeated",
+    )
+    lifecycle.add_argument(
+        "--superseded-by",
+        default=None,
+        metavar="UUID",
+        help="the replacing mission identifier, required for the replaced state",
+    )
+    lifecycle.add_argument(
+        "--actor", default=None, help="event actor; defaults to the emitting worker"
+    )
+    lifecycle.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the lifecycle decision without changing any state",
+    )
+    lifecycle_status = subcommands.add_parser(
+        "lifecycle-status",
+        help=(
+            "report worker mission freshness from committed events without "
+            "changing any state"
+        ),
+    )
+    lifecycle_status.add_argument(
+        "--mission", default=None, metavar="UUID", help="report only this mission"
+    )
+    lifecycle_status.add_argument(
+        "--worker", default=None, metavar="WORKER", help="report only this worker"
+    )
+    lifecycle_status.add_argument(
+        "--as-of",
+        default=None,
+        metavar="UTC",
+        help="evaluate freshness at this explicit UTC moment instead of now",
+    )
     replay = subcommands.add_parser(
         "replay-ledger",
         help=(
@@ -4238,6 +5215,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     payload=_parsed_payload(args.payload),
                     dry_run=args.dry_run,
                 )
+            )
+        if args.command == "record-lifecycle":
+            return _report_lifecycle_record(
+                record_worker_lifecycle(
+                    resolved.path,
+                    _lifecycle_from_arguments(args),
+                    actor=args.actor,
+                    dry_run=args.dry_run,
+                )
+            )
+        if args.command == "lifecycle-status":
+            as_of = args.as_of if args.as_of is not None else utc_timestamp()
+            return _report_lifecycle_status(
+                resolved.path,
+                observe_worker_lifecycle(
+                    resolved.path,
+                    as_of=as_of,
+                    mission_id=args.mission,
+                    worker_id=args.worker,
+                ),
+                as_of,
             )
         if args.command == "replay-ledger":
             return _report_ledger_projection(
