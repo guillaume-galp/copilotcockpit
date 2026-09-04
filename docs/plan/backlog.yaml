@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-04T13:58:20+01:00"
+last-updated: "2026-09-04T17:05:45+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -402,7 +402,7 @@ themes:
             depends_on: [TH3.E2.US1]
           - id: TH3.E2.US3
             title: "Managed questions, cancellation, and replacement"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E2-worker-mission-protocol/stories/US3-managed-mission-control.md

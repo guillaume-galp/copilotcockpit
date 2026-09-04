@@ -6,9 +6,12 @@ share one fail-closed definition of the VP3 control-store boundary, one portable
 control-lock protocol, one immutable event-publication protocol, one versioned
 worker lifecycle vocabulary with monotonic sequence and freshness semantics, one
 versioned command envelope and acknowledgement protocol whose redelivery is
-idempotent and whose identifier reuse is a recorded conflict, one read-only
-readiness diagnosis, and one explicit guarded repair that never deletes
-anything.
+idempotent and whose identifier reuse is a recorded conflict, one managed
+mission-control layer in which questions, replies, access-prompt responses,
+cooperative cancellations, and replacements are correlated records carried by
+those same command envelopes and folded into one mission slot per worker, one
+read-only readiness diagnosis, and one explicit guarded repair that never
+deletes anything.
 """
 
 from __future__ import annotations
@@ -433,6 +436,275 @@ DEFAULT_COMMAND_REGISTER_COMMAND = "cockpit-control register-command"
 DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND = "cockpit-control acknowledge-command"
 
 
+# --- managed mission control: dialog, cancellation, replacement (section 10) --
+
+# Managed mission control is versioned independently of the control-store
+# schema, of the worker lifecycle vocabulary, and of the command protocol, so a
+# controller or worker speaking an older or newer mission-control contract is
+# refused explicitly instead of being partially understood.
+MISSION_CONTROL_SCHEMA_VERSION = 1
+
+# Every managed interaction rides in the same committed event as the ordinary
+# US2 command envelope that carries it.  There is deliberately no second
+# delivery, digest, or acknowledgement mechanism: a question, a reply, an
+# access-prompt response, a cancellation, and a replacement are all commands,
+# and these records only add the correlation the command alone cannot express.
+MISSION_DIALOG_RECORD_TYPE = "mission-dialog"
+MISSION_CANCELLATION_RECORD_TYPE = "mission-cancellation"
+MISSION_REPLACEMENT_RECORD_TYPE = "mission-replacement"
+MISSION_DIALOG_PAYLOAD_FIELD = "mission_dialog"
+MISSION_CANCELLATION_PAYLOAD_FIELD = "mission_cancellation"
+MISSION_REPLACEMENT_PAYLOAD_FIELD = "mission_replacement"
+# One event carries at most one mission-control record.  The tuple is ordered so
+# a record is always looked for under exactly one closed set of payload fields.
+MISSION_CONTROL_PAYLOAD_FIELDS = (
+    MISSION_DIALOG_PAYLOAD_FIELD,
+    MISSION_CANCELLATION_PAYLOAD_FIELD,
+    MISSION_REPLACEMENT_PAYLOAD_FIELD,
+)
+
+# The closed dialog vocabulary.  A worker raises a prompt; the overseer answers
+# it.  There is no third shape, so an unknown dialog kind is refused rather than
+# delivered as something the control plane does not model.
+MISSION_DIALOG_QUESTION = "question"
+MISSION_DIALOG_ACCESS_PROMPT = "access-prompt"
+MISSION_DIALOG_REPLY = "reply"
+MISSION_DIALOG_ACCESS_PROMPT_RESPONSE = "access-prompt-response"
+MISSION_DIALOG_PROMPT_KINDS = (MISSION_DIALOG_QUESTION, MISSION_DIALOG_ACCESS_PROMPT)
+MISSION_DIALOG_RESPONSE_KINDS = (
+    MISSION_DIALOG_REPLY,
+    MISSION_DIALOG_ACCESS_PROMPT_RESPONSE,
+)
+MISSION_DIALOG_KINDS = MISSION_DIALOG_PROMPT_KINDS + MISSION_DIALOG_RESPONSE_KINDS
+# Exactly which prompt each response kind may answer.  An access-prompt response
+# can never resolve an ordinary question and vice versa, so an operator cannot
+# accidentally close a filesystem-access prompt with an architectural answer.
+MISSION_DIALOG_ANSWERS = {
+    MISSION_DIALOG_REPLY: MISSION_DIALOG_QUESTION,
+    MISSION_DIALOG_ACCESS_PROMPT_RESPONSE: MISSION_DIALOG_ACCESS_PROMPT,
+}
+
+# The complete, closed field set of one dialog record.  The question and answer
+# bodies are deliberately absent: ADR-016 keeps canonical records metadata-only,
+# so a dialog carries the digest of its body on the command envelope and typed
+# references to wherever that body actually lives.  A prompt body can quote a
+# secret, a credential, or a source file, and none of those belong in an
+# immutable event that is never rewritten.
+MISSION_DIALOG_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "kind",
+    "mission_id",
+    "worker_id",
+    "queue_item_id",
+    "trace_id",
+    "parent_trace_id",
+    "answers_command_id",
+    "category",
+    "body_refs",
+    "raised_at",
+)
+
+# The complete, closed field set of one cooperative cancellation request.  The
+# acknowledgement deadline is always explicit: a cancellation that declared no
+# deadline could never be observed as timed out without inventing a policy the
+# control plane has not been told.
+MISSION_CANCELLATION_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "mission_id",
+    "worker_id",
+    "queue_item_id",
+    "trace_id",
+    "parent_trace_id",
+    "reason",
+    "evidence_refs",
+    "requested_at",
+    "acknowledge_deadline_at",
+)
+
+# The complete, closed field set of one replacement request.  It names both the
+# mission it terminates and the mission it creates, so the projection can link
+# them without consulting anything derived.
+MISSION_REPLACEMENT_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "worker_id",
+    "queue_item_id",
+    "replaced_mission_id",
+    "replacement_mission_id",
+    "trace_id",
+    "parent_trace_id",
+    "reason",
+    "evidence_refs",
+    "requested_at",
+)
+
+# The managed command types.  These are the only command types this tool mints
+# itself, and the generic `register-command` surface refuses them: a managed
+# command without its correlated record would look managed while being
+# correlated to nothing, which is exactly the unscoped interaction AC1 removes.
+COMMAND_TYPE_MISSION_QUESTION = "mission-question"
+COMMAND_TYPE_MISSION_ACCESS_PROMPT = "mission-access-prompt"
+COMMAND_TYPE_MISSION_REPLY = "mission-reply"
+COMMAND_TYPE_MISSION_ACCESS_PROMPT_RESPONSE = "mission-access-prompt-response"
+COMMAND_TYPE_MISSION_CANCEL = "mission-cancel"
+COMMAND_TYPE_MISSION_REPLACE = "mission-replace"
+MISSION_DIALOG_COMMAND_TYPES = {
+    MISSION_DIALOG_QUESTION: COMMAND_TYPE_MISSION_QUESTION,
+    MISSION_DIALOG_ACCESS_PROMPT: COMMAND_TYPE_MISSION_ACCESS_PROMPT,
+    MISSION_DIALOG_REPLY: COMMAND_TYPE_MISSION_REPLY,
+    MISSION_DIALOG_ACCESS_PROMPT_RESPONSE: COMMAND_TYPE_MISSION_ACCESS_PROMPT_RESPONSE,
+}
+MISSION_DIALOG_RESPONSES = {
+    prompt: response for response, prompt in MISSION_DIALOG_ANSWERS.items()
+}
+MANAGED_COMMAND_TYPES = tuple(sorted(MISSION_DIALOG_COMMAND_TYPES.values())) + (
+    COMMAND_TYPE_MISSION_CANCEL,
+    COMMAND_TYPE_MISSION_REPLACE,
+)
+
+# Materialized dialog state.  A prompt is `pending` until exactly one correlated
+# response answers it; a response is `delivered` and answers nothing itself.
+MISSION_DIALOG_PENDING = "pending"
+MISSION_DIALOG_ANSWERED = "answered"
+MISSION_DIALOG_DELIVERED = "delivered"
+MISSION_DIALOG_STATES = (
+    MISSION_DIALOG_PENDING,
+    MISSION_DIALOG_ANSWERED,
+    MISSION_DIALOG_DELIVERED,
+)
+
+# Materialized mission dialogs, cancellations, and per-worker mission slots live
+# in the derived ledger under these fields.
+LEDGER_MISSION_DIALOGS_FIELD = "mission_dialogs"
+LEDGER_MISSION_DIALOG_FIELDS = (
+    "dialog",
+    "state",
+    "answered_by_command_id",
+    "answered_at",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_MISSION_CANCELLATIONS_FIELD = "mission_cancellations"
+LEDGER_MISSION_CANCELLATION_FIELDS = (
+    "cancellation",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_MISSION_SLOTS_FIELD = "mission_slots"
+LEDGER_MISSION_SLOT_FIELDS = (
+    "mission_id",
+    "queue_item_id",
+    "state",
+    "command_id",
+    "replaces",
+    "conflicts",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_MISSION_SLOT_CONFLICT_FIELDS = (
+    "mission_id",
+    "reason",
+    "source",
+    "command_id",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+
+# ADR-013: "Each worker retains one active mission slot."  A slot is `active`
+# once a lifecycle event materializes its mission, `reserved` between a
+# replacement and the worker accepting the mission it created, `released` once
+# the mission it held reached a terminal state, and `unclaimed` when the worker
+# holds nothing at all and the entry exists only to carry recorded conflicts.
+MISSION_SLOT_ACTIVE = "active"
+MISSION_SLOT_RESERVED = "reserved"
+MISSION_SLOT_RELEASED = "released"
+MISSION_SLOT_UNCLAIMED = "unclaimed"
+MISSION_SLOT_STATES = (
+    MISSION_SLOT_ACTIVE,
+    MISSION_SLOT_RESERVED,
+    MISSION_SLOT_RELEASED,
+    MISSION_SLOT_UNCLAIMED,
+)
+# The states in which the worker's one slot is occupied and a second claim would
+# be a second active slot.
+MISSION_SLOT_CLAIMED_STATES = (MISSION_SLOT_ACTIVE, MISSION_SLOT_RESERVED)
+
+# Why one claim could not take the worker's single slot, and which half of the
+# protocol observed it.  Both vocabularies are closed, so a slot conflict is a
+# structured fact rather than a sentence to be parsed.
+MISSION_SLOT_CONFLICT_SECOND_ACTIVE = "second-active-slot"
+MISSION_SLOT_CONFLICT_UNMATCHED = "unmatched-mission-slot"
+MISSION_SLOT_CONFLICT_REUSED = "reused-mission-id"
+MISSION_SLOT_CONFLICT_REASONS = (
+    MISSION_SLOT_CONFLICT_SECOND_ACTIVE,
+    MISSION_SLOT_CONFLICT_UNMATCHED,
+    MISSION_SLOT_CONFLICT_REUSED,
+)
+MISSION_SLOT_CONFLICT_LIFECYCLE = "lifecycle"
+MISSION_SLOT_CONFLICT_REPLACEMENT = "replacement"
+MISSION_SLOT_CONFLICT_SOURCES = (
+    MISSION_SLOT_CONFLICT_LIFECYCLE,
+    MISSION_SLOT_CONFLICT_REPLACEMENT,
+)
+# The human sentence each recorded reason deserves.  The structured reason on
+# stdout is the contract; this only has to be accurate about which of the three
+# refusals actually happened, because naming the wrong one would misdescribe a
+# durable refusal to the operator reading stderr.
+MISSION_SLOT_CONFLICT_EXPLANATIONS = {
+    MISSION_SLOT_CONFLICT_SECOND_ACTIVE: (
+        "it would leave worker {worker_id} holding more than one active mission slot"
+    ),
+    MISSION_SLOT_CONFLICT_UNMATCHED: (
+        "it does not name worker {worker_id}'s own claimed, correlated, still-active "
+        "mission"
+    ),
+    MISSION_SLOT_CONFLICT_REUSED: (
+        "mission ID {mission_id} is already in use and a replacement must create one "
+        "new mission"
+    ),
+}
+
+# How the deterministic fold treated one committed mission-control record.
+# Every committed record is retained forever; these outcomes only say whether it
+# also moved the materialized dialog, cancellation, or mission-slot state.
+MISSION_FOLD_RAISED = "raised"
+MISSION_FOLD_ANSWERED = "answered"
+MISSION_FOLD_REQUESTED = "requested"
+MISSION_FOLD_REPLACED = "replaced"
+MISSION_FOLD_CONFLICT_RECORDED = "conflict-recorded"
+MISSION_FOLD_RETAINED_DUPLICATE = "retained-duplicate-record"
+MISSION_FOLD_RETAINED_UNKNOWN_PROMPT = "retained-unknown-prompt"
+MISSION_FOLD_RETAINED_ANSWERED = "retained-already-answered"
+MISSION_FOLD_RETAINED_KIND = "retained-mismatched-prompt-kind"
+MISSION_FOLD_RETAINED_UNMATCHED = "retained-unmatched-correlation"
+
+# Cancellation observations.  An observation says what the control plane can
+# currently see about one cooperative cancellation; like lifecycle freshness it
+# is deliberately not a mission state and never becomes one.
+CANCELLATION_ACKNOWLEDGED = "acknowledged"
+CANCELLATION_AWAITING = "awaiting-acknowledgement"
+CANCELLATION_TIMED_OUT = "timed-out"
+# An expired acknowledgement deadline is a recoverable observation with an
+# explicit reason.  It is never `failed`: only a worker lifecycle event or an
+# explicit decision ends a mission, and a silent worker has not ended anything.
+CANCELLATION_TIMEOUT_REASON = "acknowledgement-deadline-expired"
+CANCELLATION_TIMEOUT_RECOVERY = "awaiting-bounded-recovery"
+
+DEFAULT_MISSION_QUESTION_COMMAND = "cockpit-control raise-question"
+DEFAULT_MISSION_ANSWER_COMMAND = "cockpit-control answer-question"
+DEFAULT_MISSION_CANCEL_COMMAND = "cockpit-control cancel-mission"
+DEFAULT_MISSION_REPLACE_COMMAND = "cockpit-control replace-mission"
+
+
 class ControlStoreError(RuntimeError):
     """Raised when a control-store configuration is unsafe to use."""
 
@@ -828,6 +1100,144 @@ def validate_commands(value: Any, label: str) -> Dict[str, Any]:
     return value
 
 
+def validate_mission_dialogs(value: Any, label: str) -> Dict[str, Any]:
+    """Validate the materialized mission dialogs the derived ledger holds.
+
+    Each dialog is keyed by the command ID that carried it and embeds the exact
+    record that was committed, so the projection is auditable back to one
+    immutable event file and a hand-edited ledger fails closed instead of being
+    trusted.  A prompt is `pending` until exactly one correlated response
+    answers it, and only an answered prompt names its answering command.
+    """
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_MISSION_DIALOGS_FIELD}")
+    for command_id in sorted(value):
+        slot_label = f"{label} {LEDGER_MISSION_DIALOGS_FIELD}[{command_id}]"
+        slot = value[command_id]
+        if not isinstance(slot, dict):
+            raise ControlStoreError(f"{slot_label} must be a JSON object")
+        _require_closed_fields(slot, LEDGER_MISSION_DIALOG_FIELDS, slot_label)
+        dialog = validate_mission_dialog(slot["dialog"], f"{slot_label} dialog")
+        if dialog["command_id"] != command_id:
+            raise ControlStoreError(
+                f"{slot_label} holds the dialog of command {dialog['command_id']}"
+            )
+        state = _require_string(slot, "state", slot_label)
+        if state not in MISSION_DIALOG_STATES:
+            raise ControlStoreError(
+                f"{slot_label} declares unknown state {state!r}; expected one of "
+                f"{', '.join(MISSION_DIALOG_STATES)}"
+            )
+        if state == MISSION_DIALOG_ANSWERED:
+            _require_uuid(slot, "answered_by_command_id", slot_label)
+            _require_timestamp(slot, "answered_at", slot_label)
+        else:
+            for field in ("answered_by_command_id", "answered_at"):
+                if slot[field] is not None:
+                    raise ControlStoreError(
+                        f"{slot_label} must not declare {field} for state {state!r}"
+                    )
+        _require_positive_integer(slot, "revision", slot_label)
+        _require_uuid(slot, "event_id", slot_label)
+        _require_timestamp(slot, "recorded_at", slot_label)
+    return value
+
+
+def validate_mission_cancellations(value: Any, label: str) -> Dict[str, Any]:
+    """Validate the materialized cancellation requests the derived ledger holds."""
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_MISSION_CANCELLATIONS_FIELD}")
+    for command_id in sorted(value):
+        slot_label = f"{label} {LEDGER_MISSION_CANCELLATIONS_FIELD}[{command_id}]"
+        slot = value[command_id]
+        if not isinstance(slot, dict):
+            raise ControlStoreError(f"{slot_label} must be a JSON object")
+        _require_closed_fields(slot, LEDGER_MISSION_CANCELLATION_FIELDS, slot_label)
+        cancellation = validate_mission_cancellation(
+            slot["cancellation"], f"{slot_label} cancellation"
+        )
+        if cancellation["command_id"] != command_id:
+            raise ControlStoreError(
+                f"{slot_label} holds the cancellation of command {cancellation['command_id']}"
+            )
+        _require_positive_integer(slot, "revision", slot_label)
+        _require_uuid(slot, "event_id", slot_label)
+        _require_timestamp(slot, "recorded_at", slot_label)
+    return value
+
+
+def validate_mission_slots(value: Any, label: str) -> Dict[str, Any]:
+    """Validate the one mission slot each worker holds in the derived ledger.
+
+    ADR-013 gives every worker exactly one mission slot, so this projection is
+    keyed by worker and holds at most one claimed mission each.  Every claim that
+    could not take an occupied slot is retained here as a durable conflict rather
+    than being discarded.
+    """
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_MISSION_SLOTS_FIELD}")
+    for worker_id in sorted(value):
+        slot_label = f"{label} {LEDGER_MISSION_SLOTS_FIELD}[{worker_id}]"
+        slot = value[worker_id]
+        if not isinstance(slot, dict):
+            raise ControlStoreError(f"{slot_label} must be a JSON object")
+        _require_closed_fields(slot, LEDGER_MISSION_SLOT_FIELDS, slot_label)
+        _require_identifier({"worker_id": worker_id}, "worker_id", slot_label)
+        state = _require_string(slot, "state", slot_label)
+        if state not in MISSION_SLOT_STATES:
+            raise ControlStoreError(
+                f"{slot_label} declares unknown state {state!r}; expected one of "
+                f"{', '.join(MISSION_SLOT_STATES)}"
+            )
+        if state == MISSION_SLOT_UNCLAIMED:
+            for field in ("mission_id", "queue_item_id", "command_id", "replaces"):
+                if slot[field] is not None:
+                    raise ControlStoreError(
+                        f"{slot_label} must not declare {field} for state {state!r}"
+                    )
+        else:
+            _require_uuid(slot, "mission_id", slot_label)
+            _require_identifier(slot, "queue_item_id", slot_label)
+            _require_optional_uuid(slot, "command_id", slot_label)
+            if _require_optional_uuid(slot, "replaces", slot_label) == slot["mission_id"]:
+                raise ControlStoreError(
+                    f"{slot_label} requires replaces to name a different mission"
+                )
+        _require_positive_integer(slot, "revision", slot_label)
+        _require_uuid(slot, "event_id", slot_label)
+        _require_timestamp(slot, "recorded_at", slot_label)
+
+        conflicts = slot["conflicts"]
+        if not isinstance(conflicts, list):
+            raise ControlStoreError(f"{slot_label} requires array conflicts")
+        for index, conflict in enumerate(conflicts):
+            entry_label = f"{slot_label} conflicts[{index}]"
+            if not isinstance(conflict, dict):
+                raise ControlStoreError(f"{entry_label} must be a JSON object")
+            _require_closed_fields(conflict, LEDGER_MISSION_SLOT_CONFLICT_FIELDS, entry_label)
+            _require_uuid(conflict, "mission_id", entry_label)
+            reason = _require_string(conflict, "reason", entry_label)
+            if reason not in MISSION_SLOT_CONFLICT_REASONS:
+                raise ControlStoreError(
+                    f"{entry_label} declares unknown reason {reason!r}; expected one of "
+                    f"{', '.join(MISSION_SLOT_CONFLICT_REASONS)}"
+                )
+            conflict_source = _require_string(conflict, "source", entry_label)
+            if conflict_source not in MISSION_SLOT_CONFLICT_SOURCES:
+                raise ControlStoreError(
+                    f"{entry_label} declares unknown source {conflict_source!r}; expected "
+                    f"one of {', '.join(MISSION_SLOT_CONFLICT_SOURCES)}"
+                )
+            _require_optional_uuid(conflict, "command_id", entry_label)
+            _require_positive_integer(conflict, "revision", entry_label)
+            _require_uuid(conflict, "event_id", entry_label)
+            _require_timestamp(conflict, "recorded_at", entry_label)
+    return value
+
+
 def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -> Dict[str, Any]:
     """Validate the root-level materialized ledger schema."""
 
@@ -854,6 +1264,14 @@ def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -
     if LEDGER_COMMANDS_FIELD not in data:
         raise ControlStoreError(f"{label} requires {LEDGER_COMMANDS_FIELD}")
     validate_commands(data[LEDGER_COMMANDS_FIELD], label)
+    for field, validator in (
+        (LEDGER_MISSION_DIALOGS_FIELD, validate_mission_dialogs),
+        (LEDGER_MISSION_CANCELLATIONS_FIELD, validate_mission_cancellations),
+        (LEDGER_MISSION_SLOTS_FIELD, validate_mission_slots),
+    ):
+        if field not in data:
+            raise ControlStoreError(f"{label} requires {field}")
+        validator(data[field], label)
     return data
 
 
@@ -896,19 +1314,25 @@ def _parsed_timestamp(value: Any, field: str, label: str) -> datetime:
     return datetime.fromisoformat(str(value)[:-1] + "+00:00")
 
 
-def _shifted_timestamp(base: str, seconds: float) -> str:
+def _shifted_timestamp(
+    base: str,
+    seconds: float,
+    field: str = "heartbeat_at",
+    label: str = "worker lifecycle",
+    option: str = "--fresh-for",
+    noun: str = "freshness deadline",
+) -> str:
     """Return the canonical UTC timestamp `seconds` after a validated base."""
 
-    moment = _parsed_timestamp(base, "heartbeat_at", "worker lifecycle")
-    # A freshness window large enough to leave the representable timestamp range
-    # is a refusal with a diagnostic, never an uncaught OverflowError traceback
-    # that would leak internal paths and escape the fail-closed contract.
+    moment = _parsed_timestamp(base, field, label)
+    # A window large enough to leave the representable timestamp range is a
+    # refusal with a diagnostic, never an uncaught OverflowError traceback that
+    # would leak internal paths and escape the fail-closed contract.
     try:
         shifted = moment + timedelta(seconds=seconds)
     except (OverflowError, ValueError, OSError):
         raise ControlStoreError(
-            "--fresh-for produces a freshness deadline outside the representable "
-            "timestamp range"
+            f"{option} produces a {noun} outside the representable timestamp range"
         ) from None
     return shifted.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -1436,6 +1860,223 @@ def event_command_acknowledgement(
     return acknowledgement
 
 
+def _require_mission_control_schema_version(record: Mapping[str, Any], label: str) -> None:
+    """Require the exact mission-control protocol version this tool implements."""
+
+    version = record.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ControlStoreError(f"{label} requires integer schema_version")
+    if version > MISSION_CONTROL_SCHEMA_VERSION:
+        raise ControlStoreError(
+            f"{label} uses unsupported future schema_version {version}; upgrade cockpit "
+            "tools before mutation"
+        )
+    if version != MISSION_CONTROL_SCHEMA_VERSION:
+        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+
+
+def _require_mission_correlation(record: Mapping[str, Any], label: str) -> None:
+    """Require the correlation identity every managed mission record carries.
+
+    `worker_id` and `queue_item_id` are rendered into parseable positions of the
+    line-oriented mission payload, so they are constrained exactly like every
+    other correlation identifier this protocol accepts, and a child trace may
+    never claim to be its own parent.
+    """
+
+    _require_identifier(record, "worker_id", label)
+    _require_identifier(record, "queue_item_id", label)
+    trace_id = _require_uuid(record, "trace_id", label)
+    parent_trace_id = _require_optional_uuid(record, "parent_trace_id", label)
+    if parent_trace_id is not None and parent_trace_id == trace_id:
+        raise ControlStoreError(f"{label} requires parent_trace_id to name a different trace")
+
+
+def validate_mission_dialog(record: Any, label: str = "mission dialog") -> Dict[str, Any]:
+    """Validate one versioned mission dialog record, failing closed throughout.
+
+    A dialog is the durable correlation between one managed command and the
+    mission it belongs to: a worker-raised question or access prompt, or the
+    overseer response that resolves exactly one of them.  The body of the
+    question or the answer is never part of the record; the carrying command
+    envelope digests it and `body_refs` says, as typed references, where it
+    lives.  An unknown or missing field, an unknown dialog kind, an unversioned
+    or future-versioned record, a prompt claiming to answer something, or a
+    response answering nothing is refused rather than partially understood.
+    """
+
+    data = _require_object(record, label)
+    _require_mission_control_schema_version(data, label)
+    _require_record_type(data, MISSION_DIALOG_RECORD_TYPE, label)
+    _require_closed_fields(data, MISSION_DIALOG_FIELDS, label)
+
+    command_id = _require_uuid(data, "command_id", label)
+    kind = _require_string(data, "kind", label)
+    if kind not in MISSION_DIALOG_KINDS:
+        raise ControlStoreError(
+            f"{label} declares unknown kind {kind!r}; expected one of "
+            f"{', '.join(MISSION_DIALOG_KINDS)}"
+        )
+    _require_uuid(data, "mission_id", label)
+    _require_mission_correlation(data, label)
+    # The category is rendered into a parseable position of the line-oriented
+    # mission payload, so a worker- or operator-chosen category is constrained
+    # to identifier characters that cannot forge a field or record boundary.
+    _require_identifier(data, "category", label)
+    _require_typed_references(data, "body_refs", label, required=True, noun="dialog body")
+    _require_timestamp(data, "raised_at", label)
+
+    if kind in MISSION_DIALOG_PROMPT_KINDS:
+        if data["answers_command_id"] is not None:
+            raise ControlStoreError(
+                f"{label} must not declare answers_command_id for prompt kind {kind!r}"
+            )
+    elif _require_uuid(data, "answers_command_id", label) == command_id:
+        raise ControlStoreError(
+            f"{label} requires answers_command_id to name a different command"
+        )
+    return data
+
+
+def validate_mission_cancellation(
+    record: Any,
+    label: str = "mission cancellation",
+) -> Dict[str, Any]:
+    """Validate one versioned cooperative cancellation request, failing closed.
+
+    A cancellation always explains itself and always declares the moment by
+    which an acknowledgement is expected, because an undeclared deadline could
+    never be observed as timed out without inventing an unstated policy.
+    """
+
+    data = _require_object(record, label)
+    _require_mission_control_schema_version(data, label)
+    _require_record_type(data, MISSION_CANCELLATION_RECORD_TYPE, label)
+    _require_closed_fields(data, MISSION_CANCELLATION_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    _require_uuid(data, "mission_id", label)
+    _require_mission_correlation(data, label)
+    # `reason` is prose that no command renders into a parseable position, so it
+    # stays free text rather than being over-constrained.
+    _require_string(data, "reason", label)
+    _require_evidence_refs(data, label, required=False)
+    requested_at = _require_timestamp(data, "requested_at", label)
+    deadline = _parsed_timestamp(
+        _require_string(data, "acknowledge_deadline_at", label),
+        "acknowledge_deadline_at",
+        label,
+    )
+    if deadline <= _parsed_timestamp(requested_at, "requested_at", label):
+        raise ControlStoreError(f"{label} requires acknowledge_deadline_at after requested_at")
+    return data
+
+
+def validate_mission_replacement(
+    record: Any,
+    label: str = "mission replacement",
+) -> Dict[str, Any]:
+    """Validate one versioned mission replacement request, failing closed.
+
+    A replacement names the mission it terminates and the new mission ID it
+    creates.  Reusing the terminated mission ID is refused here rather than
+    discovered later, because architecture section 10 forbids `replace-mission`
+    from reusing the cancelled mission ID at all.
+    """
+
+    data = _require_object(record, label)
+    _require_mission_control_schema_version(data, label)
+    _require_record_type(data, MISSION_REPLACEMENT_RECORD_TYPE, label)
+    _require_closed_fields(data, MISSION_REPLACEMENT_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    _require_mission_correlation(data, label)
+    replaced = _require_uuid(data, "replaced_mission_id", label)
+    if _require_uuid(data, "replacement_mission_id", label) == replaced:
+        raise ControlStoreError(
+            f"{label} requires replacement_mission_id to name a different mission"
+        )
+    _require_string(data, "reason", label)
+    _require_evidence_refs(data, label, required=False)
+    _require_timestamp(data, "requested_at", label)
+    return data
+
+
+MISSION_CONTROL_VALIDATORS = {
+    MISSION_DIALOG_PAYLOAD_FIELD: validate_mission_dialog,
+    MISSION_CANCELLATION_PAYLOAD_FIELD: validate_mission_cancellation,
+    MISSION_REPLACEMENT_PAYLOAD_FIELD: validate_mission_replacement,
+}
+
+
+def _mission_control_command_type(field: str, record: Mapping[str, Any]) -> str:
+    """Return the one managed command type a mission-control record requires."""
+
+    if field == MISSION_DIALOG_PAYLOAD_FIELD:
+        return MISSION_DIALOG_COMMAND_TYPES[record["kind"]]
+    if field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        return COMMAND_TYPE_MISSION_CANCEL
+    return COMMAND_TYPE_MISSION_REPLACE
+
+
+def event_mission_control(
+    record: Mapping[str, Any],
+    label: str,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Return the mission-control record one event declares, failing closed.
+
+    A managed command and its correlation record are two halves of one contract
+    and neither half can exist without the other:
+
+    * a mission-control record may only ride in the `command-registered` event
+      of the command envelope that carries it, and must name that exact command
+      ID and the exact managed command type its kind requires;
+    * a command envelope declaring a managed command type must carry the
+      matching record, so the generic delivery surface cannot mint a command
+      that looks managed while being correlated to nothing at all.
+
+    One event carries at most one such record, so a single committed file can
+    never be read as two different managed operations.
+    """
+
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    present = [field for field in MISSION_CONTROL_PAYLOAD_FIELDS if field in payload]
+    if len(present) > 1:
+        raise ControlStoreError(
+            f"{label} declares {len(present)} mission-control records "
+            f"({', '.join(present)}); one event carries at most one"
+        )
+    envelope = event_command_envelope(record, label)
+    if not present:
+        if envelope is not None and envelope["command_type"] in MANAGED_COMMAND_TYPES:
+            raise ControlStoreError(
+                f"{label} declares managed command_type {envelope['command_type']!r} "
+                "without its correlated mission-control record"
+            )
+        return None, None
+
+    field = present[0]
+    if envelope is None:
+        raise ControlStoreError(
+            f"{label} carries a payload.{field} record without a "
+            f"payload.{COMMAND_ENVELOPE_PAYLOAD_FIELD} command envelope"
+        )
+    validated = MISSION_CONTROL_VALIDATORS[field](payload[field], f"{label} payload.{field}")
+    if validated["command_id"] != envelope["command_id"]:
+        raise ControlStoreError(
+            f"{label} payload.{field} names command {validated['command_id']} but its "
+            f"envelope registers command {envelope['command_id']}"
+        )
+    expected = _mission_control_command_type(field, validated)
+    if envelope["command_type"] != expected:
+        raise ControlStoreError(
+            f"{label} payload.{field} requires command_type {expected!r} but its envelope "
+            f"declares {envelope['command_type']!r}"
+        )
+    return field, validated
+
+
 def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[str, Any]:
     """Validate an authoritative journal event before it can affect state."""
 
@@ -1461,6 +2102,7 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
     event_worker_lifecycle(data, label)
     event_command_envelope(data, label)
     event_command_acknowledgement(data, label)
+    event_mission_control(data, label)
     return data
 
 
@@ -2808,15 +3450,322 @@ def fold_worker_missions(
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
     """Replay committed events into mission slots and per-event fold outcomes."""
 
-    slots: Dict[str, Dict[str, Any]] = {}
-    outcomes: Dict[str, Tuple[bool, str]] = {}
+    state = fold_mission_state(events)
+    return state.missions, state.lifecycle_outcomes
+
+
+def _mission_event_stamp(event: "CommittedEvent") -> Dict[str, Any]:
+    """Return the committed provenance every materialized mission entry carries."""
+
+    return {
+        "revision": event.revision,
+        "event_id": event.event_id,
+        "recorded_at": event.record["timestamp"],
+    }
+
+
+def _mission_slot_conflict(
+    mission_id: str,
+    reason: str,
+    conflict_source: str,
+    command_id: Optional[str],
+    event: "CommittedEvent",
+) -> Dict[str, Any]:
+    """Build one durable mission-slot conflict from the event that recorded it."""
+
+    entry = {"mission_id": mission_id, "reason": reason, "source": conflict_source,
+             "command_id": command_id}
+    entry.update(_mission_event_stamp(event))
+    return entry
+
+
+def _mission_slot_entry(worker_slots: Dict[str, Dict[str, Any]], worker_id: str,
+                        event: "CommittedEvent") -> Dict[str, Any]:
+    """Return the worker's slot entry, creating an unclaimed one to hold evidence.
+
+    A conflict must always have somewhere durable to live, including for a
+    worker that holds no mission at all, so an entry that exists only to carry
+    recorded conflicts is explicitly `unclaimed` rather than a partial claim.
+    """
+
+    entry = worker_slots.get(worker_id)
+    if entry is None:
+        entry = {
+            "mission_id": None,
+            "queue_item_id": None,
+            "state": MISSION_SLOT_UNCLAIMED,
+            "command_id": None,
+            "replaces": None,
+            "conflicts": [],
+        }
+        entry.update(_mission_event_stamp(event))
+        worker_slots[worker_id] = entry
+    return entry
+
+
+def apply_lifecycle_mission_slot(
+    worker_slots: Dict[str, Dict[str, Any]],
+    lifecycle: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> None:
+    """Fold one applied lifecycle event into the worker's single mission slot.
+
+    ADR-013 gives each worker exactly one mission slot.  The earliest claim
+    keeps it, a terminal state releases it, and any later claim for a different
+    mission is retained as a durable `second-active-slot` conflict instead of
+    silently giving one worker two active missions.
+    """
+
+    worker_id = lifecycle["worker_id"]
+    mission_id = lifecycle["mission_id"]
+    entry = worker_slots.get(worker_id)
+    if lifecycle["state"] in WORKER_LIFECYCLE_TERMINAL_STATES:
+        if (
+            entry is not None
+            and entry["state"] in MISSION_SLOT_CLAIMED_STATES
+            and entry["mission_id"] == mission_id
+        ):
+            entry["state"] = MISSION_SLOT_RELEASED
+            entry.update(_mission_event_stamp(event))
+        return
+
+    if entry is not None and entry["state"] in MISSION_SLOT_CLAIMED_STATES:
+        if entry["mission_id"] != mission_id:
+            entry["conflicts"].append(
+                _mission_slot_conflict(
+                    mission_id,
+                    MISSION_SLOT_CONFLICT_SECOND_ACTIVE,
+                    MISSION_SLOT_CONFLICT_LIFECYCLE,
+                    None,
+                    event,
+                )
+            )
+            return
+        # The worker accepted the mission its slot already holds, which is how a
+        # reserved replacement becomes an ordinary active mission.
+        entry["state"] = MISSION_SLOT_ACTIVE
+        entry["queue_item_id"] = lifecycle["queue_item_id"]
+        entry.update(_mission_event_stamp(event))
+        return
+
+    entry = _mission_slot_entry(worker_slots, worker_id, event)
+    entry["mission_id"] = mission_id
+    entry["queue_item_id"] = lifecycle["queue_item_id"]
+    entry["state"] = MISSION_SLOT_ACTIVE
+    entry["command_id"] = None
+    entry["replaces"] = None
+    entry.update(_mission_event_stamp(event))
+
+
+def apply_mission_dialog(
+    dialogs: Dict[str, Dict[str, Any]],
+    dialog: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed dialog record into the materialized dialog state.
+
+    A prompt claims its command ID once and becomes `pending`.  A response
+    resolves exactly one pending prompt of the matching kind that is correlated
+    to the same mission, worker, and queue item; anything else is retained as
+    durable audit evidence and answers nothing, so a reply can never resolve an
+    unknown, already-answered, or unrelated question.
+    """
+
+    command_id = dialog["command_id"]
+    if command_id in dialogs:
+        return False, MISSION_FOLD_RETAINED_DUPLICATE
+
+    entry = {
+        "dialog": dict(dialog),
+        "state": MISSION_DIALOG_PENDING,
+        "answered_by_command_id": None,
+        "answered_at": None,
+    }
+    entry.update(_mission_event_stamp(event))
+    if dialog["kind"] in MISSION_DIALOG_PROMPT_KINDS:
+        dialogs[command_id] = entry
+        return True, MISSION_FOLD_RAISED
+
+    prompt = dialogs.get(dialog["answers_command_id"])
+    if prompt is None:
+        return False, MISSION_FOLD_RETAINED_UNKNOWN_PROMPT
+    if prompt["dialog"]["kind"] != MISSION_DIALOG_ANSWERS[dialog["kind"]]:
+        return False, MISSION_FOLD_RETAINED_KIND
+    if prompt["state"] != MISSION_DIALOG_PENDING:
+        return False, MISSION_FOLD_RETAINED_ANSWERED
+    for field in ("mission_id", "worker_id", "queue_item_id"):
+        if prompt["dialog"][field] != dialog[field]:
+            return False, MISSION_FOLD_RETAINED_UNMATCHED
+
+    prompt["state"] = MISSION_DIALOG_ANSWERED
+    prompt["answered_by_command_id"] = command_id
+    prompt["answered_at"] = event.record["timestamp"]
+    entry["state"] = MISSION_DIALOG_DELIVERED
+    dialogs[command_id] = entry
+    return True, MISSION_FOLD_ANSWERED
+
+
+def apply_mission_cancellation(
+    cancellations: Dict[str, Dict[str, Any]],
+    cancellation: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed cooperative cancellation request into the projection.
+
+    The request is the durable half; whether the worker acknowledged it and
+    whether its declared deadline has passed are observations derived later from
+    the command acknowledgements and an explicit as-of moment.
+    """
+
+    command_id = cancellation["command_id"]
+    if command_id in cancellations:
+        return False, MISSION_FOLD_RETAINED_DUPLICATE
+    entry = {"cancellation": dict(cancellation)}
+    entry.update(_mission_event_stamp(event))
+    cancellations[command_id] = entry
+    return True, MISSION_FOLD_REQUESTED
+
+
+def apply_mission_replacement(
+    missions: Dict[str, Dict[str, Any]],
+    worker_slots: Dict[str, Dict[str, Any]],
+    replacement: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed replacement into the mission and slot projections.
+
+    A replacement terminates the prior mission with the existing `replaced`
+    lifecycle state, links it to the mission it creates through
+    `superseded_by_mission_id`, and reserves the worker's one slot for that new
+    mission ID.  It applies only when the prior mission is the worker's own
+    claimed, correlated, still-active mission and the new mission ID has never
+    been used; every other outcome is refused and recorded as a durable
+    conflict, which is what stops a second active slot from ever existing.
+    """
+
+    worker_id = replacement["worker_id"]
+    prior_id = replacement["replaced_mission_id"]
+    replacement_id = replacement["replacement_mission_id"]
+    command_id = replacement["command_id"]
+
+    def refuse(mission_id: str, reason: str) -> Tuple[bool, str]:
+        entry = _mission_slot_entry(worker_slots, worker_id, event)
+        entry["conflicts"].append(
+            _mission_slot_conflict(
+                mission_id, reason, MISSION_SLOT_CONFLICT_REPLACEMENT, command_id, event
+            )
+        )
+        return False, MISSION_FOLD_CONFLICT_RECORDED
+
+    prior = missions.get(prior_id)
+    if (
+        prior is None
+        or prior["lifecycle"]["state"] not in WORKER_LIFECYCLE_ACTIVE_STATES
+        or prior["lifecycle"]["worker_id"] != worker_id
+        or prior["lifecycle"]["queue_item_id"] != replacement["queue_item_id"]
+    ):
+        return refuse(prior_id, MISSION_SLOT_CONFLICT_UNMATCHED)
+
+    slot = worker_slots.get(worker_id)
+    if slot is None or slot["state"] not in MISSION_SLOT_CLAIMED_STATES:
+        return refuse(prior_id, MISSION_SLOT_CONFLICT_UNMATCHED)
+    if slot["mission_id"] != prior_id:
+        # The worker already owns another valid active mission, so replacing
+        # this one would leave it holding two active slots at once.
+        return refuse(replacement_id, MISSION_SLOT_CONFLICT_SECOND_ACTIVE)
+    if replacement_id in missions or any(
+        entry["state"] in MISSION_SLOT_CLAIMED_STATES
+        and entry["mission_id"] == replacement_id
+        for entry in worker_slots.values()
+    ):
+        return refuse(replacement_id, MISSION_SLOT_CONFLICT_REUSED)
+
+    lifecycle = prior["lifecycle"]
+    replaced = build_worker_lifecycle(
+        state=LIFECYCLE_REPLACED,
+        worker_id=worker_id,
+        mission_id=prior_id,
+        queue_item_id=lifecycle["queue_item_id"],
+        trace_id=lifecycle["trace_id"],
+        sequence=lifecycle["sequence"] + 1,
+        parent_trace_id=lifecycle["parent_trace_id"],
+        reason=replacement["reason"],
+        evidence_refs=tuple(replacement["evidence_refs"]),
+        superseded_by_mission_id=replacement_id,
+    )
+    terminated = {"lifecycle": replaced}
+    terminated.update(_mission_event_stamp(event))
+    missions[prior_id] = terminated
+
+    slot["mission_id"] = replacement_id
+    slot["queue_item_id"] = replacement["queue_item_id"]
+    slot["state"] = MISSION_SLOT_RESERVED
+    slot["command_id"] = command_id
+    slot["replaces"] = prior_id
+    slot.update(_mission_event_stamp(event))
+    return True, MISSION_FOLD_REPLACED
+
+
+@dataclass(frozen=True)
+class MissionState:
+    """One deterministic replay of every mission-shaped committed event.
+
+    Worker missions, mission dialogs, cooperative cancellations, and the single
+    slot each worker holds are folded in one pass over the same committed
+    sequence, so they can never disagree about which mission is active.
+    """
+
+    missions: Dict[str, Dict[str, Any]]
+    dialogs: Dict[str, Dict[str, Any]]
+    cancellations: Dict[str, Dict[str, Any]]
+    worker_slots: Dict[str, Dict[str, Any]]
+    lifecycle_outcomes: Dict[str, Tuple[bool, str]]
+    mission_outcomes: Dict[str, Tuple[bool, str]]
+
+
+def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
+    """Replay committed events into every materialized mission projection."""
+
+    missions: Dict[str, Dict[str, Any]] = {}
+    dialogs: Dict[str, Dict[str, Any]] = {}
+    cancellations: Dict[str, Dict[str, Any]] = {}
+    worker_slots: Dict[str, Dict[str, Any]] = {}
+    lifecycle_outcomes: Dict[str, Tuple[bool, str]] = {}
+    mission_outcomes: Dict[str, Tuple[bool, str]] = {}
+
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         lifecycle = event_worker_lifecycle(event.record, label)
-        if lifecycle is None:
+        if lifecycle is not None:
+            applied, outcome = apply_worker_lifecycle(missions, lifecycle, event)
+            lifecycle_outcomes[event.event_id] = (applied, outcome)
+            # Only an event that moved the materialized mission may move the
+            # slot with it; audit-only evidence claims nothing.
+            if applied:
+                apply_lifecycle_mission_slot(worker_slots, lifecycle, event)
             continue
-        outcomes[event.event_id] = apply_worker_lifecycle(slots, lifecycle, event)
-    return slots, outcomes
+        field, record = event_mission_control(event.record, label)
+        if record is None:
+            continue
+        if field == MISSION_DIALOG_PAYLOAD_FIELD:
+            mission_outcomes[event.event_id] = apply_mission_dialog(dialogs, record, event)
+        elif field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+            mission_outcomes[event.event_id] = apply_mission_cancellation(
+                cancellations, record, event
+            )
+        else:
+            mission_outcomes[event.event_id] = apply_mission_replacement(
+                missions, worker_slots, record, event
+            )
+
+    return MissionState(
+        missions=missions,
+        dialogs=dialogs,
+        cancellations=cancellations,
+        worker_slots=worker_slots,
+        lifecycle_outcomes=lifecycle_outcomes,
+        mission_outcomes=mission_outcomes,
+    )
 
 
 def _command_conflict_reason(
@@ -2986,7 +3935,7 @@ def build_ledger_projection(
     revision = 0
     updated_at = created_at
     state: Dict[str, Any] = {field: None for field in LEDGER_PROJECTION_FIELDS}
-    worker_missions, _lifecycle_outcomes = fold_worker_missions(events)
+    mission_state = fold_mission_state(events)
     commands, _command_outcomes = fold_commands(events)
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
@@ -3006,8 +3955,11 @@ def build_ledger_projection(
         "revision": revision,
         "active_queue_item_id": state["active_queue_item_id"],
         "active_mission_id": state["active_mission_id"],
-        LEDGER_WORKER_MISSIONS_FIELD: worker_missions,
+        LEDGER_WORKER_MISSIONS_FIELD: mission_state.missions,
         LEDGER_COMMANDS_FIELD: commands,
+        LEDGER_MISSION_DIALOGS_FIELD: mission_state.dialogs,
+        LEDGER_MISSION_CANCELLATIONS_FIELD: mission_state.cancellations,
+        LEDGER_MISSION_SLOTS_FIELD: mission_state.worker_slots,
         "canonical_roots": {
             "control_root": roots["control_root"],
             "queue_root": roots["queue_root"],
@@ -4034,10 +4986,16 @@ def read_command_slots(root: Path) -> Dict[str, Dict[str, Any]]:
     return slots
 
 
-def _folded_commands_after_publication(
+def _committed_events_after_publication(
     publication: EventPublicationResult,
-) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
-    """Re-derive the command fold from committed authority after publication."""
+) -> Tuple[CommittedEvent, ...]:
+    """Return committed authority after publication, plus a dry run's candidate.
+
+    A real publication is answered by the committed sequence alone.  A dry run
+    committed nothing, so its candidate event is appended in memory only, which
+    is what lets `--dry-run` report the decision it would have made without
+    changing one byte of the store.
+    """
 
     try:
         _metadata, history = inspect_control_events(publication.root)
@@ -4058,7 +5016,15 @@ def _folded_commands_after_publication(
                 record=publication.record,
             ),
         )
-    return fold_commands(events)
+    return events
+
+
+def _folded_commands_after_publication(
+    publication: EventPublicationResult,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
+    """Re-derive the command fold from committed authority after publication."""
+
+    return fold_commands(_committed_events_after_publication(publication))
 
 
 def register_command(
@@ -4069,6 +5035,7 @@ def register_command(
     timeout_seconds: Optional[float] = None,
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
+    correlated_record: Optional[Mapping[str, Any]] = None,
 ) -> CommandRecordResult:
     """Deliver one command envelope exactly once, whatever the delivery count.
 
@@ -4086,6 +5053,13 @@ def register_command(
     The committed fold, not this pre-read, is authoritative: two concurrent
     deliveries of the same new command both commit, and exactly one of them
     registers it.
+
+    A managed mission operation passes its correlated mission-control record as
+    `correlated_record`.  It rides in the very same committed event as the
+    envelope that carries it, so a question, reply, access-prompt response,
+    cancellation, or replacement and its command are one atomic fact rather than
+    two records that could disagree.  A redelivery commits only the stored
+    duplicate acknowledgement, so the correlated record is never applied twice.
     """
 
     validated = validate_command_envelope(dict(envelope))
@@ -4116,6 +5090,10 @@ def register_command(
         )
         event_type = f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{COMMAND_DUPLICATE}"
         payload = {COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD: acknowledgement}
+
+    if correlated_record is not None and event_type == COMMAND_REGISTERED_EVENT_TYPE:
+        payload = dict(payload)
+        payload.update({key: dict(value) for key, value in correlated_record.items()})
 
     publication = publish_control_event(
         root,
@@ -4253,6 +5231,528 @@ def observe_commands(
             continue
         observed.append(slots[key])
     return tuple(observed)
+
+
+# --- managed mission dialogs, cancellation, and replacement -------------------
+
+
+@dataclass(frozen=True)
+class MissionControlResult:
+    """Outcome of one managed mission command and its correlated record.
+
+    Delivery and correlation are separate answers exactly as publication and
+    materialization are: the command half reports whether the envelope was
+    registered, duplicated, or conflicted, and the mission half reports whether
+    the dialog, cancellation, or slot projection actually moved.
+    """
+
+    command: CommandRecordResult
+    record_field: str
+    record: Dict[str, Any]
+    applied: bool
+    outcome: str
+    state: MissionState
+
+    @property
+    def committed(self) -> bool:
+        return self.command.committed
+
+    @property
+    def command_id(self) -> str:
+        return self.command.command_id
+
+    @property
+    def conflicted(self) -> bool:
+        """Report a mission operation refused and recorded as a durable conflict."""
+
+        return self.outcome == MISSION_FOLD_CONFLICT_RECORDED
+
+    @property
+    def redelivered(self) -> bool:
+        """Report an idempotent redelivery that correctly applied nothing again."""
+
+        return self.outcome == MISSION_FOLD_RETAINED_DUPLICATE
+
+    @property
+    def worker_slot(self) -> Optional[Dict[str, Any]]:
+        worker_id = self.record.get("worker_id")
+        if worker_id is None:
+            return None
+        return self.state.worker_slots.get(worker_id)
+
+    @property
+    def recorded_conflict(self) -> Optional[Dict[str, Any]]:
+        """Return the slot conflict this operation's own event recorded, if any.
+
+        A worker slot accumulates every conflict ever recorded against it, so a
+        refusal may only be described by the one its own committed event added.
+        """
+
+        slot = self.worker_slot
+        if slot is None:
+            return None
+        for conflict in slot["conflicts"]:
+            if conflict["event_id"] == self.command.publication.event_id:
+                return conflict
+        return None
+
+
+@dataclass(frozen=True)
+class CancellationObservation:
+    """One observation of a cooperative cancellation at an explicit moment.
+
+    An observation is not a mission state.  `timed-out` says only that the
+    declared acknowledgement deadline passed with no acknowledgement recorded,
+    names a recoverable reason, and records that a bounded recovery action is
+    owed.  It never claims `failed`: a silent worker has ended nothing.
+    """
+
+    command_id: str
+    mission_id: str
+    worker_id: str
+    queue_item_id: str
+    trace_id: str
+    parent_trace_id: Optional[str]
+    requested_at: str
+    acknowledge_deadline_at: str
+    observation: str
+    reason: Optional[str]
+    recovery: Optional[str]
+    acknowledgement: Optional[str]
+    acknowledged_by: Optional[str]
+    acknowledged_at: Optional[str]
+    command_status: str
+    mission_state: Optional[str]
+    revision: int
+    event_id: str
+    as_of: str
+
+    @property
+    def timed_out(self) -> bool:
+        return self.observation == CANCELLATION_TIMED_OUT
+
+
+@dataclass(frozen=True)
+class MissionControlReport:
+    """Every materialized mission dialog, cancellation, and slot at one moment."""
+
+    root: Path
+    as_of: str
+    dialogs: Tuple[Dict[str, Any], ...]
+    cancellations: Tuple[CancellationObservation, ...]
+    worker_slots: Tuple[Tuple[str, Dict[str, Any]], ...]
+
+    @property
+    def pending_prompts(self) -> Tuple[Dict[str, Any], ...]:
+        return tuple(
+            entry for entry in self.dialogs if entry["state"] == MISSION_DIALOG_PENDING
+        )
+
+    @property
+    def timed_out(self) -> Tuple[CancellationObservation, ...]:
+        return tuple(entry for entry in self.cancellations if entry.timed_out)
+
+    @property
+    def conflicts(self) -> Tuple[Tuple[str, Dict[str, Any]], ...]:
+        found: List[Tuple[str, Dict[str, Any]]] = []
+        for worker_id, slot in self.worker_slots:
+            for conflict in slot["conflicts"]:
+                found.append((worker_id, conflict))
+        return tuple(found)
+
+
+def build_mission_dialog(
+    command_id: str,
+    kind: str,
+    mission_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    trace_id: str,
+    category: str,
+    body_refs: Sequence[str] = (),
+    parent_trace_id: Optional[str] = None,
+    answers_command_id: Optional[str] = None,
+    raised_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete mission dialog record and validate it before use."""
+
+    record = {
+        "schema_version": MISSION_CONTROL_SCHEMA_VERSION,
+        "record_type": MISSION_DIALOG_RECORD_TYPE,
+        "command_id": command_id,
+        "kind": kind,
+        "mission_id": mission_id,
+        "worker_id": worker_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "answers_command_id": answers_command_id,
+        "category": category,
+        "body_refs": list(body_refs),
+        "raised_at": raised_at if raised_at is not None else utc_timestamp(),
+    }
+    return validate_mission_dialog(record)
+
+
+def build_mission_cancellation(
+    command_id: str,
+    mission_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    trace_id: str,
+    reason: str,
+    acknowledge_deadline_at: str,
+    parent_trace_id: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    requested_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete cancellation request and validate it before use."""
+
+    record = {
+        "schema_version": MISSION_CONTROL_SCHEMA_VERSION,
+        "record_type": MISSION_CANCELLATION_RECORD_TYPE,
+        "command_id": command_id,
+        "mission_id": mission_id,
+        "worker_id": worker_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "reason": reason,
+        "evidence_refs": list(evidence_refs),
+        "requested_at": requested_at if requested_at is not None else utc_timestamp(),
+        "acknowledge_deadline_at": acknowledge_deadline_at,
+    }
+    return validate_mission_cancellation(record)
+
+
+def build_mission_replacement(
+    command_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    replaced_mission_id: str,
+    replacement_mission_id: str,
+    trace_id: str,
+    reason: str,
+    parent_trace_id: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    requested_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete replacement request and validate it before use."""
+
+    record = {
+        "schema_version": MISSION_CONTROL_SCHEMA_VERSION,
+        "record_type": MISSION_REPLACEMENT_RECORD_TYPE,
+        "command_id": command_id,
+        "worker_id": worker_id,
+        "queue_item_id": queue_item_id,
+        "replaced_mission_id": replaced_mission_id,
+        "replacement_mission_id": replacement_mission_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "reason": reason,
+        "evidence_refs": list(evidence_refs),
+        "requested_at": requested_at if requested_at is not None else utc_timestamp(),
+    }
+    return validate_mission_replacement(record)
+
+
+def read_mission_state(root: Path) -> MissionState:
+    """Fold the committed events of a control root into every mission projection.
+
+    Every reader starts from the committed event files on disk, so a pending
+    question, a cancellation outcome, and the one slot each worker holds are
+    answerable by any cold process and never depend on memory retained by the
+    process that recorded them, nor on the derived `ledger.json`.
+    """
+
+    _metadata, history = inspect_control_events(root)
+    return fold_mission_state(history.events)
+
+
+def require_active_mission(
+    state: MissionState,
+    mission_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    label: str,
+) -> Dict[str, Any]:
+    """Require one materialized, correlated, still-active mission, failing closed.
+
+    This is what makes a managed interaction correlated rather than uncorrelated
+    pane input: a question, a reply, or a cancellation that does not name a
+    mission this control root actually holds active for that exact worker and
+    queue item is refused before any candidate event exists.
+    """
+
+    slot = state.missions.get(mission_id)
+    if slot is None:
+        raise ControlStoreError(
+            f"{label} names mission {mission_id}, which this control root has never "
+            "materialized"
+        )
+    lifecycle = slot["lifecycle"]
+    if lifecycle["worker_id"] != worker_id or lifecycle["queue_item_id"] != queue_item_id:
+        raise ControlStoreError(
+            f"{label} names mission {mission_id}, which belongs to a different worker "
+            "or queue item"
+        )
+    if lifecycle["state"] not in WORKER_LIFECYCLE_ACTIVE_STATES:
+        raise ControlStoreError(
+            f"{label} names mission {mission_id}, whose materialized state is "
+            f"{lifecycle['state']!r} and is no longer active"
+        )
+    return dict(lifecycle)
+
+
+def require_pending_prompt(
+    state: MissionState,
+    answers_command_id: str,
+    kind: str,
+    label: str,
+) -> Dict[str, Any]:
+    """Require one pending prompt of the matching kind, failing closed.
+
+    A reply is only ever the resolution of a question this control root is
+    actually holding open.  An unknown command, a command that is not a prompt,
+    a prompt of the other kind, and an already-answered prompt are each refused
+    before any candidate event exists, so an answer can never arrive from
+    outside the protocol or resolve something twice.
+    """
+
+    entry = state.dialogs.get(answers_command_id)
+    if entry is None:
+        raise ControlStoreError(
+            f"{label} answers command {answers_command_id}, which this control root has "
+            "never raised as a mission prompt"
+        )
+    prompt = entry["dialog"]
+    if prompt["kind"] not in MISSION_DIALOG_PROMPT_KINDS:
+        raise ControlStoreError(
+            f"{label} answers command {answers_command_id}, which is a "
+            f"{prompt['kind']!r} record rather than a prompt"
+        )
+    if prompt["kind"] != MISSION_DIALOG_ANSWERS[kind]:
+        raise ControlStoreError(
+            f"{label} of kind {kind!r} may only answer a "
+            f"{MISSION_DIALOG_ANSWERS[kind]!r}; command {answers_command_id} is a "
+            f"{prompt['kind']!r}"
+        )
+    if entry["state"] != MISSION_DIALOG_PENDING:
+        raise ControlStoreError(
+            f"{label} answers command {answers_command_id}, which is already "
+            f"{entry['state']} and cannot be answered again"
+        )
+    return dict(prompt)
+
+
+def register_mission_command(
+    root: Path,
+    envelope: Mapping[str, Any],
+    record_field: str,
+    record: Mapping[str, Any],
+    actor: str = DEFAULT_EVENT_ACTOR,
+    command: str = DEFAULT_COMMAND_REGISTER_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> MissionControlResult:
+    """Deliver one managed mission command with its correlated record atomically.
+
+    The envelope and its record are committed as one immutable event through the
+    ordinary US2 delivery path, so every managed interaction inherits durable
+    command IDs, canonical payload digests, idempotent redelivery, and conflict
+    recording instead of growing a second mechanism beside them.  The committed
+    fold, not any pre-read, then decides what the record actually moved.
+    """
+
+    result = register_command(
+        root,
+        envelope,
+        actor=actor,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+        correlated_record={record_field: dict(record)},
+    )
+    state = fold_mission_state(_committed_events_after_publication(result.publication))
+    # A redelivery commits only the stored duplicate acknowledgement, so its
+    # event carries no mission record at all; that is exactly what idempotent
+    # redelivery of a managed interaction has to look like.
+    applied, outcome = state.mission_outcomes.get(
+        result.publication.event_id, (False, MISSION_FOLD_RETAINED_DUPLICATE)
+    )
+    return MissionControlResult(
+        command=result,
+        record_field=record_field,
+        record=dict(record),
+        applied=applied,
+        outcome=outcome,
+        state=state,
+    )
+
+
+def _cancellation_acknowledgement(
+    slot: Optional[Mapping[str, Any]],
+    digest: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the latest acknowledgement a cancellation command actually carries.
+
+    Only an acknowledgement naming the exact digest the command was registered
+    with answers for it: a rejection of some other digest is the worker-side
+    half of a reuse conflict and says nothing about the cancellation itself.
+    """
+
+    if slot is None:
+        return None
+    answered: Optional[Dict[str, Any]] = None
+    for entry in slot["acknowledgements"]:
+        acknowledgement = entry["acknowledgement"]
+        if acknowledgement["payload_digest"] != digest:
+            continue
+        if acknowledgement["outcome"] == COMMAND_DUPLICATE:
+            continue
+        answered = dict(acknowledgement)
+    return answered
+
+
+def observe_cancellation(
+    entry: Mapping[str, Any],
+    command_slot: Optional[Mapping[str, Any]],
+    mission_slot: Optional[Mapping[str, Any]],
+    now: datetime,
+    as_of: str,
+) -> CancellationObservation:
+    """Classify one cooperative cancellation as acknowledged, awaited, or timed out.
+
+    The classification is a pure function of committed evidence and one explicit
+    as-of moment: nothing here sleeps, polls, or expires anything by itself, so
+    two processes evaluating the same store at the same declared moment always
+    agree.  An expired deadline is `timed-out`, which is a recoverable
+    observation the controller owes a bounded action for; it is deliberately not
+    `failed`, and it never becomes a mission state.
+    """
+
+    cancellation = entry["cancellation"]
+    digest = "" if command_slot is None else command_slot["envelope"]["payload_digest"]
+    acknowledgement = _cancellation_acknowledgement(command_slot, digest)
+    observation = CANCELLATION_AWAITING
+    reason: Optional[str] = None
+    recovery: Optional[str] = None
+    if acknowledgement is not None:
+        observation = CANCELLATION_ACKNOWLEDGED
+    else:
+        deadline = _parsed_timestamp(
+            cancellation["acknowledge_deadline_at"],
+            "acknowledge_deadline_at",
+            "mission cancellation",
+        )
+        if now > deadline:
+            observation = CANCELLATION_TIMED_OUT
+            reason = CANCELLATION_TIMEOUT_REASON
+            recovery = CANCELLATION_TIMEOUT_RECOVERY
+    return CancellationObservation(
+        command_id=cancellation["command_id"],
+        mission_id=cancellation["mission_id"],
+        worker_id=cancellation["worker_id"],
+        queue_item_id=cancellation["queue_item_id"],
+        trace_id=cancellation["trace_id"],
+        parent_trace_id=cancellation["parent_trace_id"],
+        requested_at=cancellation["requested_at"],
+        acknowledge_deadline_at=cancellation["acknowledge_deadline_at"],
+        observation=observation,
+        reason=reason,
+        recovery=recovery,
+        acknowledgement=None if acknowledgement is None else acknowledgement["outcome"],
+        acknowledged_by=None if acknowledgement is None else acknowledgement["acknowledged_by"],
+        acknowledged_at=None if acknowledgement is None else acknowledgement["acknowledged_at"],
+        command_status="-" if command_slot is None else command_slot["status"],
+        mission_state=None if mission_slot is None else mission_slot["lifecycle"]["state"],
+        revision=entry["revision"],
+        event_id=entry["event_id"],
+        as_of=as_of,
+    )
+
+
+def observe_mission_control(
+    root: Path,
+    as_of: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    command_id: Optional[str] = None,
+) -> MissionControlReport:
+    """Report every managed dialog, cancellation, and slot without changing a byte.
+
+    The report is derived from committed event files rather than from the
+    published projection, so a stale, corrupt, or hand-edited `ledger.json` can
+    never answer for a pending question, a cancellation outcome, or which
+    mission a worker's one slot holds.
+    """
+
+    root = _require_absolute_root(str(root), "configured")
+    moment = as_of if as_of is not None else utc_timestamp()
+    now = _parsed_timestamp(moment, "as_of", "mission status")
+    if mission_id is not None:
+        mission_id = _require_uuid({"mission_id": mission_id}, "mission_id", "mission status")
+    if command_id is not None:
+        command_id = _require_uuid({"command_id": command_id}, "command_id", "mission status")
+    if worker_id is not None:
+        worker_id = _require_identifier({"worker": worker_id}, "worker", "mission status")
+
+    _metadata, history = inspect_control_events(root)
+    state = fold_mission_state(history.events)
+    command_slots, _outcomes = fold_commands(history.events)
+
+    dialogs: List[Dict[str, Any]] = []
+    for key in sorted(state.dialogs):
+        entry = state.dialogs[key]
+        dialog = entry["dialog"]
+        if mission_id is not None and dialog["mission_id"] != mission_id:
+            continue
+        if worker_id is not None and dialog["worker_id"] != worker_id:
+            continue
+        if command_id is not None and dialog["command_id"] != command_id:
+            continue
+        dialogs.append(entry)
+
+    cancellations: List[CancellationObservation] = []
+    for key in sorted(state.cancellations):
+        entry = state.cancellations[key]
+        cancellation = entry["cancellation"]
+        if mission_id is not None and cancellation["mission_id"] != mission_id:
+            continue
+        if worker_id is not None and cancellation["worker_id"] != worker_id:
+            continue
+        if command_id is not None and cancellation["command_id"] != command_id:
+            continue
+        cancellations.append(
+            observe_cancellation(
+                entry,
+                command_slots.get(key),
+                state.missions.get(cancellation["mission_id"]),
+                now,
+                moment,
+            )
+        )
+
+    slots: List[Tuple[str, Dict[str, Any]]] = []
+    for key in sorted(state.worker_slots):
+        slot = state.worker_slots[key]
+        if worker_id is not None and key != worker_id:
+            continue
+        if mission_id is not None and slot["mission_id"] != mission_id:
+            continue
+        if command_id is not None and slot["command_id"] != command_id:
+            continue
+        slots.append((key, slot))
+
+    return MissionControlReport(
+        root=root,
+        as_of=moment,
+        dialogs=tuple(dialogs),
+        cancellations=tuple(cancellations),
+        worker_slots=tuple(slots),
+    )
 
 
 # --- read-only preflight and explicit guarded store repair -------------------
@@ -6356,6 +7856,259 @@ def _report_command_status(root: Path, observations: Sequence[Mapping[str, Any]]
     return 0
 
 
+def _mission_dialog_line(entry: Mapping[str, Any]) -> str:
+    """Render one materialized mission dialog as one machine-readable record.
+
+    Every value rendered here is a UUID, an integer, a UTC timestamp, a closed
+    vocabulary word, an identifier constrained to printable non-whitespace
+    ASCII, or a whitespace-free typed reference, so no worker- or
+    operator-supplied string can forge a field or record boundary.  The question
+    and answer bodies are not merely omitted from this payload: they are never
+    persisted anywhere, so there is nothing here to leak.
+    """
+
+    dialog = entry["dialog"]
+    return (
+        f"dialog {dialog['command_id']} kind {dialog['kind']} state {entry['state']} "
+        f"mission {dialog['mission_id']} worker {dialog['worker_id']} "
+        f"queue-item {dialog['queue_item_id']} trace {dialog['trace_id']} "
+        f"parent-trace {dialog['parent_trace_id'] or '-'} "
+        f"category {dialog['category']} "
+        f"answers {dialog['answers_command_id'] or '-'} "
+        f"answered-by {entry['answered_by_command_id'] or '-'} "
+        f"answered-at {entry['answered_at'] or '-'} "
+        f"raised {dialog['raised_at']} "
+        f"body-refs {','.join(dialog['body_refs']) or '-'} "
+        f"schema-version {dialog['schema_version']} "
+        f"revision {entry['revision']}"
+    )
+
+
+def _mission_cancellation_request_line(entry: Mapping[str, Any]) -> str:
+    """Render one committed cooperative cancellation request."""
+
+    cancellation = entry["cancellation"]
+    return (
+        f"cancellation-request {cancellation['command_id']} "
+        f"mission {cancellation['mission_id']} worker {cancellation['worker_id']} "
+        f"queue-item {cancellation['queue_item_id']} trace {cancellation['trace_id']} "
+        f"parent-trace {cancellation['parent_trace_id'] or '-'} "
+        f"requested {cancellation['requested_at']} "
+        f"deadline {cancellation['acknowledge_deadline_at']} "
+        f"evidence-refs {','.join(cancellation['evidence_refs']) or '-'} "
+        f"schema-version {cancellation['schema_version']} "
+        f"revision {entry['revision']}"
+    )
+
+
+def _mission_cancellation_line(observation: CancellationObservation) -> str:
+    """Render one cancellation observation evaluated at one explicit moment."""
+
+    return (
+        f"cancellation {observation.command_id} mission {observation.mission_id} "
+        f"worker {observation.worker_id} queue-item {observation.queue_item_id} "
+        f"trace {observation.trace_id} "
+        f"parent-trace {observation.parent_trace_id or '-'} "
+        f"requested {observation.requested_at} "
+        f"deadline {observation.acknowledge_deadline_at} "
+        f"observation {observation.observation} "
+        f"reason {observation.reason or '-'} "
+        f"recovery {observation.recovery or '-'} "
+        f"acknowledgement {observation.acknowledgement or '-'} "
+        f"by {observation.acknowledged_by or '-'} "
+        f"at {observation.acknowledged_at or '-'} "
+        f"command-status {observation.command_status} "
+        f"mission-state {observation.mission_state or '-'} "
+        f"revision {observation.revision} as-of {observation.as_of}"
+    )
+
+
+def _mission_slot_line(worker_id: str, slot: Mapping[str, Any]) -> str:
+    """Render the one mission slot a worker holds."""
+
+    return (
+        f"slot {worker_id} mission {slot['mission_id'] or '-'} "
+        f"queue-item {slot['queue_item_id'] or '-'} state {slot['state']} "
+        f"command {slot['command_id'] or '-'} replaces {slot['replaces'] or '-'} "
+        f"conflicts {len(slot['conflicts'])} revision {slot['revision']} "
+        f"at {slot['recorded_at']}"
+    )
+
+
+def _mission_conflict_line(worker_id: str, conflict: Mapping[str, Any]) -> str:
+    """Render one durable conflict recorded against a worker's mission slot."""
+
+    return (
+        f"mission-conflict {worker_id} mission {conflict['mission_id']} "
+        f"reason {conflict['reason']} source {conflict['source']} "
+        f"command {conflict['command_id'] or '-'} revision {conflict['revision']} "
+        f"at {conflict['recorded_at']}"
+    )
+
+
+def _mission_record_summary(result: MissionControlResult) -> str:
+    """Describe the managed mission operation one command carried."""
+
+    record = result.record
+    if result.record_field == MISSION_DIALOG_PAYLOAD_FIELD:
+        return (
+            f"mission dialog {record['kind']} {record['command_id']} for mission "
+            f"{record['mission_id']} worker {record['worker_id']} "
+            f"trace {record['trace_id']}"
+        )
+    if result.record_field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        return (
+            f"mission cancellation {record['command_id']} for mission "
+            f"{record['mission_id']} worker {record['worker_id']} "
+            f"deadline {record['acknowledge_deadline_at']}"
+        )
+    return (
+        f"mission replacement {record['command_id']} replacing mission "
+        f"{record['replaced_mission_id']} with {record['replacement_mission_id']} "
+        f"on worker {record['worker_id']}"
+    )
+
+
+def _mission_control_lines(result: MissionControlResult) -> List[str]:
+    """Render whatever the managed operation materialized, in a stable order."""
+
+    lines: List[str] = []
+    record = result.record
+    if result.record_field == MISSION_DIALOG_PAYLOAD_FIELD:
+        for key in (record["answers_command_id"], record["command_id"]):
+            entry = result.state.dialogs.get(key) if key is not None else None
+            if entry is not None:
+                lines.append(_mission_dialog_line(entry))
+    elif result.record_field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        entry = result.state.cancellations.get(record["command_id"])
+        if entry is not None:
+            lines.append(_mission_cancellation_request_line(entry))
+    slot = result.worker_slot
+    if slot is not None:
+        lines.append(_mission_slot_line(record["worker_id"], slot))
+        for conflict in slot["conflicts"]:
+            if conflict["event_id"] == result.command.publication.event_id:
+                lines.append(_mission_conflict_line(record["worker_id"], conflict))
+    return lines
+
+
+def _report_mission_control(result: MissionControlResult) -> int:
+    """Print the delivery outcome and, separately, the mission-correlation one.
+
+    Delivery and correlation are separate answers exactly as publication and
+    materialization are for lifecycle and command events: an idempotent
+    redelivery and a refused second active slot are both durably committed, and
+    only the deterministic fold decides whether either moved mission state.
+    """
+
+    exit_code = _report_command_record(result.command)
+    summary = _mission_record_summary(result)
+    verb = "is" if result.committed else "would be"
+    if result.applied:
+        print(f"cockpit-control: {summary} {verb} recorded ({result.outcome})")
+    elif result.command.conflicted:
+        # A refused envelope commits no mission record at all, so this is not a
+        # redelivery of anything: the authoritative refusal is the command
+        # conflict reported immediately above and on stderr.
+        print(
+            f"cockpit-control: {summary} {verb} not applied because its command envelope "
+            "was refused as a durable conflict; no mission record was stored"
+        )
+    elif result.redelivered:
+        print(
+            f"cockpit-control: {summary} {verb} a redelivery; the stored mission record "
+            "is returned without applying it again"
+        )
+    elif result.conflicted:
+        print(
+            f"cockpit-control: {summary} {verb} refused; the mission slot conflict "
+            f"{verb} recorded ({result.outcome})"
+        )
+    else:
+        print(
+            f"cockpit-control: {summary} {verb} retained for audit only ({result.outcome})"
+        )
+    for line in _mission_control_lines(result):
+        print(line)
+
+    if result.conflicted:
+        conflict = result.recorded_conflict or {}
+        reason = conflict.get("reason", MISSION_SLOT_CONFLICT_SECOND_ACTIVE)
+        explanation = MISSION_SLOT_CONFLICT_EXPLANATIONS.get(
+            reason, "worker {worker_id} cannot hold the mission slot it claims"
+        ).format(
+            worker_id=result.record["worker_id"],
+            mission_id=conflict.get("mission_id", "-"),
+        )
+        print(
+            f"cockpit-control: {summary} {verb} refused because {explanation}; "
+            "the conflict is recorded and no mission state changed",
+            file=os.sys.stderr,
+        )
+        exit_code = 1
+    elif not (result.applied or result.redelivered):
+        print(
+            f"cockpit-control: {summary} {verb} durable audit evidence that did not change "
+            f"the materialized mission state ({result.outcome})",
+            file=os.sys.stderr,
+        )
+        exit_code = 1
+    return exit_code
+
+
+def _report_mission_status(report: MissionControlReport) -> int:
+    """Print every managed dialog, cancellation, and mission slot and succeed.
+
+    A pending question, a timed-out cancellation, and a recorded slot conflict
+    are all durable observations rather than verdicts, so this read-only query
+    always exits 0 and names each of them on stderr.
+    """
+
+    pending = report.pending_prompts
+    timed_out = report.timed_out
+    conflicts = report.conflicts
+    print(
+        f"cockpit-control: {len(report.dialogs)} mission dialog(s), "
+        f"{len(report.cancellations)} cancellation(s), "
+        f"{len(report.worker_slots)} worker slot(s) in {report.root} "
+        f"as of {report.as_of}; {len(pending)} pending prompt(s), "
+        f"{len(timed_out)} timed-out cancellation(s), "
+        f"{len(conflicts)} recorded conflict(s)"
+    )
+    for entry in report.dialogs:
+        print(_mission_dialog_line(entry))
+    for observation in report.cancellations:
+        print(_mission_cancellation_line(observation))
+    for worker_id, slot in report.worker_slots:
+        print(_mission_slot_line(worker_id, slot))
+        for conflict in slot["conflicts"]:
+            print(_mission_conflict_line(worker_id, conflict))
+    for entry in pending:
+        dialog = entry["dialog"]
+        print(
+            f"cockpit-control: mission {dialog['mission_id']} on {dialog['worker_id']} has a "
+            f"pending {dialog['kind']} ({dialog['command_id']}); it is answerable only "
+            f"through {DEFAULT_MISSION_ANSWER_COMMAND}",
+            file=os.sys.stderr,
+        )
+    for observation in timed_out:
+        print(
+            f"cockpit-control: cancellation {observation.command_id} of mission "
+            f"{observation.mission_id} on {observation.worker_id} is a timed-out "
+            f"observation ({observation.reason}); this is recoverable and is not a "
+            "mission failure, and it awaits a bounded recovery action",
+            file=os.sys.stderr,
+        )
+    for worker_id, conflict in conflicts:
+        print(
+            f"cockpit-control: worker {worker_id} has a recorded {conflict['reason']} "
+            f"from {conflict['source']} at revision {conflict['revision']}; its single "
+            "mission slot was never given a second active mission",
+            file=os.sys.stderr,
+        )
+    return 0
+
+
 def _parsed_command_payload(value: str) -> Dict[str, Any]:
     """Parse the structured payload a command digest is computed over."""
 
@@ -6420,6 +8173,14 @@ def _envelope_from_arguments(args: Any, control_root: Path) -> Dict[str, Any]:
     rewritten.
     """
 
+    if args.command_type in MANAGED_COMMAND_TYPES:
+        raise ControlStoreError(
+            f"command type {args.command_type!r} is a managed mission command and cannot be "
+            f"delivered through {DEFAULT_COMMAND_REGISTER_COMMAND}; use "
+            f"{DEFAULT_MISSION_QUESTION_COMMAND}, {DEFAULT_MISSION_ANSWER_COMMAND}, "
+            f"{DEFAULT_MISSION_CANCEL_COMMAND}, or {DEFAULT_MISSION_REPLACE_COMMAND} so it "
+            "stays correlated to one active mission"
+        )
     return build_command_envelope(
         command_id=args.command_id,
         command_type=args.command_type,
@@ -6439,6 +8200,357 @@ def _envelope_from_arguments(args: Any, control_root: Path) -> Dict[str, Any]:
     )
 
 
+def _parsed_acknowledge_seconds(value: str) -> float:
+    """Parse an explicit cancellation acknowledgement window in seconds."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        raise ControlStoreError(
+            "--acknowledge-within must be a positive number of seconds"
+        ) from None
+    return _validated_seconds(parsed, "--acknowledge-within", allow_zero=False)
+
+
+def _cancellation_deadline(args: Any, requested_at: str) -> str:
+    """Return the explicit moment an acknowledgement is expected by.
+
+    Nothing is guessed.  A cooperative cancellation without a declared deadline
+    could never be observed as timed out without inventing a policy the control
+    plane has not been told, so one of the two explicit forms is required.
+    """
+
+    if args.acknowledge_by is not None and args.acknowledge_within is not None:
+        raise ControlStoreError(
+            "--acknowledge-by and --acknowledge-within cannot be combined"
+        )
+    if args.acknowledge_by is not None:
+        return _require_timestamp(
+            {"acknowledge_deadline_at": args.acknowledge_by},
+            "acknowledge_deadline_at",
+            "mission cancellation",
+        )
+    if args.acknowledge_within is None:
+        raise ControlStoreError(
+            "a cooperative cancellation requires an explicit acknowledgement deadline; "
+            "pass --acknowledge-by or --acknowledge-within"
+        )
+    return _shifted_timestamp(
+        requested_at,
+        _parsed_acknowledge_seconds(args.acknowledge_within),
+        field="requested_at",
+        label="mission cancellation",
+        option="--acknowledge-within",
+        noun="cancellation acknowledgement deadline",
+    )
+
+
+def _managed_envelope(
+    args: Any,
+    control_root: Path,
+    command_type: str,
+    mission_id: str,
+    queue_item_id: str,
+    target_id: str,
+    trace_id: str,
+    parent_trace_id: Optional[str],
+) -> Dict[str, Any]:
+    """Build the US2 command envelope one managed mission operation delivers.
+
+    The managed operations reuse the whole command contract rather than growing
+    a second one: the same durable command ID, the same canonical payload
+    digest, the same declared ADR-016 boundaries, and the same idempotent
+    redelivery and conflict recording.  Only the command type and the correlated
+    record are decided here, and the declared control root is always the store
+    the command is delivered into.
+    """
+
+    return build_command_envelope(
+        command_id=args.command_id,
+        command_type=command_type,
+        mission_id=mission_id,
+        queue_item_id=queue_item_id,
+        target_kind=COMMAND_TARGET_WORKER,
+        target_id=target_id,
+        trace_id=trace_id,
+        payload_digest=_command_digest_from_arguments(args),
+        control_root=str(control_root),
+        parent_trace_id=parent_trace_id,
+        queue_root=args.queue_root,
+        planning_root=args.planning_root,
+        implementation_roots=tuple(args.implementation_root or ()),
+        runtime_boundaries=tuple(args.runtime_boundary or ()),
+        deadline_at=args.deadline,
+    )
+
+
+def _run_raise_question(root: Path, args: Any) -> MissionControlResult:
+    """Raise one mission question or access prompt against the active mission."""
+
+    label = "mission prompt"
+    if args.kind not in MISSION_DIALOG_PROMPT_KINDS:
+        raise ControlStoreError(
+            f"{label} declares unknown kind {args.kind!r}; expected one of "
+            f"{', '.join(MISSION_DIALOG_PROMPT_KINDS)}"
+        )
+    worker_id = _require_identifier({"worker": args.worker}, "worker", label)
+    mission_id = _require_uuid({"mission": args.mission}, "mission", label)
+    queue_item_id = _require_identifier({"queue-item": args.queue_item}, "queue-item", label)
+    state = read_mission_state(root)
+    # Admission answers a *new* prompt.  A redelivery of a command ID this
+    # control root already recorded is answered by the stored result instead, so
+    # retrying an uncertain delivery can never be refused for having succeeded.
+    if args.command_id not in state.dialogs:
+        require_active_mission(state, mission_id, worker_id, queue_item_id, label)
+
+    dialog = build_mission_dialog(
+        command_id=args.command_id,
+        kind=args.kind,
+        mission_id=mission_id,
+        worker_id=worker_id,
+        queue_item_id=queue_item_id,
+        trace_id=args.trace,
+        category=args.category,
+        body_refs=tuple(args.body_ref or ()),
+        parent_trace_id=args.parent_trace,
+        raised_at=args.raised_at,
+    )
+    envelope = _managed_envelope(
+        args,
+        root,
+        MISSION_DIALOG_COMMAND_TYPES[dialog["kind"]],
+        mission_id,
+        queue_item_id,
+        worker_id,
+        dialog["trace_id"],
+        dialog["parent_trace_id"],
+    )
+    return register_mission_command(
+        root,
+        envelope,
+        MISSION_DIALOG_PAYLOAD_FIELD,
+        dialog,
+        actor=args.actor if args.actor is not None else worker_id,
+        command=DEFAULT_MISSION_QUESTION_COMMAND,
+        dry_run=args.dry_run,
+    )
+
+
+def _run_answer_question(root: Path, args: Any) -> MissionControlResult:
+    """Answer exactly one pending prompt through the protocol and nowhere else."""
+
+    label = "mission answer"
+    answers = _require_uuid({"answers": args.answers}, "answers", label)
+    state = read_mission_state(root)
+    entry = state.dialogs.get(answers)
+    if entry is None:
+        raise ControlStoreError(
+            f"{label} answers command {answers}, which this control root has never raised "
+            "as a mission prompt"
+        )
+    kind = MISSION_DIALOG_RESPONSES.get(entry["dialog"]["kind"])
+    if kind is None:
+        raise ControlStoreError(
+            f"{label} answers command {answers}, which is a "
+            f"{entry['dialog']['kind']!r} record rather than a prompt"
+        )
+    prompt = dict(entry["dialog"])
+    # Admission answers a *new* reply.  A redelivery of a command ID this control
+    # root already recorded is answered by the stored result instead, so
+    # retrying an uncertain delivery is never refused for having succeeded.
+    if args.command_id not in state.dialogs:
+        prompt = require_pending_prompt(state, answers, kind, label)
+        # The mission a dialog belongs to must still be the worker's active
+        # mission: an answer to a mission that ended is uncorrelated input,
+        # which is exactly what this story removes from the interaction path.
+        require_active_mission(
+            state,
+            prompt["mission_id"],
+            prompt["worker_id"],
+            prompt["queue_item_id"],
+            label,
+        )
+
+    dialog = build_mission_dialog(
+        command_id=args.command_id,
+        kind=kind,
+        mission_id=prompt["mission_id"],
+        worker_id=prompt["worker_id"],
+        queue_item_id=prompt["queue_item_id"],
+        trace_id=args.trace,
+        category=args.category,
+        body_refs=tuple(args.body_ref or ()),
+        # ADR-016 gives each focused dialog a child trace, so an answer whose
+        # parent is not stated explicitly is correlated to the prompt it resolves.
+        parent_trace_id=(
+            args.parent_trace if args.parent_trace is not None else prompt["trace_id"]
+        ),
+        answers_command_id=answers,
+        raised_at=args.raised_at,
+    )
+    envelope = _managed_envelope(
+        args,
+        root,
+        MISSION_DIALOG_COMMAND_TYPES[kind],
+        dialog["mission_id"],
+        dialog["queue_item_id"],
+        dialog["worker_id"],
+        dialog["trace_id"],
+        dialog["parent_trace_id"],
+    )
+    return register_mission_command(
+        root,
+        envelope,
+        MISSION_DIALOG_PAYLOAD_FIELD,
+        dialog,
+        actor=args.answered_by,
+        command=DEFAULT_MISSION_ANSWER_COMMAND,
+        dry_run=args.dry_run,
+    )
+
+
+def _run_cancel_mission(root: Path, args: Any) -> MissionControlResult:
+    """Request cooperative cancellation of one active mission."""
+
+    label = "mission cancellation"
+    worker_id = _require_identifier({"worker": args.worker}, "worker", label)
+    mission_id = _require_uuid({"mission": args.mission}, "mission", label)
+    queue_item_id = _require_identifier({"queue-item": args.queue_item}, "queue-item", label)
+    state = read_mission_state(root)
+    # Admission answers a *new* cancellation.  A redelivery of a command ID this
+    # control root already recorded is answered by the stored result instead.
+    if args.command_id not in state.cancellations:
+        require_active_mission(state, mission_id, worker_id, queue_item_id, label)
+
+    requested_at = _require_timestamp(
+        {"requested_at": args.requested_at if args.requested_at is not None else utc_timestamp()},
+        "requested_at",
+        label,
+    )
+    cancellation = build_mission_cancellation(
+        command_id=args.command_id,
+        mission_id=mission_id,
+        worker_id=worker_id,
+        queue_item_id=queue_item_id,
+        trace_id=args.trace,
+        reason=args.reason,
+        acknowledge_deadline_at=_cancellation_deadline(args, requested_at),
+        parent_trace_id=args.parent_trace,
+        evidence_refs=tuple(args.evidence or ()),
+        requested_at=requested_at,
+    )
+    envelope = _managed_envelope(
+        args,
+        root,
+        COMMAND_TYPE_MISSION_CANCEL,
+        mission_id,
+        queue_item_id,
+        worker_id,
+        cancellation["trace_id"],
+        cancellation["parent_trace_id"],
+    )
+    return register_mission_command(
+        root,
+        envelope,
+        MISSION_CANCELLATION_PAYLOAD_FIELD,
+        cancellation,
+        actor=args.actor,
+        command=DEFAULT_MISSION_CANCEL_COMMAND,
+        dry_run=args.dry_run,
+    )
+
+
+def _run_replace_mission(root: Path, args: Any) -> MissionControlResult:
+    """Replace one mission with a new mission ID on the same single worker slot.
+
+    Nothing semantic is refused before publication here, deliberately.  A
+    replacement that would give a worker a second active mission slot is
+    committed and recorded as a durable conflict by the same deterministic fold
+    that resolves two concurrent replacements, so the refusal is evidence rather
+    than a message that disappears with the process that printed it.
+    """
+
+    replacement = build_mission_replacement(
+        command_id=args.command_id,
+        worker_id=args.worker,
+        queue_item_id=args.queue_item,
+        replaced_mission_id=args.mission,
+        replacement_mission_id=args.replacement_mission,
+        trace_id=args.trace,
+        reason=args.reason,
+        parent_trace_id=args.parent_trace,
+        evidence_refs=tuple(args.evidence or ()),
+        requested_at=args.requested_at,
+    )
+    envelope = _managed_envelope(
+        args,
+        root,
+        COMMAND_TYPE_MISSION_REPLACE,
+        replacement["replaced_mission_id"],
+        replacement["queue_item_id"],
+        replacement["worker_id"],
+        replacement["trace_id"],
+        replacement["parent_trace_id"],
+    )
+    return register_mission_command(
+        root,
+        envelope,
+        MISSION_REPLACEMENT_PAYLOAD_FIELD,
+        replacement,
+        actor=args.actor,
+        command=DEFAULT_MISSION_REPLACE_COMMAND,
+        dry_run=args.dry_run,
+    )
+
+
+def _add_command_payload_arguments(parser: Any) -> None:
+    """Declare the payload digest arguments every managed command shares."""
+
+    parser.add_argument(
+        "--payload",
+        default=None,
+        metavar="JSON",
+        help=(
+            "the payload the durable digest is computed over; the body itself is "
+            "never persisted"
+        ),
+    )
+    parser.add_argument(
+        "--digest",
+        default=None,
+        metavar="DIGEST",
+        help="an already computed payload digest instead of the payload itself",
+    )
+
+
+def _add_command_boundary_arguments(parser: Any) -> None:
+    """Declare the ADR-016 boundary arguments every managed command shares."""
+
+    parser.add_argument(
+        "--queue-root", default=None, metavar="PATH", help="declared queue boundary"
+    )
+    parser.add_argument(
+        "--planning-root", default=None, metavar="PATH", help="declared planning boundary"
+    )
+    parser.add_argument(
+        "--implementation-root",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    parser.add_argument(
+        "--runtime-boundary",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="declared typed runtime, image, CI, IAM, or deployment boundary; may be repeated",
+    )
+    parser.add_argument(
+        "--deadline", default=None, metavar="UTC", help="optional command deadline"
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the small control-store CLI used by humans and controller commands."""
 
@@ -6448,9 +8560,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prog="cockpit-control",
         description=(
             "initialize, validate, publish immutable events into, record versioned worker "
-            "lifecycle evidence in, deliver idempotent worker commands through, replay the "
-            "derived ledger of, preflight, and guardedly repair the versioned cockpit "
-            "control store"
+            "lifecycle evidence in, deliver idempotent worker commands through, manage "
+            "mission questions, cancellation, and replacement in, replay the derived "
+            "ledger of, preflight, and guardedly repair the versioned cockpit control store"
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -6777,6 +8889,266 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     command_status.add_argument(
         "--target", default=None, metavar="TARGET_ID", help="report only this target"
     )
+    raise_question = subcommands.add_parser(
+        "raise-question",
+        help=(
+            "raise one mission question or access prompt as a durable command "
+            "correlated to the worker's active mission"
+        ),
+    )
+    raise_question.add_argument(
+        "--command-id",
+        required=True,
+        metavar="UUID",
+        help="the durable command identifier every redelivery of this prompt reuses",
+    )
+    raise_question.add_argument(
+        "--kind",
+        default=MISSION_DIALOG_QUESTION,
+        metavar="KIND",
+        help="prompt kind: " + ", ".join(MISSION_DIALOG_PROMPT_KINDS),
+    )
+    raise_question.add_argument("--worker", required=True, help="the worker raising the prompt")
+    raise_question.add_argument(
+        "--mission", required=True, metavar="UUID", help="the active mission identifier"
+    )
+    raise_question.add_argument(
+        "--queue-item", required=True, metavar="QUEUE_ITEM_ID", help="queue item identifier"
+    )
+    raise_question.add_argument(
+        "--trace", required=True, metavar="UUID", help="the focused dialog trace identifier"
+    )
+    raise_question.add_argument(
+        "--parent-trace", default=None, metavar="UUID", help="parent trace identifier"
+    )
+    raise_question.add_argument(
+        "--category", required=True, metavar="CATEGORY", help="structured prompt category"
+    )
+    raise_question.add_argument(
+        "--body-ref",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help=(
+            "typed reference to where the prompt body lives; required and repeatable, "
+            "because the body itself is never persisted"
+        ),
+    )
+    raise_question.add_argument(
+        "--raised-at", default=None, metavar="UTC", help="explicit prompt timestamp"
+    )
+    _add_command_payload_arguments(raise_question)
+    _add_command_boundary_arguments(raise_question)
+    raise_question.add_argument(
+        "--actor", default=None, help="event actor; defaults to the raising worker"
+    )
+    raise_question.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the prompt decision without changing any state",
+    )
+    answer_question = subcommands.add_parser(
+        "answer-question",
+        help=(
+            "answer exactly one pending mission prompt as a durable command "
+            "correlated to the same active mission"
+        ),
+    )
+    answer_question.add_argument(
+        "--command-id",
+        required=True,
+        metavar="UUID",
+        help="the durable command identifier every redelivery of this answer reuses",
+    )
+    answer_question.add_argument(
+        "--answers",
+        required=True,
+        metavar="UUID",
+        help="the pending prompt command this answer resolves",
+    )
+    answer_question.add_argument(
+        "--by",
+        dest="answered_by",
+        required=True,
+        help="the overseer or operator answering the prompt",
+    )
+    answer_question.add_argument(
+        "--trace", required=True, metavar="UUID", help="the focused dialog trace identifier"
+    )
+    answer_question.add_argument(
+        "--parent-trace",
+        default=None,
+        metavar="UUID",
+        help="parent trace identifier; defaults to the trace of the prompt answered",
+    )
+    answer_question.add_argument(
+        "--category", required=True, metavar="CATEGORY", help="structured answer category"
+    )
+    answer_question.add_argument(
+        "--body-ref",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help=(
+            "typed reference to where the answer body lives; required and repeatable, "
+            "because the body itself is never persisted"
+        ),
+    )
+    answer_question.add_argument(
+        "--raised-at", default=None, metavar="UTC", help="explicit answer timestamp"
+    )
+    _add_command_payload_arguments(answer_question)
+    _add_command_boundary_arguments(answer_question)
+    answer_question.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the answer decision without changing any state",
+    )
+    cancel_mission = subcommands.add_parser(
+        "cancel-mission",
+        help=(
+            "request cooperative cancellation of one active mission with an "
+            "explicit acknowledgement deadline"
+        ),
+    )
+    cancel_mission.add_argument(
+        "--command-id",
+        required=True,
+        metavar="UUID",
+        help="the durable command identifier every redelivery of this request reuses",
+    )
+    cancel_mission.add_argument(
+        "--worker", required=True, help="the worker owning the mission being cancelled"
+    )
+    cancel_mission.add_argument(
+        "--mission", required=True, metavar="UUID", help="the active mission identifier"
+    )
+    cancel_mission.add_argument(
+        "--queue-item", required=True, metavar="QUEUE_ITEM_ID", help="queue item identifier"
+    )
+    cancel_mission.add_argument("--trace", required=True, metavar="UUID", help="trace identifier")
+    cancel_mission.add_argument(
+        "--parent-trace", default=None, metavar="UUID", help="parent trace identifier"
+    )
+    cancel_mission.add_argument(
+        "--reason", required=True, help="required explanation for the cancellation"
+    )
+    cancel_mission.add_argument(
+        "--evidence",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="typed evidence reference; may be repeated",
+    )
+    cancel_mission.add_argument(
+        "--requested-at", default=None, metavar="UTC", help="explicit request timestamp"
+    )
+    cancel_mission.add_argument(
+        "--acknowledge-by",
+        default=None,
+        metavar="UTC",
+        help="explicit moment an acknowledgement is expected by",
+    )
+    cancel_mission.add_argument(
+        "--acknowledge-within",
+        default=None,
+        metavar="SECONDS",
+        help="acknowledgement window measured from the request",
+    )
+    _add_command_payload_arguments(cancel_mission)
+    _add_command_boundary_arguments(cancel_mission)
+    cancel_mission.add_argument(
+        "--actor",
+        default=DEFAULT_EVENT_ACTOR,
+        help="the actor recorded as the requester of the cancellation",
+    )
+    cancel_mission.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the cancellation decision without changing any state",
+    )
+    replace_mission = subcommands.add_parser(
+        "replace-mission",
+        help=(
+            "terminate one mission as replaced and claim the worker's single "
+            "slot for an explicit new mission identifier"
+        ),
+    )
+    replace_mission.add_argument(
+        "--command-id",
+        required=True,
+        metavar="UUID",
+        help="the durable command identifier every redelivery of this request reuses",
+    )
+    replace_mission.add_argument(
+        "--worker", required=True, help="the worker whose single mission slot is replaced"
+    )
+    replace_mission.add_argument(
+        "--mission", required=True, metavar="UUID", help="the mission being replaced"
+    )
+    replace_mission.add_argument(
+        "--replacement-mission",
+        required=True,
+        metavar="UUID",
+        help="the explicit new mission identifier this replacement creates",
+    )
+    replace_mission.add_argument(
+        "--queue-item", required=True, metavar="QUEUE_ITEM_ID", help="queue item identifier"
+    )
+    replace_mission.add_argument("--trace", required=True, metavar="UUID", help="trace identifier")
+    replace_mission.add_argument(
+        "--parent-trace", default=None, metavar="UUID", help="parent trace identifier"
+    )
+    replace_mission.add_argument(
+        "--reason", required=True, help="required explanation for the replacement"
+    )
+    replace_mission.add_argument(
+        "--evidence",
+        action="append",
+        default=None,
+        metavar="TYPE:VALUE",
+        help="typed evidence reference; may be repeated",
+    )
+    replace_mission.add_argument(
+        "--requested-at", default=None, metavar="UTC", help="explicit request timestamp"
+    )
+    _add_command_payload_arguments(replace_mission)
+    _add_command_boundary_arguments(replace_mission)
+    replace_mission.add_argument(
+        "--actor",
+        default=DEFAULT_EVENT_ACTOR,
+        help="the actor recorded as the requester of the replacement",
+    )
+    replace_mission.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the replacement decision without changing any state",
+    )
+    mission_status = subcommands.add_parser(
+        "mission-status",
+        help=(
+            "report mission dialogs, cancellation observations, and the single "
+            "mission slot each worker holds without changing any state"
+        ),
+    )
+    mission_status.add_argument(
+        "--mission", default=None, metavar="UUID", help="report only this mission"
+    )
+    mission_status.add_argument(
+        "--worker", default=None, metavar="WORKER", help="report only this worker"
+    )
+    mission_status.add_argument(
+        "--command-id", default=None, metavar="UUID", help="report only this command"
+    )
+    mission_status.add_argument(
+        "--as-of",
+        default=None,
+        metavar="UTC",
+        help=(
+            "evaluate cancellation acknowledgement deadlines at this explicit UTC "
+            "moment instead of now"
+        ),
+    )
     replay = subcommands.add_parser(
         "replay-ledger",
         help=(
@@ -6852,6 +9224,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     ),
                     actor=args.actor,
                     dry_run=args.dry_run,
+                )
+            )
+        if args.command == "raise-question":
+            return _report_mission_control(_run_raise_question(resolved.path, args))
+        if args.command == "answer-question":
+            return _report_mission_control(_run_answer_question(resolved.path, args))
+        if args.command == "cancel-mission":
+            return _report_mission_control(_run_cancel_mission(resolved.path, args))
+        if args.command == "replace-mission":
+            return _report_mission_control(_run_replace_mission(resolved.path, args))
+        if args.command == "mission-status":
+            return _report_mission_status(
+                observe_mission_control(
+                    resolved.path,
+                    as_of=args.as_of,
+                    mission_id=args.mission,
+                    worker_id=args.worker,
+                    command_id=args.command_id,
                 )
             )
         if args.command == "command-status":
