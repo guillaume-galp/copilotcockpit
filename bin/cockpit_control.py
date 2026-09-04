@@ -578,6 +578,21 @@ MISSION_DIALOG_STATES = (
     MISSION_DIALOG_DELIVERED,
 )
 
+# Dialog observations.  Exactly like lifecycle freshness and cancellation
+# deadlines, an observation is not a state: the fold records that a prompt is
+# still unanswered, and this says what the control plane can currently *do*
+# about it.  A prompt whose mission is no longer active is `orphaned`, because
+# `cockpit-control answer-question` fails closed on a mission that ended:
+# counting it as an actionable pending prompt would tell an operator to run a
+# command that cannot succeed and would leave the count permanently inflated.
+MISSION_DIALOG_OBSERVATION_ANSWERABLE = "answerable"
+MISSION_DIALOG_OBSERVATION_ORPHANED = "orphaned"
+MISSION_DIALOG_OBSERVATION_SETTLED = "settled"
+# An orphaned prompt is a recoverable observation with an explicit reason, never
+# a failure: the mission ended, and only a bounded recovery action can close the
+# question the worker asked.
+MISSION_DIALOG_ORPHAN_REASON = "mission-no-longer-active"
+
 # Materialized mission dialogs, cancellations, and per-worker mission slots live
 # in the derived ledger under these fields.
 LEDGER_MISSION_DIALOGS_FIELD = "mission_dialogs"
@@ -3503,6 +3518,45 @@ def _mission_slot_entry(worker_slots: Dict[str, Dict[str, Any]], worker_id: str,
     return entry
 
 
+def _mission_slot_claim_fault(
+    worker_slots: Mapping[str, Mapping[str, Any]],
+    lifecycle: Mapping[str, Any],
+) -> Optional[str]:
+    """Say why one lifecycle event may not materialize the mission it names.
+
+    `apply_worker_lifecycle` can only correlate an event against a mission it
+    has already materialized, so a replacement's *reserved* mission is invisible
+    to it: that mission ID exists only in the worker's slot until the worker
+    accepts it.  Without this check a second worker could materialize the
+    reserved mission and hold it at the same time as the reservation, leaving
+    two claimed slots naming one mission, and the worker that owns the
+    reservation could silently re-point it at a different queue item than the
+    replacement declared.  Both are mission bleed, so both are refused here and
+    recorded as durable conflicts instead of being folded into state.
+    """
+
+    mission_id = lifecycle["mission_id"]
+    worker_id = lifecycle["worker_id"]
+    for holder in sorted(worker_slots):
+        entry = worker_slots[holder]
+        if entry["state"] not in MISSION_SLOT_CLAIMED_STATES:
+            continue
+        if entry["mission_id"] != mission_id:
+            continue
+        if holder != worker_id:
+            # One mission ID is held by at most one slot, whichever half of the
+            # protocol claimed it first.
+            return MISSION_SLOT_CONFLICT_REUSED
+        if (
+            entry["state"] == MISSION_SLOT_RESERVED
+            and entry["queue_item_id"] != lifecycle["queue_item_id"]
+        ):
+            # A replacement reserves the slot for one mission on one queue item;
+            # accepting it against another queue item is uncorrelated work.
+            return MISSION_SLOT_CONFLICT_UNMATCHED
+    return None
+
+
 def apply_lifecycle_mission_slot(
     worker_slots: Dict[str, Dict[str, Any]],
     lifecycle: Mapping[str, Any],
@@ -3737,6 +3791,22 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         lifecycle = event_worker_lifecycle(event.record, label)
         if lifecycle is not None:
+            fault = _mission_slot_claim_fault(worker_slots, lifecycle)
+            if fault is not None:
+                # The event stays committed audit evidence; it simply may not
+                # take a mission slot another claim already holds.
+                lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
+                entry = _mission_slot_entry(worker_slots, lifecycle["worker_id"], event)
+                entry["conflicts"].append(
+                    _mission_slot_conflict(
+                        lifecycle["mission_id"],
+                        fault,
+                        MISSION_SLOT_CONFLICT_LIFECYCLE,
+                        None,
+                        event,
+                    )
+                )
+                continue
             applied, outcome = apply_worker_lifecycle(missions, lifecycle, event)
             lifecycle_outcomes[event.event_id] = (applied, outcome)
             # Only an event that moved the materialized mission may move the
@@ -5341,11 +5411,43 @@ class MissionControlReport:
     dialogs: Tuple[Dict[str, Any], ...]
     cancellations: Tuple[CancellationObservation, ...]
     worker_slots: Tuple[Tuple[str, Dict[str, Any]], ...]
+    # The materialized lifecycle state of every mission a dialog names, so a
+    # prompt can be observed against the mission it belongs to rather than being
+    # reported as actionable long after that mission ended.
+    mission_states: Mapping[str, str]
+
+    def dialog_observation(self, entry: Mapping[str, Any]) -> str:
+        """Classify one committed dialog at this report's moment."""
+
+        if entry["state"] != MISSION_DIALOG_PENDING:
+            return MISSION_DIALOG_OBSERVATION_SETTLED
+        state = self.mission_states.get(entry["dialog"]["mission_id"])
+        if state in WORKER_LIFECYCLE_ACTIVE_STATES:
+            return MISSION_DIALOG_OBSERVATION_ANSWERABLE
+        return MISSION_DIALOG_OBSERVATION_ORPHANED
 
     @property
     def pending_prompts(self) -> Tuple[Dict[str, Any], ...]:
+        """Return the prompts an operator can still answer through the protocol."""
+
         return tuple(
-            entry for entry in self.dialogs if entry["state"] == MISSION_DIALOG_PENDING
+            entry
+            for entry in self.dialogs
+            if self.dialog_observation(entry) == MISSION_DIALOG_OBSERVATION_ANSWERABLE
+        )
+
+    @property
+    def orphaned_prompts(self) -> Tuple[Dict[str, Any], ...]:
+        """Return the prompts whose mission ended before anyone answered them.
+
+        `answer-question` fails closed on a mission that is no longer active, so
+        these are unanswerable and owed a bounded recovery action instead.
+        """
+
+        return tuple(
+            entry
+            for entry in self.dialogs
+            if self.dialog_observation(entry) == MISSION_DIALOG_OBSERVATION_ORPHANED
         )
 
     @property
@@ -5752,6 +5854,9 @@ def observe_mission_control(
         dialogs=tuple(dialogs),
         cancellations=tuple(cancellations),
         worker_slots=tuple(slots),
+        mission_states={
+            key: entry["lifecycle"]["state"] for key, entry in state.missions.items()
+        },
     )
 
 
@@ -7856,7 +7961,21 @@ def _report_command_status(root: Path, observations: Sequence[Mapping[str, Any]]
     return 0
 
 
-def _mission_dialog_line(entry: Mapping[str, Any]) -> str:
+def _dialog_observation(state: MissionState, entry: Mapping[str, Any]) -> str:
+    """Classify one dialog against the mission state folded in the same pass."""
+
+    if entry["state"] != MISSION_DIALOG_PENDING:
+        return MISSION_DIALOG_OBSERVATION_SETTLED
+    mission = state.missions.get(entry["dialog"]["mission_id"])
+    if mission is not None and mission["lifecycle"]["state"] in WORKER_LIFECYCLE_ACTIVE_STATES:
+        return MISSION_DIALOG_OBSERVATION_ANSWERABLE
+    return MISSION_DIALOG_OBSERVATION_ORPHANED
+
+
+def _mission_dialog_line(
+    entry: Mapping[str, Any],
+    observation: str = MISSION_DIALOG_OBSERVATION_SETTLED,
+) -> str:
     """Render one materialized mission dialog as one machine-readable record.
 
     Every value rendered here is a UUID, an integer, a UTC timestamp, a closed
@@ -7880,7 +7999,8 @@ def _mission_dialog_line(entry: Mapping[str, Any]) -> str:
         f"raised {dialog['raised_at']} "
         f"body-refs {','.join(dialog['body_refs']) or '-'} "
         f"schema-version {dialog['schema_version']} "
-        f"revision {entry['revision']}"
+        f"revision {entry['revision']} "
+        f"observation {observation}"
     )
 
 
@@ -7978,7 +8098,9 @@ def _mission_control_lines(result: MissionControlResult) -> List[str]:
         for key in (record["answers_command_id"], record["command_id"]):
             entry = result.state.dialogs.get(key) if key is not None else None
             if entry is not None:
-                lines.append(_mission_dialog_line(entry))
+                lines.append(
+                    _mission_dialog_line(entry, _dialog_observation(result.state, entry))
+                )
     elif result.record_field == MISSION_CANCELLATION_PAYLOAD_FIELD:
         entry = result.state.cancellations.get(record["command_id"])
         if entry is not None:
@@ -8065,6 +8187,7 @@ def _report_mission_status(report: MissionControlReport) -> int:
     """
 
     pending = report.pending_prompts
+    orphaned = report.orphaned_prompts
     timed_out = report.timed_out
     conflicts = report.conflicts
     print(
@@ -8073,10 +8196,11 @@ def _report_mission_status(report: MissionControlReport) -> int:
         f"{len(report.worker_slots)} worker slot(s) in {report.root} "
         f"as of {report.as_of}; {len(pending)} pending prompt(s), "
         f"{len(timed_out)} timed-out cancellation(s), "
-        f"{len(conflicts)} recorded conflict(s)"
+        f"{len(conflicts)} recorded conflict(s), "
+        f"{len(orphaned)} orphaned prompt(s)"
     )
     for entry in report.dialogs:
-        print(_mission_dialog_line(entry))
+        print(_mission_dialog_line(entry, report.dialog_observation(entry)))
     for observation in report.cancellations:
         print(_mission_cancellation_line(observation))
     for worker_id, slot in report.worker_slots:
@@ -8089,6 +8213,15 @@ def _report_mission_status(report: MissionControlReport) -> int:
             f"cockpit-control: mission {dialog['mission_id']} on {dialog['worker_id']} has a "
             f"pending {dialog['kind']} ({dialog['command_id']}); it is answerable only "
             f"through {DEFAULT_MISSION_ANSWER_COMMAND}",
+            file=os.sys.stderr,
+        )
+    for entry in orphaned:
+        dialog = entry["dialog"]
+        print(
+            f"cockpit-control: mission {dialog['mission_id']} on {dialog['worker_id']} has an "
+            f"orphaned {dialog['kind']} ({dialog['command_id']}) "
+            f"({MISSION_DIALOG_ORPHAN_REASON}); it is not answerable through "
+            f"{DEFAULT_MISSION_ANSWER_COMMAND} and awaits a bounded recovery action",
             file=os.sys.stderr,
         )
     for observation in timed_out:

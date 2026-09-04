@@ -232,3 +232,132 @@ parity gap when `quarantine` exists but is not a directory and soften the `_plan
 docstring accordingly; move required-directory creation after the continuity gate; harden
 the anti-sleep gate against comment keyword stuffing; add a `.gitignore` so
 `bin/__pycache__/` stops dirtying the tree.
+
+---
+
+## Epic TH3.E2 — Worker lifecycle and idempotent mission protocol
+
+**Stories Completed:** TH3.E2.US1 (structured worker lifecycle and freshness, `d493be6`),
+TH3.E2.US2 (idempotent command envelopes and acknowledgements, `5ba0b71`),
+TH3.E2.US3 (managed questions, cancellation, and replacement, `2e2bede`).
+All three reviewer-APPROVED; each needed exactly one bounded rework iteration, and every
+rework closed a security or test-integrity defect rather than a functional one.
+
+**Key Changes:**
+- **Structured worker lifecycle and freshness (US1, ADR-013).** Workers emit versioned
+  `worker-lifecycle-<state>` events for `accepted`, `running`, `blocked`, `completed`,
+  `failed`, `cancelled`, and `replaced`, published through the existing immutable
+  committed-event mechanism with a closed, fully validated field set carrying mission,
+  queue-item, worker, trace, and parent-trace identifiers. `fold_worker_missions`
+  materializes `ledger.worker_missions` only for events that correlate, target a
+  non-terminal slot, carry a strictly greater sequence, and match the architecture §9
+  transition table verbatim; every other event — late, duplicate, uncorrelated, or
+  post-terminal — is still committed as durable audit evidence and classified
+  `retained-*` without ever regressing state. Lock-free, read-only `lifecycle-status`
+  derives freshness from committed events rather than the projection, and reports an
+  expired `fresh_until` as `stale` with reason `heartbeat-expired` and recovery
+  `awaiting-bounded-recovery`; `stale` is deliberately not a lifecycle state, so it can
+  never be read as a failure.
+- **Idempotent command envelopes and acknowledgements (US2, ADR-013/ADR-016).** Every
+  state-changing worker operation is a versioned, closed-field command envelope carrying
+  command ID, mission and queue-item IDs, target kind and ID, trace and parent-trace IDs,
+  a canonical `sha256` payload digest, the declared mission boundaries, and timestamps.
+  The payload body itself is never persisted — only its digest — keeping canonical events
+  metadata-only. Acknowledgements record `accepted`, `applied`, `rejected`, and
+  `duplicate` outcomes as committed events folded into `ledger.commands` under a closed
+  `registered → accepted → applied` and `rejected` order in which `duplicate` never
+  advances and `applied` is reachable exactly once. Redelivering the same ID with the same
+  digest returns the stored result without re-applying; the same ID with a different
+  digest or envelope is refused and its conflict durably recorded. Ordering is taken from
+  the committed revision alone, so concurrent deliveries are resolved by the deterministic
+  fold rather than by a pre-read.
+- **Managed questions, cancellation, and replacement (US3, ADR-011/ADR-013/ADR-016).**
+  Mission questions, replies, and access-prompt responses are first-class commands whose
+  correlated `mission-dialog` record is committed inside the `command-registered` event of
+  its own envelope; both halves of that contract are enforced in each direction, response
+  kinds are derived from the prompt so an access prompt can only be closed by an
+  access-prompt response, admission refuses any interaction that does not name a
+  materialized, correlated, still-active mission, and the generic `register-command`
+  surface refuses the managed command types — so unscoped temporary files and pane
+  keystrokes have no protocol-recognised equivalent. Question and answer bodies are never
+  written anywhere in the control root; the envelope digest binds the command to the exact
+  body while typed references name where it lives. Cooperative cancellation carries an
+  always-explicit acknowledgement deadline whose outcome is a byte-inert evaluation over
+  committed evidence and one explicit `--as-of`, distinguishing `acknowledged`,
+  `awaiting-acknowledgement`, and `timed-out` with a recoverable reason that never claims
+  failure and runs no timer or daemon. Replacement terminates the prior mission with the
+  existing `replaced` state and `superseded_by_mission_id`, reserves exactly one new
+  mission ID per worker in the new replayable `mission_slots` projection, and durably
+  records `second-active-slot`, `unmatched-mission-slot`, and `reused-mission-id`
+  conflicts instead of ever creating a second active slot.
+- **Fail-closed and anti-forgery hardening (all three stories).** Worker-controlled
+  identifiers are constrained to printable non-whitespace ASCII before any lock or
+  candidate exists, so no identity string can forge a record boundary in the line-oriented
+  status payloads, and free text is kept out of every parseable stdout position.
+  Unrepresentable freshness deadlines, oversized sequences, JSON integer literals beyond
+  the CPython digit limit, and deep recursion now raise `cockpit-control:` diagnostics
+  instead of tracebacks that leaked absolute internal paths, with the same guard extended
+  to every parse site reachable from the new read paths. Ten `set -e`-vacuous `!`-negated
+  bats assertions (SC2314) were replaced with errexit-honouring helpers after a surviving
+  mutation proved they enforced nothing.
+- **Cross-story integrity closed at the epic gate.** Three defects that existed only
+  between the layers were found and fixed by the integration gate: a lifecycle event from
+  another worker could claim a replacement-reserved mission ID, producing two claimed slots
+  naming one mission with zero recorded conflicts and a permanently unreleasable
+  reservation; a reserved slot's queue item could be silently re-pointed against the
+  committed replacement record; and a dialog could outlive its mission while
+  `mission-status` still advertised it as answerable even though `answer-question` fails
+  closed. The first two are closed by a `_mission_slot_claim_fault` guard at the head of
+  the lifecycle branch of `fold_mission_state`, placed in the deterministic fold so no
+  surface — including the raw `publish-event` primitive — can bypass it, recording the
+  refusal as a durable conflict on the emitting worker. The third is closed by dialog
+  observations (`answerable`, `orphaned`, `settled`) that follow the established "an
+  observation is not a state" pattern: no committed record is rewritten and replay bytes
+  are unchanged.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit-control`, `README.md`,
+`tests/unit/cmd-control-lifecycle.bats` (new), `tests/unit/cmd-control-command.bats` (new),
+`tests/unit/cmd-control-mission.bats` (new), `tests/unit/cmd-control.bats`,
+`docs/plan/backlog.yaml`, `docs/plan/session-log.md`, `docs/plan/CHANGELOG.md`.
+
+**Epic ceremony (3 stories):** the `epic-integration` session ran the full gate
+(`./run-tests.sh all`: 161/161 unit, 25-check template integrity, 8/8 skills, 5/5
+integration, 14-check codex — 166 ok, 0 failures) plus `bootstrap.sh doctor`,
+`global --dry-run`, `codex-repo --dry-run`, `codex-global --dry-run`, and a
+side-effect-free `e2e <tmpdir> --yes --dry-run`, and exercised the three stories together
+on scratch control roots rather than in isolation: a complete dispatch → accept →
+acknowledge → run → heartbeat → blocked → question → answer → running → complete mission
+with all status surfaces cross-checked; the obsolescence path through cancellation,
+acknowledgement, replacement, and re-acceptance; twelve adversarial cross-layer
+interleavings; total derived-state loss with byte-deterministic re-derivation and
+idempotent replay; and fifteen-process concurrency mixing lifecycle events, deliveries,
+acknowledgements, and replacements. It closed the three cross-story defects above with two
+new deterministic regressions in `tests/unit/cmd-control-mission.bats`, each verified to
+fail against the pre-fix build. The epic quality check re-verified all nine acceptance
+criteria against the final tree, independently reproduced each defect on an isolated copy
+of the pre-fix module, killed seven of eight mutations of the fixes, ran twelve
+multi-process concurrency rounds and 320 randomized cross-layer fuzz steps against eight
+hand-written invariants, verified the migration note (a pre-fix store that hit the pattern
+is reported as advisory derived drift and healed non-destructively by `replay-ledger`), and
+APPROVED. The epic completion gate is met: every active worker mission has structured
+state, and every state-changing command is safely retryable and auditable.
+
+**Recorded follow-ups (non-blocking, none epic-blocking):** `lifecycle-status` is silent
+about slot ownership, so a mission refused the slot still appears as a normal fresh mission
+(E3 precedence); a `reserved` slot has no deadline and no recovery path if the worker never
+accepts (E3/E4 bounded recovery); preflight has structural but no semantic readiness
+dimension for the new authoritative records, underlined by `ledger.active_mission_id` being
+settable through the E1 `publish-event` primitive to a mission no slot holds while both
+`validate` and `preflight` stay clean (E3); an unacknowledged cancellation of a mission that
+has since completed is still counted as timed-out and should gain an obsolete observation
+(E3); a module-level `_dialog_observation` mutation survives because `observation settled`
+is unasserted on the answer path; a different-worker lifecycle event records a durable
+conflict only when the mission is slot-held, not when it is materialized-but-slotless;
+`record-lifecycle` exits 0 for a retained event while the command surfaces exit 1 for the
+analogous case; the pre-existing `publish-event --actor`/`--type` newline injection into the
+`list-events` renderer, reproduced at baseline; the pre-existing `publish-event` acceptance
+of non-finite JSON numbers into the immutable log, which the US2 command path already
+refuses; sixteen `set -e`-vacuous `!`-negated assertions remaining in sibling control
+suites; the `commands/` directory and `validate_command` describing a second, incompatible
+notion of "command" alongside `command-envelope`; and no `.gitignore` for
+`bin/__pycache__/`.

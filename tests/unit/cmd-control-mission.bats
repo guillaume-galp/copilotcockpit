@@ -1675,3 +1675,262 @@ path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 		[ "$status" -eq 0 ]
 	done
 }
+
+@test "a lifecycle event cannot claim a mission slot another claim already holds" {
+	# Cross-story regression (TH3.E2.US1 + US3).  A replacement reserves the
+	# worker's one slot for a mission ID that has emitted no lifecycle event
+	# yet, so `apply_worker_lifecycle` has nothing materialized to correlate the
+	# first event against.  Without the slot-claim check a second worker could
+	# accept the reserved mission and hold it at the same time as the
+	# reservation -- two claimed slots naming one mission, with no conflict
+	# recorded anywhere -- and the reserving worker could re-point its own
+	# reservation at a queue item the replacement never declared.
+	local root="$BATS_TEST_TMPDIR/mission-slot-claim"
+	cc_mission_store "$root"
+	local prior reserved replacement
+	prior="$(cc_uuid)"
+	reserved="$(cc_uuid)"
+	replacement="$(cc_uuid)"
+	cc_running worker-dev "$prior" QI-30 "$(cc_uuid)"
+	"$CONTROL_BIN" replace-mission --command-id "$replacement" --worker worker-dev \
+		--mission "$prior" --replacement-mission "$reserved" --queue-item QI-30 \
+		--trace "$(cc_uuid)" --reason "the queue item was superseded" \
+		--payload '{"replace":"reserved"}' >/dev/null
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "slot worker-dev mission $reserved queue-item QI-30 state reserved"
+
+	# Another worker may not materialize the mission the reservation holds.
+	run "$CONTROL_BIN" record-lifecycle --state accepted --worker worker-test \
+		--mission "$reserved" --queue-item QI-30 --trace "$(cc_uuid)" --sequence 1 \
+		--fresh-for 3600
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "is retained for audit only (retained-unmatched-correlation"
+	cc_absent_output "advanced the materialized mission state"
+
+	# Neither may the reserving worker accept it against another queue item.
+	run "$CONTROL_BIN" record-lifecycle --state accepted --worker worker-dev \
+		--mission "$reserved" --queue-item QI-99 --trace "$(cc_uuid)" --sequence 1 \
+		--fresh-for 3600
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "is retained for audit only (retained-unmatched-correlation"
+	cc_absent_output "advanced the materialized mission state"
+
+	# Both refusals are durable, queryable slot conflicts rather than messages.
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 recorded conflict(s)"
+	echo "$output" | grep -Fq "mission-conflict worker-test mission $reserved reason reused-mission-id source lifecycle command -"
+	echo "$output" | grep -Fq "mission-conflict worker-dev mission $reserved reason unmatched-mission-slot source lifecycle command -"
+	echo "$output" | grep -Fq "slot worker-dev mission $reserved queue-item QI-30 state reserved"
+	cc_absent_output "slot worker-test mission $reserved"
+
+	# The worker the replacement actually reserved the slot for still accepts it
+	# on the queue item that replacement declared, and the slot becomes active.
+	run "$CONTROL_BIN" record-lifecycle --state accepted --worker worker-dev \
+		--mission "$reserved" --queue-item QI-30 --trace "$(cc_uuid)" --sequence 1 \
+		--fresh-for 3600
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "advanced the materialized mission state"
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "slot worker-dev mission $reserved queue-item QI-30 state active"
+
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+root = Path(sys.argv[1])
+prior, reserved = sys.argv[3:5]
+ledger = json.loads((root / cockpit_control.LEDGER_NAME).read_text())
+missions = ledger[cockpit_control.LEDGER_WORKER_MISSIONS_FIELD]
+slots = ledger[cockpit_control.LEDGER_MISSION_SLOTS_FIELD]
+
+# One mission ID is held by at most one slot, whichever half of the protocol
+# claimed it: the lifecycle path may not break the invariant the replacement
+# path already enforces.
+claimed = [
+    (worker, slot["mission_id"]) for worker, slot in sorted(slots.items())
+    if slot["state"] in cockpit_control.MISSION_SLOT_CLAIMED_STATES
+]
+held = [mission_id for _worker, mission_id in claimed]
+assert sorted(held) == sorted(set(held)), claimed
+assert claimed == [("worker-dev", reserved)], claimed
+
+# The reservation kept the queue item the replacement declared, and the worker
+# that never owned it holds nothing at all.
+dev = slots["worker-dev"]
+assert dev["queue_item_id"] == "QI-30", dev
+assert dev["state"] == cockpit_control.MISSION_SLOT_ACTIVE, dev
+assert dev["replaces"] == prior, dev
+test = slots["worker-test"]
+assert test["state"] == cockpit_control.MISSION_SLOT_UNCLAIMED, test
+assert test["mission_id"] is None and test["queue_item_id"] is None, test
+
+recorded = sorted(
+    (worker, conflict["mission_id"], conflict["reason"], conflict["source"])
+    for worker, slot in slots.items()
+    for conflict in slot["conflicts"]
+)
+assert recorded == [
+    ("worker-dev", reserved, cockpit_control.MISSION_SLOT_CONFLICT_UNMATCHED, "lifecycle"),
+    ("worker-test", reserved, cockpit_control.MISSION_SLOT_CONFLICT_REUSED, "lifecycle"),
+], recorded
+
+# The refused events materialized no mission at all, and the one mission that
+# did materialize belongs to the worker and queue item that owned the slot.
+assert sorted(missions) == sorted([prior, reserved]), sorted(missions)
+assert missions[prior]["lifecycle"]["state"] == cockpit_control.LIFECYCLE_REPLACED
+assert missions[prior]["lifecycle"]["superseded_by_mission_id"] == reserved
+current = missions[reserved]["lifecycle"]
+assert current["state"] == cockpit_control.LIFECYCLE_ACCEPTED, current
+assert current["worker_id"] == "worker-dev", current
+assert current["queue_item_id"] == "QI-30", current
+print("no lifecycle event bled a mission across the single slot")
+' "$root" "$MODULE_DIR" "$prior" "$reserved"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "no lifecycle event bled a mission across the single slot"
+
+	# The refusals are re-derived from committed events after losing every
+	# derived byte, and replay rebuilds the same projection.
+	rm -f "$root/ledger.json" "$root/events.jsonl"
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 recorded conflict(s)"
+	echo "$output" | grep -Fq "slot worker-dev mission $reserved queue-item QI-30 state active"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" preflight
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "preflight ready"
+}
+
+@test "a prompt whose mission ended is observed orphaned and never counted as answerable" {
+	# Cross-story regression (TH3.E2.US1 + US3).  `answer-question` fails closed
+	# on a mission that is no longer active, so a prompt left pending when its
+	# mission completes or is replaced can never be answered.  Reporting it as a
+	# pending prompt that "is answerable only through cockpit-control
+	# answer-question" told the operator to run a command that cannot succeed and
+	# left the pending count permanently inflated.
+	local root="$BATS_TEST_TMPDIR/mission-orphaned-prompt"
+	cc_mission_store "$root"
+	local finished replaced replacement trace_a trace_b prompt_a prompt_b replace_id
+	finished="$(cc_uuid)"
+	replaced="$(cc_uuid)"
+	replacement="$(cc_uuid)"
+	trace_a="$(cc_uuid)"
+	trace_b="$(cc_uuid)"
+	prompt_a="$(cc_uuid)"
+	prompt_b="$(cc_uuid)"
+	replace_id="$(cc_uuid)"
+	cc_running worker-dev "$finished" QI-31 "$trace_a"
+	cc_running worker-qa "$replaced" QI-32 "$trace_b"
+	"$CONTROL_BIN" raise-question --command-id "$prompt_a" --worker worker-dev \
+		--mission "$finished" --queue-item QI-31 --trace "$(cc_uuid)" \
+		--category architecture-decision --body-ref "report:worker-dev/$finished/2" \
+		--payload '{"question":"which adapter?"}' >/dev/null
+	"$CONTROL_BIN" raise-question --command-id "$prompt_b" --kind access-prompt \
+		--worker worker-qa --mission "$replaced" --queue-item QI-32 --trace "$(cc_uuid)" \
+		--category filesystem-access --body-ref "report:worker-qa/$replaced/2" \
+		--payload '{"question":"may I write?"}' >/dev/null
+
+	# While both missions are active both prompts are answerable.
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "2 pending prompt(s)"
+	echo "$output" | grep -Fq "0 orphaned prompt(s)"
+	echo "$output" | grep -Fq "dialog $prompt_a kind question state pending"
+	[ "$(printf '%s\n' "$output" | grep -c "observation answerable")" -eq 2 ]
+	cc_absent_output "observation orphaned"
+
+	# One mission completes and the other is replaced, and neither prompt was
+	# ever answered.
+	cc_emit --state completed --worker worker-dev --mission "$finished" --queue-item QI-31 \
+		--trace "$trace_a" --sequence 3 --evidence "test:RUN-1"
+	"$CONTROL_BIN" replace-mission --command-id "$replace_id" --worker worker-qa \
+		--mission "$replaced" --replacement-mission "$replacement" --queue-item QI-32 \
+		--trace "$trace_b" --reason "the queue item was superseded" \
+		--payload '{"replace":"orphan"}' >/dev/null
+
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "0 pending prompt(s)"
+	echo "$output" | grep -Fq "2 orphaned prompt(s)"
+	echo "$output" | grep -Fq "dialog $prompt_a kind question state pending"
+	[ "$(printf '%s\n' "$output" | grep -c "observation orphaned")" -eq 2 ]
+	cc_absent_output "observation answerable"
+	# The surface no longer claims an unanswerable prompt is answerable, and it
+	# says the recoverable reason instead.
+	cc_absent_output "it is answerable only through"
+	echo "$output" | grep -Fq "mission $finished on worker-dev has an orphaned question ($prompt_a) (mission-no-longer-active); it is not answerable through cockpit-control answer-question and awaits a bounded recovery action"
+	echo "$output" | grep -Fq "mission $replaced on worker-qa has an orphaned access-prompt ($prompt_b) (mission-no-longer-active); it is not answerable through cockpit-control answer-question and awaits a bounded recovery action"
+
+	# The observation agrees with what the protocol actually allows: both
+	# answers are refused, fail closed, and change nothing.
+	local out="$BATS_TEST_TMPDIR/orphan-stdout" err="$BATS_TEST_TMPDIR/orphan-stderr"
+	local before
+	before="$(cc_control_contents "$root")"
+	cc_refuse answer-question "$out" "$err" --command-id "$(cc_uuid)" --answers "$prompt_a" \
+		--by overseer --trace "$(cc_uuid)" --category architecture-decision \
+		--body-ref "human-decision:x" --payload '{"answer":"B"}'
+	grep -Fq "is no longer active" "$err"
+	cc_refuse answer-question "$out" "$err" --command-id "$(cc_uuid)" --answers "$prompt_b" \
+		--by overseer --trace "$(cc_uuid)" --category filesystem-access \
+		--body-ref "human-decision:x" --payload '{"answer":"no"}'
+	grep -Fq "is no longer active" "$err"
+	[ "$before" = "$(cc_control_contents "$root")" ]
+
+	# An orphaned prompt is an observation, not a state: the committed record and
+	# the derived projection both still say `pending`, so nothing was rewritten.
+	run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+root = Path(sys.argv[1])
+prompt_a, prompt_b = sys.argv[3:5]
+ledger = json.loads((root / cockpit_control.LEDGER_NAME).read_text())
+dialogs = ledger[cockpit_control.LEDGER_MISSION_DIALOGS_FIELD]
+for command_id in (prompt_a, prompt_b):
+    entry = dialogs[command_id]
+    assert entry["state"] == cockpit_control.MISSION_DIALOG_PENDING, entry
+    assert entry["answered_by_command_id"] is None, entry
+    assert entry["answered_at"] is None, entry
+
+report = cockpit_control.observe_mission_control(root)
+observed = {
+    entry["dialog"]["command_id"]: report.dialog_observation(entry)
+    for entry in report.dialogs
+}
+assert observed == {
+    prompt_a: cockpit_control.MISSION_DIALOG_OBSERVATION_ORPHANED,
+    prompt_b: cockpit_control.MISSION_DIALOG_OBSERVATION_ORPHANED,
+}, observed
+assert report.pending_prompts == (), report.pending_prompts
+assert len(report.orphaned_prompts) == 2, report.orphaned_prompts
+print("an orphaned prompt is an observation and never a rewritten state")
+' "$root" "$MODULE_DIR" "$prompt_a" "$prompt_b"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "an orphaned prompt is an observation and never a rewritten state"
+
+	# The observation is derived from committed events, so it survives losing
+	# every derived byte, and replay rebuilds the same projection.
+	rm -f "$root/ledger.json" "$root/events.jsonl"
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "0 pending prompt(s)"
+	echo "$output" | grep -Fq "2 orphaned prompt(s)"
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+}
