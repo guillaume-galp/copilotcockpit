@@ -136,3 +136,99 @@ Real Docker/Playwright run validated structurally; full E2E deferred to E5 integ
 **Files modified:** `run-tests.sh`, `tests/unit/*.bats`, `tests/unit/helper.bash`, `tests/template/check-template.sh`, `tests/skills/lint-skills.sh`, `tests/integration/smoke.bats`, `tests/integration/helper.bash`, `skills/copilotcockpit-dev/SKILL.md`, `lib/cmd-global.sh`, `templates/e2e/MANIFEST.toml`.
 
 **Epic ceremony (small, 3 stories):** `./run-tests.sh all` exits 0 — 14 unit + template integrity + 8-skill lint + 3 integration. All 3 stories reviewer-APPROVED.
+
+## Epic TH3.E1 — Control store and preflight foundations
+
+**Stories Completed:** TH3.E1.US1 (control root and versioned schemas, `677fc7e`),
+TH3.E1.US2 (portable lock acquisition and exact release, `207f922`),
+TH3.E1.US3 (recoverable guarded stale-lock repair, `8f88a21`),
+TH3.E1.US4 (immutable authoritative event publication, `29a22e2`),
+TH3.E1.US5 (materialized ledger projection and replay, `75bdce5`),
+TH3.E1.US6 (deterministic crash-consistency and interleaving proof, `6642144`),
+TH3.E1.US7 (control-plane preflight and guarded repair diagnostics, `e6e35e2`).
+All seven reviewer-APPROVED; US2 and US7 each needed one bounded rework iteration.
+
+**Key Changes:**
+- **Versioned control root (US1).** `bin/cockpit_control.py` + the `cockpit-control`
+  entry point establish a canonical, explicitly configured control root with versioned
+  `control.json`, ledger, and event schemas. Roots are never inferred from `cwd`,
+  relative roots are refused, and unknown future schema versions stop mutation and
+  instruct the operator to upgrade. `cockpit-overseer`, `cockpit-protocol`, and
+  `cockpit-wake` resolve and validate the root before any tmux mutation, and generated
+  wake jobs fail closed on missing, malformed, or future-versioned stores.
+- **Portable ownership protocol (US2/US3, ADR-018).** Every acquisition, release, and
+  repair transition runs under a process-scoped advisory `fcntl.flock` on
+  `locks/control.guard`, which the kernel releases on process death. Acquisition
+  prepares a complete private candidate directory containing `owner.json` and publishes
+  it by one atomic rename, so no creation-to-owner-publication window exists. Release
+  and repair re-validate owner UUID and filesystem identity under the guard and claim by
+  renaming to a unique quarantine. Repair proves same-host owner death or requires
+  explicit exact-owner authorization, refuses live, remote, malformed, or unprovable
+  owners, and publishes no shared repair marker: the rename is the entire claim.
+- **Immutable events and derived projection (US4/US5, ADR-019).** Each event is written,
+  flushed, and byte-validated against its exact canonical serialization under `pending/`,
+  then committed by one non-clobbering atomic rename into
+  `events/<12-digit revision>-<event-id>.json`. Filenames, revisions, event IDs, and
+  schemas must agree and form one contiguous unique sequence; gaps, duplicates,
+  disagreements, and invalid entries fail closed naming the offender. `ledger.json` is a
+  pure, byte-reproducible fold of committed events installed through a flushed
+  `ledger.json.tmp` and `os.replace`, `events.jsonl` becomes a strictly derived view, and
+  `replay-ledger` deterministically repairs missing, stale, corrupt, ahead, or
+  interrupted projections exactly once without touching event authority.
+- **Deterministic interruption proof (US6).** All nine architecture §8.4 interruption
+  boundaries are reachable through named fault hooks and all six required interleavings
+  (acquire/acquire, acquire/repair, release/acquire, repair/acquire, bounded timeout,
+  replacement preservation) are proven by barrier-coordinated real processes. Every
+  scenario asserts safety and subsequent liveness. `check-interruption-matrix.sh` parses
+  §8.4 out of the architecture document, fails on drift in either direction, and rejects
+  concurrency regressions that coordinate only by timing.
+- **Preflight and guarded repair (US7).** `preflight` reports root, schema, transition
+  guard, authoritative lock, quarantine, pending event, committed revision, ledger,
+  queue, worker capability, and declared-path readiness without changing a byte, and
+  classifies every finding as authoritative, derived, debris, or configuration with the
+  exact repair command. `repair-store` only quarantines into
+  `quarantine/<stamp>-<uuid>-<name>`, never deletes, is idempotent, and refuses live
+  owners, future-versioned state, and unproven committed continuity, with the preview
+  sharing the same read-only refusal gates while staying lock-free.
+
+**Files Modified:** `bin/cockpit_control.py` (new, 4278 lines), `bin/cockpit-control`
+(new), `bin/cockpit-overseer`, `bin/cockpit-protocol`, `bin/cockpit-protocol.go`,
+`bin/cockpit-wake`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, `README.md`,
+`skills/e2e-cockpit/SKILL.md`, `skills/setup-e2e-cockpit/SKILL.md`,
+`templates/e2e/.agents/skills/e2e-cockpit/SKILL.md.tmpl`,
+`templates/e2e/.github/skills/e2e-cockpit/SKILL.md.tmpl`,
+`templates/e2e/tmux-cockpit.sh`, `templates/e2e/tmux-cockpit-local.sh`,
+`tests/unit/cmd-control.bats` (new), `tests/unit/cmd-control-interruption.bats` (new),
+`tests/unit/cmd-control-preflight.bats` (new), `tests/unit/check-interruption-matrix.sh`
+(new), `tests/unit/control-interruption-matrix.tsv` (new), `tests/unit/helper.bash`,
+`tests/unit/cmd-doctor.bats`, `tests/unit/cmd-global.bats`, `tests/unit/cmd-overseer.bats`,
+`tests/unit/cmd-protocol.bats`, `tests/unit/cmd-wake.bats`,
+`tests/integration/smoke.bats`, `tests/template/check-template.sh`,
+`docs/architecture/overseer-control-plane.md`, `docs/ADRs/ADR-012-control-store-persistence.md`,
+`docs/ADRs/ADR-018-portable-lock-repair-protocol.md` (new),
+`docs/ADRs/ADR-019-immutable-event-publication.md` (new),
+`docs/plan/backlog.yaml`, `docs/plan/session-log.md`.
+
+**Epic ceremony (large, 7 stories):** `epic-integration` session ran the full gate
+(`./run-tests.sh all`: 116/116 unit, template integrity, 8/8 skills, 5/5 integration,
+codex — 0 failures, about 2m50s) plus `bootstrap.sh doctor` and `global --dry-run`, and
+exercised the epic end to end on a scratch store: init → validate → preflight ready →
+event publication → ledger advance and deterministic rebuild → idempotent replay; crashed
+writer → preflight naming both exact repairs → ordered `repair-lock` then `repair-store`
+→ ready → new writer publishes; killed lock owner recovery; derived ledger and
+`events.jsonl` corruption rebuilt by `replay-ledger`; and composed fail-closed refusals
+for future-versioned state, committed gaps, and live owners. One genuine cross-story gap
+was closed with a new deterministic integration regression in
+`tests/unit/cmd-control-preflight.bats` proving the crashed-writer chain through the
+installed CLI. The epic quality check reviewed all 21 acceptance criteria against final
+HEAD, ran adversarial symlink, event-forgery, and schema-poisoning probes, and APPROVED.
+
+**Recorded follow-ups (non-blocking, none epic-blocking):** document that `repair-lock`
+is deliberately independent of root metadata and version-gates `owner.json` instead
+(reproduced: it quarantines a provably dead owner even when `control.json` is
+future-versioned or malformed, losslessly and recoverably); enumerate the non-authoritative
+root-level `quarantine/` directory in architecture §7; close the `repair-store --dry-run`
+parity gap when `quarantine` exists but is not a directory and soften the `_plan_only`
+docstring accordingly; move required-directory creation after the continuity gate; harden
+the anti-sleep gate against comment keyword stuffing; add a `.gitignore` so
+`bin/__pycache__/` stops dirtying the tree.

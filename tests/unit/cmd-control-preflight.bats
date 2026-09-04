@@ -877,3 +877,185 @@ with open(path, "w") as handle:
 		fi
 	done
 }
+
+# --- cross-story recovery: one crashed writer, both findings, ordered repairs --
+#
+# A real writer that dies mid-publication is the operator's actual failure mode,
+# and it damages two dimensions at once: it leaves the authoritative lock held by
+# a dead owner (US2/US3) and a torn private publication candidate in pending/
+# (US4).  The per-story suites prove each half in isolation; this test proves the
+# whole chain composes through the installed CLI: one preflight report names both
+# exact repairs, the store repair fails closed against the stale lock so the lock
+# repair must run first, and only then does the store return to ready with a new
+# writer publishing at the next contiguous revision and every byte of evidence
+# retained in quarantine/.
+@test "a crashed writer's stale lock and pending debris recover through the preflight-named repairs" {
+	local root="$BATS_TEST_TMPDIR/crashed-writer-recovery"
+	cc_fresh_store "$root" 1
+
+	# Crash one real writer at the named `revision-allocated` fault boundary: the
+	# candidate is flushed, the process is SIGKILLed there, and no timing guess
+	# is involved.
+	run python3 -c '
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+module_dir = sys.argv[2]
+sys.path.insert(0, module_dir)
+import cockpit_control
+
+writer_code = r"""
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+import cockpit_control
+
+TORN_PREFIX_BYTES = 24
+
+def torn_write(path, record):
+    partial = cockpit_control._serialized_record(record).encode("utf-8")[:TORN_PREFIX_BYTES]
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(descriptor, partial)
+    os.fsync(descriptor)
+    os.close(descriptor)
+    print("TORN " + path.name + " " + partial.hex(), flush=True)
+    sys.stdin.readline()
+    raise AssertionError("the torn candidate barrier was released instead of killed")
+
+def fault(boundary, publication):
+    if boundary == "revision-allocated":
+        cockpit_control._write_json = torn_write
+
+cockpit_control._event_publication_fault = fault
+cockpit_control.publish_control_event(
+    Path(sys.argv[1]),
+    "crashed-writer",
+    actor="crashed-writer",
+    command="crashed-writer",
+    timeout_seconds=5,
+    poll_seconds=0.01,
+)
+"""
+
+writer = subprocess.Popen(
+    [sys.executable, "-c", writer_code, str(root), module_dir],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1,
+)
+try:
+    torn = writer.stdout.readline().split()
+    assert torn and torn[0] == "TORN", writer.stderr.read()
+finally:
+    writer.kill()
+    writer.wait(timeout=5)
+assert writer.returncode != 0
+
+locks = root / cockpit_control.LOCKS_DIR_NAME
+owner_path = locks / cockpit_control.CONTROL_LOCK_NAME / cockpit_control.LOCK_OWNER_NAME
+owner = json.loads(owner_path.read_text())
+debris = root / cockpit_control.PENDING_DIR_NAME / torn[1]
+assert debris.read_bytes() == bytes.fromhex(torn[2])
+print("DEBRIS " + torn[1])
+print("TORNHEX " + torn[2])
+print("LOCK " + owner["lock_id"])
+' "$root" "$MODULE_DIR"
+	[ "$status" -eq 0 ]
+
+	local debris torn_hex lock_id
+	debris="$(echo "$output" | awk '$1 == "DEBRIS" { print $2 }')"
+	torn_hex="$(echo "$output" | awk '$1 == "TORNHEX" { print $2 }')"
+	lock_id="$(echo "$output" | awk '$1 == "LOCK" { print $2 }')"
+	[ -n "$debris" ]
+	[ -n "$torn_hex" ]
+	[ -n "$lock_id" ]
+
+	# One read-only report diagnoses both dimensions and names the exact command
+	# for each, without touching a byte.
+	local before
+	before="$(cc_control_snapshot "$root")"
+
+	run "$CONTROL_BIN" preflight
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "preflight blocked in $root"
+	echo "$output" | grep -Fq "authoritative-lock blocked authoritative: locks/control.lock is owned by lock $lock_id"
+	echo "$output" | grep -Fq "every writer blocks until it is repaired [repair: cockpit-control repair-lock]"
+	echo "$output" | grep -Fq "pending-events advisory debris: pending/$debris"
+	echo "$output" | grep -Fq "replay never treats it as a committed event [repair: cockpit-control repair-store]"
+	# The committed sequence is untouched: the torn candidate never became one.
+	echo "$output" | grep -Fq "committed-revisions ready ok: 1 contiguous committed revision(s)"
+	[ "$(cc_control_snapshot "$root")" = "$before" ]
+
+	# The store repair needs the control lock the dead owner still holds, so it
+	# waits boundedly and claims nothing: the lock repair has to run first.
+	local contents
+	contents="$(cc_control_contents "$root")"
+	COCKPIT_CONTROL_LOCK_TIMEOUT_SECONDS=0.2 run "$CONTROL_BIN" repair-store
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "timed out after 0.2s waiting for locks/control.lock"
+	[ "$(cc_control_contents "$root")" = "$contents" ]
+	[ ! -e "$root/quarantine" ]
+	[ -f "$root/pending/$debris" ]
+
+	# The named lock repair quarantines the provably dead owner by rename only.
+	run "$CONTROL_BIN" repair-lock
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "quarantined control lock $lock_id as locks/control.lock.repaired-$lock_id-"
+	echo "$output" | grep -Fq "proven same-host owner death"
+	[ ! -e "$root/locks/control.lock" ]
+
+	# Only now does the store repair claim both non-authoritative items.
+	run "$CONTROL_BIN" repair-store
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "quarantined pending/$debris -> quarantine/"
+	echo "$output" | grep -Fq "quarantined locks/control.lock.repaired-$lock_id-"
+	[ ! -e "$root/pending/$debris" ]
+
+	# Nothing was deleted: the torn candidate is retained byte for byte.
+	run python3 -c '
+import sys
+from pathlib import Path
+
+quarantine = Path(sys.argv[1]) / "quarantine"
+expected = bytes.fromhex(sys.argv[3])
+retained = [path for path in quarantine.iterdir() if path.name.endswith(sys.argv[2])]
+assert len(retained) == 1, retained
+assert retained[0].read_bytes() == expected, "the quarantined candidate lost bytes"
+print("RETAINED")
+' "$root" "$debris" "$torn_hex"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "RETAINED"
+
+	# The repaired control plane is ready again and re-running the repair is a
+	# no-op.
+	run "$CONTROL_BIN" preflight
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "preflight ready in $root"
+	echo "$output" | grep -Fq "quarantine/ retains 2 archived item(s)"
+
+	local after_repair
+	after_repair="$(cc_control_contents "$root")"
+	run "$CONTROL_BIN" repair-store
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "no repairable control-store debris in $root; no state changed"
+	[ "$(cc_control_contents "$root")" = "$after_repair" ]
+
+	# Liveness: a new writer publishes at the next contiguous revision, so the
+	# crashed candidate never consumed one, and the derived ledger agrees.
+	run "$CONTROL_BIN" publish-event --type liveness-after-crash-recovery
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "at revision 2"
+
+	run "$CONTROL_BIN" replay-ledger
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger.json projection is current at revision 2"
+
+	run "$CONTROL_BIN" validate
+	[ "$status" -eq 0 ]
+}
