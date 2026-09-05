@@ -452,15 +452,23 @@ MISSION_CONTROL_SCHEMA_VERSION = 1
 MISSION_DIALOG_RECORD_TYPE = "mission-dialog"
 MISSION_CANCELLATION_RECORD_TYPE = "mission-cancellation"
 MISSION_REPLACEMENT_RECORD_TYPE = "mission-replacement"
+# A controller dispatch is the fourth managed interaction: the one command the
+# reconciling controller mints itself.  It is deliberately the same kind of
+# record as a cancellation or a replacement rather than a new mechanism, so a
+# dispatch inherits the durable command ID, the canonical payload digest,
+# idempotent redelivery, and the one-slot-per-worker fold unchanged.
+CONTROLLER_DISPATCH_RECORD_TYPE = "controller-dispatch"
 MISSION_DIALOG_PAYLOAD_FIELD = "mission_dialog"
 MISSION_CANCELLATION_PAYLOAD_FIELD = "mission_cancellation"
 MISSION_REPLACEMENT_PAYLOAD_FIELD = "mission_replacement"
+CONTROLLER_DISPATCH_PAYLOAD_FIELD = "controller_dispatch"
 # One event carries at most one mission-control record.  The tuple is ordered so
 # a record is always looked for under exactly one closed set of payload fields.
 MISSION_CONTROL_PAYLOAD_FIELDS = (
     MISSION_DIALOG_PAYLOAD_FIELD,
     MISSION_CANCELLATION_PAYLOAD_FIELD,
     MISSION_REPLACEMENT_PAYLOAD_FIELD,
+    CONTROLLER_DISPATCH_PAYLOAD_FIELD,
 )
 
 # The closed dialog vocabulary.  A worker raises a prompt; the overseer answers
@@ -543,6 +551,26 @@ MISSION_REPLACEMENT_FIELDS = (
     "requested_at",
 )
 
+# The complete, closed field set of one controller dispatch.  It carries no
+# mission brief and no prose: the brief is digested by the carrying envelope,
+# `evidence_refs` says which queue item authorized the work, and `state_key`
+# digests the exact reconciled evidence the controller acted on, so a later tick
+# can tell "the same situation" from "a new one" without re-investigating.
+CONTROLLER_DISPATCH_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "mission_id",
+    "worker_id",
+    "queue_item_id",
+    "trace_id",
+    "parent_trace_id",
+    "reason",
+    "state_key",
+    "evidence_refs",
+    "decided_at",
+)
+
 # The managed command types.  These are the only command types this tool mints
 # itself, and the generic `register-command` surface refuses them: a managed
 # command without its correlated record would look managed while being
@@ -553,6 +581,7 @@ COMMAND_TYPE_MISSION_REPLY = "mission-reply"
 COMMAND_TYPE_MISSION_ACCESS_PROMPT_RESPONSE = "mission-access-prompt-response"
 COMMAND_TYPE_MISSION_CANCEL = "mission-cancel"
 COMMAND_TYPE_MISSION_REPLACE = "mission-replace"
+COMMAND_TYPE_MISSION_DISPATCH = "mission-dispatch"
 MISSION_DIALOG_COMMAND_TYPES = {
     MISSION_DIALOG_QUESTION: COMMAND_TYPE_MISSION_QUESTION,
     MISSION_DIALOG_ACCESS_PROMPT: COMMAND_TYPE_MISSION_ACCESS_PROMPT,
@@ -564,6 +593,7 @@ MISSION_DIALOG_RESPONSES = {
 }
 MANAGED_COMMAND_TYPES = tuple(sorted(MISSION_DIALOG_COMMAND_TYPES.values())) + (
     COMMAND_TYPE_MISSION_CANCEL,
+    COMMAND_TYPE_MISSION_DISPATCH,
     COMMAND_TYPE_MISSION_REPLACE,
 )
 
@@ -666,7 +696,9 @@ MISSION_SLOT_CONFLICT_REASONS = (
 )
 MISSION_SLOT_CONFLICT_LIFECYCLE = "lifecycle"
 MISSION_SLOT_CONFLICT_REPLACEMENT = "replacement"
+MISSION_SLOT_CONFLICT_DISPATCH = "dispatch"
 MISSION_SLOT_CONFLICT_SOURCES = (
+    MISSION_SLOT_CONFLICT_DISPATCH,
     MISSION_SLOT_CONFLICT_LIFECYCLE,
     MISSION_SLOT_CONFLICT_REPLACEMENT,
 )
@@ -720,6 +752,251 @@ DEFAULT_MISSION_CANCEL_COMMAND = "cockpit-control cancel-mission"
 DEFAULT_MISSION_REPLACE_COMMAND = "cockpit-control replace-mission"
 
 
+# --- deterministic controller reconciliation (ADR-014, sections 6 and 11) ----
+
+# The reconciliation contract is versioned independently of the control-store
+# schema, the lifecycle vocabulary, the command protocol, and the mission-control
+# contract, so a controller speaking an older or newer reconciliation vocabulary
+# is refused explicitly instead of being partially understood.
+CONTROLLER_SCHEMA_VERSION = 1
+CONTROLLER_OBSERVATION_RECORD_TYPE = "controller-observation"
+CONTROLLER_OBSERVATION_PAYLOAD_FIELD = "controller_observation"
+# An observation event type is derived from its outcome exactly as a lifecycle
+# event type is derived from its state, so neither half can exist without the
+# other and an observation cannot be smuggled in under an unrelated event type.
+CONTROLLER_OBSERVATION_EVENT_PREFIX = "controller-observation-"
+
+# The complete, closed field set of one observation record.  Identity fields are
+# nullable because a tick can legitimately observe something that names no queue
+# item, worker, mission, or command at all, but they are never absent, so a
+# partially written observation is malformed rather than defaulted.
+CONTROLLER_OBSERVATION_FIELDS = (
+    "schema_version",
+    "record_type",
+    "outcome",
+    "reason",
+    "state_key",
+    "queue_item_id",
+    "worker_id",
+    "mission_id",
+    "command_id",
+    "evidence_refs",
+    "observed_at",
+)
+
+# The closed outcome vocabulary of one controller tick.  `dispatched` is only
+# ever carried by the command envelope that performs the dispatch; a tick that
+# changes no mission state records what it saw instead, which is what stops the
+# next tick from investigating the same situation again.
+CONTROLLER_DISPATCHED = "dispatched"
+CONTROLLER_OBSERVED = "observed"
+CONTROLLER_BLOCKED = "blocked"
+CONTROLLER_OUTCOMES = (CONTROLLER_DISPATCHED, CONTROLLER_OBSERVED, CONTROLLER_BLOCKED)
+CONTROLLER_OBSERVATION_OUTCOMES = (CONTROLLER_OBSERVED, CONTROLLER_BLOCKED)
+
+# The closed reason vocabulary.  Every controller decision explains itself with
+# one of these tokens and never with free text, so the reason is safe to render
+# into a parseable position and can be asserted exactly by a test or a skill.
+CONTROLLER_REASON_IMPLEMENTABLE = "queue-item-implementable"
+CONTROLLER_REASON_ROOT_CONFLICT = "queue-root-disagreement"
+CONTROLLER_REASON_ROOT_UNDECLARED = "queue-root-undeclared"
+CONTROLLER_REASON_NO_ROOT = "no-queue-root-declared"
+CONTROLLER_REASON_QUEUE_UNREADABLE = "queue-root-unreadable"
+CONTROLLER_REASON_LEDGER_DIVERGENT = "ledger-projection-divergent"
+CONTROLLER_REASON_QUEUE_PAUSED = "queue-paused"
+CONTROLLER_REASON_QUEUE_EMPTY = "no-active-queue-item"
+CONTROLLER_REASON_QUEUE_AMBIGUOUS = "multiple-active-queue-items"
+CONTROLLER_REASON_NOT_IMPLEMENTABLE = "queue-item-not-implementable"
+CONTROLLER_REASON_MISSION_IN_PROGRESS = "mission-in-progress"
+CONTROLLER_REASON_WORKER_BUSY = "worker-busy"
+CONTROLLER_DISPATCH_REASONS = (CONTROLLER_REASON_IMPLEMENTABLE,)
+CONTROLLER_OBSERVATION_REASONS = (
+    CONTROLLER_REASON_LEDGER_DIVERGENT,
+    CONTROLLER_REASON_MISSION_IN_PROGRESS,
+    CONTROLLER_REASON_NOT_IMPLEMENTABLE,
+    CONTROLLER_REASON_NO_ROOT,
+    CONTROLLER_REASON_QUEUE_AMBIGUOUS,
+    CONTROLLER_REASON_QUEUE_EMPTY,
+    CONTROLLER_REASON_QUEUE_PAUSED,
+    CONTROLLER_REASON_QUEUE_UNREADABLE,
+    CONTROLLER_REASON_ROOT_CONFLICT,
+    CONTROLLER_REASON_ROOT_UNDECLARED,
+    CONTROLLER_REASON_WORKER_BUSY,
+)
+CONTROLLER_REASONS = CONTROLLER_DISPATCH_REASONS + CONTROLLER_OBSERVATION_REASONS
+# Reasons that stop dispatch until a human or another tool changes something.
+# They are still recorded exactly once and still terminate the tick cleanly;
+# `blocked` is a refusal to guess, never a loop and never a retry.
+CONTROLLER_BLOCKING_REASONS = (
+    CONTROLLER_REASON_LEDGER_DIVERGENT,
+    CONTROLLER_REASON_QUEUE_AMBIGUOUS,
+    CONTROLLER_REASON_QUEUE_UNREADABLE,
+    CONTROLLER_REASON_ROOT_CONFLICT,
+    CONTROLLER_REASON_ROOT_UNDECLARED,
+)
+
+# The exact repair each blocking reason asks a human for.  A refusal that does
+# not name its repair is not fail-closed, it is just a dead end.
+CONTROLLER_BLOCKING_REPAIRS = {
+    CONTROLLER_REASON_ROOT_CONFLICT: (
+        "export COCKPIT_QUEUE_ROOT to the queue root {declared} that "
+        "control.json declares, or create a control root for {exported}"
+    ),
+    CONTROLLER_REASON_ROOT_UNDECLARED: (
+        "declare canonical_roots.queue_root as {exported} when the mission is "
+        "created, or unset COCKPIT_QUEUE_ROOT in this shell"
+    ),
+    CONTROLLER_REASON_QUEUE_UNREADABLE: (
+        "repair the queue root {declared} with cockpit-queue before the "
+        "controller can read product-work authority from it"
+    ),
+    CONTROLLER_REASON_LEDGER_DIVERGENT: "cockpit-control replay-ledger",
+    CONTROLLER_REASON_QUEUE_AMBIGUOUS: (
+        "keep the earliest valid active queue item and transition the others "
+        "with cockpit-queue before dispatch"
+    ),
+}
+
+# How each derived-ledger classification is read by a decision, and why they are
+# not read the same way.  Architecture section 8.3 commits an event into
+# `events/` (step 4) *before* it replaces `ledger.json` (step 8), so any reader
+# outside `control.lock` can legitimately observe a journal one revision ahead of
+# a projection that is about to be rewritten.  A projection that is merely behind
+# the committed journal is therefore the ordinary consequence of a concurrent
+# writer, and sections 11 and 17 repair one by replaying the journal, never by
+# refusing to decide: the tick derives every authoritative fact from the
+# committed events themselves, so a lagging projection changes nothing it knows.
+# A projection ahead of the committed journal, one that disagrees at the very
+# same revision, one that cannot be parsed, or one that is absent is different in
+# kind: no writer following section 8.3 can produce it, so it is evidence that
+# something outside this protocol edited derived state and it refuses a decision.
+# A projection that is absent or unparseable is refused earlier still, by the
+# store validation that opens every tick; both are classified here anyway so this
+# is a complete reading of the vocabulary rather than of what happens to reach it.
+CONTROLLER_PROJECTION_DIVERGENT_REASONS = (
+    PROJECTION_REASON_AHEAD,
+    PROJECTION_REASON_CORRUPT,
+    PROJECTION_REASON_DIVERGENT,
+    PROJECTION_REASON_MISSING,
+)
+CONTROLLER_PROJECTION_BEHIND_REASONS = (PROJECTION_REASON_STALE,)
+
+# ADR-014 precedence, in rule order, with the role each source plays.  The order
+# is data rather than control flow so it can be reported verbatim and asserted
+# by a test: rules 1-4 own state, rule 5 is a rebuildable projection, rule 6 is
+# correlated evidence, and rules 7-8 are observations that never advance state.
+PRECEDENCE_AUTHORITATIVE = "authoritative"
+PRECEDENCE_DERIVED = "derived"
+PRECEDENCE_EVIDENCE = "evidence"
+PRECEDENCE_DIAGNOSTIC = "diagnostic"
+CONTROLLER_PRECEDENCE = (
+    (1, "human-decision", PRECEDENCE_AUTHORITATIVE),
+    (2, "queue-state", PRECEDENCE_AUTHORITATIVE),
+    (3, "durable-events", PRECEDENCE_AUTHORITATIVE),
+    (4, "control-journal", PRECEDENCE_AUTHORITATIVE),
+    (5, "ledger-projection", PRECEDENCE_DERIVED),
+    (6, "worker-reports", PRECEDENCE_EVIDENCE),
+    (7, "live-status", PRECEDENCE_DIAGNOSTIC),
+    (8, "pane-text", PRECEDENCE_DIAGNOSTIC),
+)
+# The rules a decision may never read.  `select_controller_action` takes only a
+# `ControllerEvidence`, which has no field for either of them, so this tuple
+# documents a structural fact rather than asking anyone to remember a rule.
+CONTROLLER_DIAGNOSTIC_RULES = (7, 8)
+
+# The product-work vocabulary `cockpit-queue` owns (ADR-010).  It is mirrored
+# here because precedence rule 2 requires the controller to *read* product state
+# it must never own; `tests/unit/cmd-overseer-tick.bats` fails if the two ever
+# drift apart, so this copy cannot silently become a second state machine.
+QUEUE_ITEMS_DIR_NAME = "items"
+QUEUE_EVENTS_NAME = "events.jsonl"
+QUEUE_ITEM_SUFFIX = ".yaml"
+QUEUE_STATE_QUEUED = "queued"
+QUEUE_STATE_BLOCKED = "blocked"
+QUEUE_ACTIVE_STATES = (
+    "delivered",
+    "e2e-related-fixing",
+    "e2e-testing-runbooks",
+    "fixing",
+    "implementing",
+    "planned",
+    "shaping",
+    "testing",
+)
+QUEUE_TERMINAL_STATES = ("cleared", "rejected")
+QUEUE_STATES = (
+    (QUEUE_STATE_QUEUED, QUEUE_STATE_BLOCKED) + QUEUE_ACTIVE_STATES + QUEUE_TERMINAL_STATES
+)
+QUEUE_PAUSED_EVENT = "queue-paused"
+QUEUE_RESUMED_EVENT = "queue-resumed"
+
+# Which worker a queue item in each product state is implementable by.  A state
+# that is absent is deliberately not dispatchable: shaping, planning, delivery,
+# and runbook execution are overseer or human work, so the controller reports
+# `queue-item-not-implementable` instead of inventing a mission for them.
+CONTROLLER_WORKER_BY_QUEUE_STATE = {
+    "implementing": "worker-dev",
+    "testing": "worker-test",
+    "fixing": "worker-fix",
+    "e2e-related-fixing": "worker-fix",
+}
+
+# How the deterministic fold treated one committed controller record.  Every
+# committed event is retained forever; these outcomes only say whether it also
+# moved the materialized controller state.
+CONTROLLER_FOLD_DISPATCHED = "dispatched"
+CONTROLLER_FOLD_OBSERVED = "observed"
+CONTROLLER_FOLD_RETAINED_UNCHANGED = "retained-unchanged-observation"
+CONTROLLER_FOLD_CONFLICT_RECORDED = "conflict-recorded"
+
+# The one action a tick may take, and what actually happened when it tried.
+CONTROLLER_ACTION_DISPATCH = "dispatch-mission"
+CONTROLLER_ACTION_OBSERVE = "record-observation"
+CONTROLLER_ACTION_NONE = "none"
+CONTROLLER_ACTIONS = (
+    CONTROLLER_ACTION_DISPATCH,
+    CONTROLLER_ACTION_OBSERVE,
+    CONTROLLER_ACTION_NONE,
+)
+CONTROLLER_TICK_DISPATCHED = "dispatched"
+CONTROLLER_TICK_RECORDED = "recorded"
+CONTROLLER_TICK_UNCHANGED = "unchanged"
+CONTROLLER_TICK_WOULD_DISPATCH = "would-dispatch"
+CONTROLLER_TICK_WOULD_RECORD = "would-record"
+
+# Live-status and pane observations, both diagnostic-only (ADR-014 rules 7-8).
+CONTROLLER_PANE_UNOBSERVED = "unobserved"
+CONTROLLER_LIVE_REACHABLE = "reachable"
+CONTROLLER_LIVE_UNREACHABLE = "unreachable"
+CONTROLLER_LIVE_UNOBSERVED = "unobserved"
+
+# Deterministic identity derivation.  Every identifier one dispatch needs is a
+# pure function of the control root, the queue item, the worker, and how many
+# dispatches this control root already recorded for that pair, so two concurrent
+# ticks reading the same committed prefix mint the *same* command rather than
+# two, and architecture section 17's "retry the same command ID" is structural.
+CONTROLLER_MISSION_DERIVATION = "cockpit-overseer/mission"
+CONTROLLER_COMMAND_DERIVATION = "cockpit-overseer/dispatch-command"
+CONTROLLER_TRACE_DERIVATION = "cockpit-overseer/mission-trace"
+CONTROLLER_TICK_ACTOR = "cockpit-overseer"
+DEFAULT_CONTROLLER_TICK_COMMAND = "cockpit-overseer tick"
+
+# The derived ledger projection every controller decision folds into.
+LEDGER_CONTROLLER_FIELD = "controller"
+LEDGER_CONTROLLER_FIELDS = (
+    "outcome",
+    "reason",
+    "state_key",
+    "queue_item_id",
+    "worker_id",
+    "mission_id",
+    "command_id",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+
+
 class ControlStoreError(RuntimeError):
     """Raised when a control-store configuration is unsafe to use."""
 
@@ -747,16 +1024,27 @@ def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _require_absolute_root(value: str, source: str) -> Path:
+# The shell variable each refusal about a root must name.  A diagnostic that
+# names the wrong variable sends an operator to repair a setting that is already
+# correct, so the boundary being checked is passed in rather than assumed.
+CONTROL_ROOT_VARIABLE = "COCKPIT_CONTROL_ROOT"
+QUEUE_ROOT_VARIABLE = "COCKPIT_QUEUE_ROOT"
+
+
+def _require_absolute_root(
+    value: str,
+    source: str,
+    variable: str = CONTROL_ROOT_VARIABLE,
+) -> Path:
     if not isinstance(value, str) or not value:
-        raise ControlStoreError(f"{source} COCKPIT_CONTROL_ROOT is empty")
+        raise ControlStoreError(f"{source} {variable} is empty")
     if "\x00" in value:
-        raise ControlStoreError(f"{source} COCKPIT_CONTROL_ROOT contains a NUL byte")
+        raise ControlStoreError(f"{source} {variable} contains a NUL byte")
 
     candidate = Path(value)
     if not candidate.is_absolute():
         raise ControlStoreError(
-            f"{source} COCKPIT_CONTROL_ROOT must be an absolute path; refusing to infer it from cwd"
+            f"{source} {variable} must be an absolute path; refusing to infer it from cwd"
         )
 
     # Lexical normalization makes the effective root explicit without resolving
@@ -764,7 +1052,7 @@ def _require_absolute_root(value: str, source: str) -> Path:
     # stable when the shell is launched from another working directory.
     normalized = Path(os.path.normpath(value))
     if not normalized.is_absolute():
-        raise ControlStoreError(f"{source} COCKPIT_CONTROL_ROOT is malformed")
+        raise ControlStoreError(f"{source} {variable} is malformed")
     return normalized
 
 
@@ -1253,6 +1541,43 @@ def validate_mission_slots(value: Any, label: str) -> Dict[str, Any]:
     return value
 
 
+def validate_controller_projection(value: Any, label: str) -> Optional[Dict[str, Any]]:
+    """Validate the one materialized controller decision the ledger carries.
+
+    A control root that has never been ticked holds an explicit `null` here
+    rather than an absent field, so "no controller has ever run" and "the
+    projection lost its controller state" are different, diagnosable facts.
+    """
+
+    if value is None:
+        return None
+    entry_label = f"{label} {LEDGER_CONTROLLER_FIELD}"
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{entry_label} must be a JSON object or null")
+    _require_closed_fields(value, LEDGER_CONTROLLER_FIELDS, entry_label)
+    outcome = _require_string(value, "outcome", entry_label)
+    if outcome not in CONTROLLER_OUTCOMES:
+        raise ControlStoreError(
+            f"{entry_label} declares unknown outcome {outcome!r}; expected one of "
+            f"{', '.join(CONTROLLER_OUTCOMES)}"
+        )
+    reason = _require_controller_reason(value, entry_label, CONTROLLER_REASONS)
+    if (reason in CONTROLLER_DISPATCH_REASONS) != (outcome == CONTROLLER_DISPATCHED):
+        raise ControlStoreError(
+            f"{entry_label} declares outcome {outcome!r} for reason {reason!r}; only a "
+            "dispatch reason is ever recorded as dispatched"
+        )
+    _require_digest(value, "state_key", entry_label)
+    _require_optional_identifier(value, "queue_item_id", entry_label)
+    _require_optional_identifier(value, "worker_id", entry_label)
+    _require_optional_uuid(value, "mission_id", entry_label)
+    _require_optional_uuid(value, "command_id", entry_label)
+    _require_positive_integer(value, "revision", entry_label)
+    _require_uuid(value, "event_id", entry_label)
+    _require_timestamp(value, "recorded_at", entry_label)
+    return value
+
+
 def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -> Dict[str, Any]:
     """Validate the root-level materialized ledger schema."""
 
@@ -1283,6 +1608,7 @@ def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -
         (LEDGER_MISSION_DIALOGS_FIELD, validate_mission_dialogs),
         (LEDGER_MISSION_CANCELLATIONS_FIELD, validate_mission_cancellations),
         (LEDGER_MISSION_SLOTS_FIELD, validate_mission_slots),
+        (LEDGER_CONTROLLER_FIELD, validate_controller_projection),
     ):
         if field not in data:
             raise ControlStoreError(f"{label} requires {field}")
@@ -1320,6 +1646,20 @@ def _require_identifier(record: Mapping[str, Any], field: str, label: str) -> st
                 "forge a record boundary in the line-oriented lifecycle payload"
             )
     return value
+
+
+def _require_optional_identifier(
+    record: Mapping[str, Any],
+    field: str,
+    label: str,
+) -> Optional[str]:
+    """Require a nullable correlation identifier without defaulting a missing one."""
+
+    if field not in record:
+        raise ControlStoreError(f"{label} requires {field}")
+    if record[field] is None:
+        return None
+    return _require_identifier(record, field, label)
 
 
 def _parsed_timestamp(value: Any, field: str, label: str) -> datetime:
@@ -2017,10 +2357,115 @@ def validate_mission_replacement(
     return data
 
 
+def _require_controller_schema_version(record: Mapping[str, Any], label: str) -> None:
+    """Require the exact reconciliation contract version this tool implements."""
+
+    version = record.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ControlStoreError(f"{label} requires integer schema_version")
+    if version > CONTROLLER_SCHEMA_VERSION:
+        raise ControlStoreError(
+            f"{label} uses unsupported future schema_version {version}; upgrade cockpit "
+            "tools before mutation"
+        )
+    if version != CONTROLLER_SCHEMA_VERSION:
+        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+
+
+def _require_controller_reason(
+    record: Mapping[str, Any],
+    label: str,
+    allowed: Sequence[str],
+) -> str:
+    """Require one reason from the closed reconciliation vocabulary."""
+
+    reason = _require_string(record, "reason", label)
+    if reason not in allowed:
+        raise ControlStoreError(
+            f"{label} declares unknown reason {reason!r}; expected one of "
+            f"{', '.join(sorted(allowed))}"
+        )
+    return reason
+
+
+def validate_controller_dispatch(
+    record: Any,
+    label: str = "controller dispatch",
+) -> Dict[str, Any]:
+    """Validate one versioned controller dispatch record, failing closed.
+
+    A dispatch is the single state-changing action a tick is allowed to take, so
+    it must be fully self-describing: which mission it creates, on which worker,
+    for which queue item, under which trace, and on the strength of which
+    reconciled evidence.  The mission brief is deliberately absent, exactly as a
+    question body is: the carrying envelope digests it and `evidence_refs` names
+    the queue item that authorized the work.
+    """
+
+    data = _require_object(record, label)
+    _require_controller_schema_version(data, label)
+    _require_record_type(data, CONTROLLER_DISPATCH_RECORD_TYPE, label)
+    _require_closed_fields(data, CONTROLLER_DISPATCH_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    _require_uuid(data, "mission_id", label)
+    _require_mission_correlation(data, label)
+    _require_controller_reason(data, label, CONTROLLER_DISPATCH_REASONS)
+    _require_digest(data, "state_key", label)
+    _require_evidence_refs(data, label, required=True)
+    _require_timestamp(data, "decided_at", label)
+    return data
+
+
+def validate_controller_observation(
+    record: Any,
+    label: str = "controller observation",
+) -> Dict[str, Any]:
+    """Validate one versioned controller observation record, failing closed.
+
+    An observation is what a tick that changed no mission state durably knows:
+    the closed outcome and reason it reconciled to, the identity that reason is
+    about, and the `state_key` digest of the exact evidence it saw.  Recording it
+    is what lets the next tick recognise the same situation and terminate
+    without investigating it a second time.
+
+    An observation carries no environment values and no prose.  Roots, panes,
+    and prompts are contributed to `state_key` as a digest only, so an immutable
+    event that is never rewritten cannot become the place a secret lives.
+    """
+
+    data = _require_object(record, label)
+    _require_controller_schema_version(data, label)
+    _require_record_type(data, CONTROLLER_OBSERVATION_RECORD_TYPE, label)
+    _require_closed_fields(data, CONTROLLER_OBSERVATION_FIELDS, label)
+
+    outcome = _require_string(data, "outcome", label)
+    if outcome not in CONTROLLER_OBSERVATION_OUTCOMES:
+        raise ControlStoreError(
+            f"{label} declares unknown outcome {outcome!r}; expected one of "
+            f"{', '.join(CONTROLLER_OBSERVATION_OUTCOMES)}"
+        )
+    reason = _require_controller_reason(data, label, CONTROLLER_OBSERVATION_REASONS)
+    if (reason in CONTROLLER_BLOCKING_REASONS) != (outcome == CONTROLLER_BLOCKED):
+        raise ControlStoreError(
+            f"{label} declares outcome {outcome!r} for reason {reason!r}; a blocking "
+            "reason is always recorded as blocked and never the other way around"
+        )
+    _require_digest(data, "state_key", label)
+    _require_optional_identifier(data, "queue_item_id", label)
+    _require_optional_identifier(data, "worker_id", label)
+    _require_optional_uuid(data, "mission_id", label)
+    _require_optional_uuid(data, "command_id", label)
+    _require_evidence_refs(data, label, required=False)
+    _require_timestamp(data, "observed_at", label)
+    return data
+
+
 MISSION_CONTROL_VALIDATORS = {
     MISSION_DIALOG_PAYLOAD_FIELD: validate_mission_dialog,
     MISSION_CANCELLATION_PAYLOAD_FIELD: validate_mission_cancellation,
     MISSION_REPLACEMENT_PAYLOAD_FIELD: validate_mission_replacement,
+    CONTROLLER_DISPATCH_PAYLOAD_FIELD: validate_controller_dispatch,
 }
 
 
@@ -2031,7 +2476,60 @@ def _mission_control_command_type(field: str, record: Mapping[str, Any]) -> str:
         return MISSION_DIALOG_COMMAND_TYPES[record["kind"]]
     if field == MISSION_CANCELLATION_PAYLOAD_FIELD:
         return COMMAND_TYPE_MISSION_CANCEL
+    if field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
+        return COMMAND_TYPE_MISSION_DISPATCH
     return COMMAND_TYPE_MISSION_REPLACE
+
+
+def event_controller_observation(
+    record: Mapping[str, Any],
+    label: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the controller observation one event declares, failing closed.
+
+    An observation and its event type are two halves of one contract, exactly as
+    a lifecycle record and its event type are: the type is always
+    `controller-observation-<outcome>` for the outcome the record declares, and
+    an observation may never share an event with a command envelope, so no
+    single committed file can be read as both a decision and a delivery.
+    """
+
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    declared = record.get("event_type")
+    declared = declared if isinstance(declared, str) else ""
+    carried = CONTROLLER_OBSERVATION_PAYLOAD_FIELD in payload
+    typed = declared.startswith(CONTROLLER_OBSERVATION_EVENT_PREFIX)
+    if not carried:
+        if typed:
+            raise ControlStoreError(
+                f"{label} declares event_type {declared!r} without its "
+                f"payload.{CONTROLLER_OBSERVATION_PAYLOAD_FIELD} record"
+            )
+        return None
+    if not typed:
+        raise ControlStoreError(
+            f"{label} carries a payload.{CONTROLLER_OBSERVATION_PAYLOAD_FIELD} record "
+            f"under event_type {declared!r}; expected "
+            f"{CONTROLLER_OBSERVATION_EVENT_PREFIX}<outcome>"
+        )
+    if COMMAND_ENVELOPE_PAYLOAD_FIELD in payload:
+        raise ControlStoreError(
+            f"{label} carries a payload.{CONTROLLER_OBSERVATION_PAYLOAD_FIELD} record "
+            "beside a command envelope; a controller observation takes no action and "
+            "delivers no command"
+        )
+    validated = validate_controller_observation(
+        payload[CONTROLLER_OBSERVATION_PAYLOAD_FIELD],
+        f"{label} payload.{CONTROLLER_OBSERVATION_PAYLOAD_FIELD}",
+    )
+    expected = f"{CONTROLLER_OBSERVATION_EVENT_PREFIX}{validated['outcome']}"
+    if declared != expected:
+        raise ControlStoreError(
+            f"{label} declares event_type {declared!r} for outcome "
+            f"{validated['outcome']!r}; expected {expected!r}"
+        )
+    return validated
 
 
 def event_mission_control(
@@ -2118,6 +2616,7 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
     event_command_envelope(data, label)
     event_command_acknowledgement(data, label)
     event_mission_control(data, label)
+    event_controller_observation(data, label)
     return data
 
 
@@ -3760,21 +4259,163 @@ def apply_mission_replacement(
     return True, MISSION_FOLD_REPLACED
 
 
+def _record_controller_decision(
+    controller: Dict[str, Any],
+    outcome: str,
+    reason: str,
+    state_key: str,
+    queue_item_id: Optional[str],
+    worker_id: Optional[str],
+    mission_id: Optional[str],
+    command_id: Optional[str],
+    event: "CommittedEvent",
+) -> None:
+    """Replace the one materialized controller decision the ledger projects.
+
+    There is exactly one such decision at a time on purpose: the controller
+    holds "what I last decided and on what evidence", never a growing history of
+    everything it ever thought.  The immutable committed events are the history.
+    """
+
+    controller.clear()
+    controller.update(
+        {
+            "outcome": outcome,
+            "reason": reason,
+            "state_key": state_key,
+            "queue_item_id": queue_item_id,
+            "worker_id": worker_id,
+            "mission_id": mission_id,
+            "command_id": command_id,
+        }
+    )
+    controller.update(_mission_event_stamp(event))
+
+
+def apply_controller_dispatch(
+    missions: Dict[str, Dict[str, Any]],
+    worker_slots: Dict[str, Dict[str, Any]],
+    controller: Dict[str, Any],
+    dispatch: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed controller dispatch into the slot and controller state.
+
+    This is where "one worker, one mission" stops being a convention.  A dispatch
+    reserves the worker's single slot for exactly one new mission ID, in the same
+    deterministic fold every other claim goes through, so a second dispatch to a
+    busy worker and a dispatch that reuses a mission ID are both refused and
+    durably recorded as conflicts no matter which surface committed them --
+    including the raw `publish-event` primitive.  The reservation becomes an
+    ordinary active mission the moment the worker emits `accepted`.
+    """
+
+    worker_id = dispatch["worker_id"]
+    mission_id = dispatch["mission_id"]
+    command_id = dispatch["command_id"]
+
+    def refuse(reason: str) -> Tuple[bool, str]:
+        entry = _mission_slot_entry(worker_slots, worker_id, event)
+        entry["conflicts"].append(
+            _mission_slot_conflict(
+                mission_id, reason, MISSION_SLOT_CONFLICT_DISPATCH, command_id, event
+            )
+        )
+        return False, MISSION_FOLD_CONFLICT_RECORDED
+
+    slot = worker_slots.get(worker_id)
+    if slot is not None and slot["state"] in MISSION_SLOT_CLAIMED_STATES:
+        if slot["mission_id"] == mission_id and slot["command_id"] == command_id:
+            # Delivery is uncertain, so the same dispatch arriving twice is a
+            # redelivery of one command rather than a second mission.  It is
+            # retained as durable evidence and re-applies nothing, exactly as an
+            # idempotent command redelivery must.
+            return False, MISSION_FOLD_RETAINED_DUPLICATE
+        return refuse(MISSION_SLOT_CONFLICT_SECOND_ACTIVE)
+    if mission_id in missions or any(
+        entry["state"] in MISSION_SLOT_CLAIMED_STATES and entry["mission_id"] == mission_id
+        for entry in worker_slots.values()
+    ):
+        return refuse(MISSION_SLOT_CONFLICT_REUSED)
+
+    entry = _mission_slot_entry(worker_slots, worker_id, event)
+    entry["mission_id"] = mission_id
+    entry["queue_item_id"] = dispatch["queue_item_id"]
+    entry["state"] = MISSION_SLOT_RESERVED
+    entry["command_id"] = command_id
+    entry["replaces"] = None
+    entry.update(_mission_event_stamp(event))
+    _record_controller_decision(
+        controller,
+        CONTROLLER_DISPATCHED,
+        dispatch["reason"],
+        dispatch["state_key"],
+        queue_item_id=dispatch["queue_item_id"],
+        worker_id=worker_id,
+        mission_id=mission_id,
+        command_id=command_id,
+        event=event,
+    )
+    return True, CONTROLLER_FOLD_DISPATCHED
+
+
+def apply_controller_observation(
+    controller: Dict[str, Any],
+    observation: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed controller observation into the controller state.
+
+    An observation that repeats the state key already recorded is retained as
+    durable audit evidence and moves nothing.  That is the whole of "a tick does
+    not investigate the same situation twice": the *fold*, not the tick, decides
+    that the situation is unchanged, so no surface can make a stalled cockpit
+    grow one event per wake forever.
+    """
+
+    if controller and controller["state_key"] == observation["state_key"]:
+        return False, CONTROLLER_FOLD_RETAINED_UNCHANGED
+    _record_controller_decision(
+        controller,
+        observation["outcome"],
+        observation["reason"],
+        observation["state_key"],
+        queue_item_id=observation["queue_item_id"],
+        worker_id=observation["worker_id"],
+        mission_id=observation["mission_id"],
+        command_id=observation["command_id"],
+        event=event,
+    )
+    return True, CONTROLLER_FOLD_OBSERVED
+
+
 @dataclass(frozen=True)
 class MissionState:
     """One deterministic replay of every mission-shaped committed event.
 
-    Worker missions, mission dialogs, cooperative cancellations, and the single
-    slot each worker holds are folded in one pass over the same committed
-    sequence, so they can never disagree about which mission is active.
+    Worker missions, mission dialogs, cooperative cancellations, the single slot
+    each worker holds, and the one decision the controller last took are folded
+    in one pass over the same committed sequence, so they can never disagree
+    about which mission is active.
     """
 
     missions: Dict[str, Dict[str, Any]]
     dialogs: Dict[str, Dict[str, Any]]
     cancellations: Dict[str, Dict[str, Any]]
     worker_slots: Dict[str, Dict[str, Any]]
+    controller: Dict[str, Any]
     lifecycle_outcomes: Dict[str, Tuple[bool, str]]
     mission_outcomes: Dict[str, Tuple[bool, str]]
+
+    @property
+    def claimed_slots(self) -> Tuple[Tuple[str, Dict[str, Any]], ...]:
+        """Return every worker slot that currently holds a mission, by worker."""
+
+        return tuple(
+            (worker_id, self.worker_slots[worker_id])
+            for worker_id in sorted(self.worker_slots)
+            if self.worker_slots[worker_id]["state"] in MISSION_SLOT_CLAIMED_STATES
+        )
 
 
 def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
@@ -3784,11 +4425,18 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
     dialogs: Dict[str, Dict[str, Any]] = {}
     cancellations: Dict[str, Dict[str, Any]] = {}
     worker_slots: Dict[str, Dict[str, Any]] = {}
+    controller: Dict[str, Any] = {}
     lifecycle_outcomes: Dict[str, Tuple[bool, str]] = {}
     mission_outcomes: Dict[str, Tuple[bool, str]] = {}
 
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        observation = event_controller_observation(event.record, label)
+        if observation is not None:
+            mission_outcomes[event.event_id] = apply_controller_observation(
+                controller, observation, event
+            )
+            continue
         lifecycle = event_worker_lifecycle(event.record, label)
         if lifecycle is not None:
             fault = _mission_slot_claim_fault(worker_slots, lifecycle)
@@ -3823,6 +4471,10 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
             mission_outcomes[event.event_id] = apply_mission_cancellation(
                 cancellations, record, event
             )
+        elif field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
+            mission_outcomes[event.event_id] = apply_controller_dispatch(
+                missions, worker_slots, controller, record, event
+            )
         else:
             mission_outcomes[event.event_id] = apply_mission_replacement(
                 missions, worker_slots, record, event
@@ -3833,6 +4485,7 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
         dialogs=dialogs,
         cancellations=cancellations,
         worker_slots=worker_slots,
+        controller=controller,
         lifecycle_outcomes=lifecycle_outcomes,
         mission_outcomes=mission_outcomes,
     )
@@ -4030,6 +4683,7 @@ def build_ledger_projection(
         LEDGER_MISSION_DIALOGS_FIELD: mission_state.dialogs,
         LEDGER_MISSION_CANCELLATIONS_FIELD: mission_state.cancellations,
         LEDGER_MISSION_SLOTS_FIELD: mission_state.worker_slots,
+        LEDGER_CONTROLLER_FIELD: dict(mission_state.controller) or None,
         "canonical_roots": {
             "control_root": roots["control_root"],
             "queue_root": roots["queue_root"],
@@ -4136,6 +4790,48 @@ def _replace_projection(
         raise ControlStoreError(f"{label} changed filesystem identity during replacement")
 
 
+def _classify_published_ledger(
+    root: Path,
+    control_id: str,
+    expected: bytes,
+) -> Tuple[Optional[int], str]:
+    """Say why the published projection does or does not equal the rebuild.
+
+    This is a pure read: it never mutates, never locks, and never trusts the
+    published bytes.  Both the locked projection and the read-only controller
+    observation classify the ledger through it, so a projection this build would
+    rebuild can never be described one way by the repair path and another way by
+    the reconciler.
+    """
+
+    ledger_path = root / LEDGER_NAME
+    try:
+        mode = ledger_path.lstat().st_mode
+    except FileNotFoundError:
+        return None, PROJECTION_REASON_MISSING
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {LEDGER_NAME}: {exc}") from None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return None, PROJECTION_REASON_CORRUPT
+    try:
+        published = ledger_path.read_bytes()
+    except OSError:
+        return None, PROJECTION_REASON_CORRUPT
+    if published == expected:
+        return json.loads(expected.decode("utf-8"))["revision"], PROJECTION_REASON_CURRENT
+    try:
+        existing = validate_ledger(json.loads(published.decode("utf-8")), control_id, root)
+    except (ControlStoreError, UnicodeDecodeError, ValueError, RecursionError):
+        return None, PROJECTION_REASON_CORRUPT
+    observed = existing["revision"]
+    rebuilt_revision = json.loads(expected.decode("utf-8"))["revision"]
+    if observed > rebuilt_revision:
+        return observed, PROJECTION_REASON_AHEAD
+    if observed < rebuilt_revision:
+        return observed, PROJECTION_REASON_STALE
+    return observed, PROJECTION_REASON_DIVERGENT
+
+
 def _ledger_projection_fault(boundary: str, projection: "ControlLedgerProjection") -> None:
     """No-op named projection hook used by deterministic protocol tests."""
 
@@ -4230,33 +4926,7 @@ class ControlLedgerProjection:
     def _classify_ledger(self, control_id: str, expected: bytes) -> Tuple[Optional[int], str]:
         """Say why the published projection does or does not equal the rebuild."""
 
-        try:
-            mode = self.ledger_path.lstat().st_mode
-        except FileNotFoundError:
-            return None, PROJECTION_REASON_MISSING
-        except OSError as exc:
-            raise ControlStoreError(f"cannot inspect {LEDGER_NAME}: {exc}") from None
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            return None, PROJECTION_REASON_CORRUPT
-        try:
-            published = self.ledger_path.read_bytes()
-        except OSError:
-            return None, PROJECTION_REASON_CORRUPT
-        if published == expected:
-            return json.loads(expected.decode("utf-8"))["revision"], PROJECTION_REASON_CURRENT
-        try:
-            existing = validate_ledger(
-                json.loads(published.decode("utf-8")), control_id, self.root
-            )
-        except (ControlStoreError, UnicodeDecodeError, ValueError, RecursionError):
-            return None, PROJECTION_REASON_CORRUPT
-        observed = existing["revision"]
-        rebuilt_revision = json.loads(expected.decode("utf-8"))["revision"]
-        if observed > rebuilt_revision:
-            return observed, PROJECTION_REASON_AHEAD
-        if observed < rebuilt_revision:
-            return observed, PROJECTION_REASON_STALE
-        return observed, PROJECTION_REASON_DIVERGENT
+        return _classify_published_ledger(self.root, control_id, expected)
 
     def _view_matches(self, expected: str) -> bool:
         """Report whether the derived compatibility view equals the rebuild."""
@@ -5106,6 +5776,7 @@ def register_command(
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
     correlated_record: Optional[Mapping[str, Any]] = None,
+    declarations: Optional[Mapping[str, Any]] = None,
 ) -> CommandRecordResult:
     """Deliver one command envelope exactly once, whatever the delivery count.
 
@@ -5161,9 +5832,17 @@ def register_command(
         event_type = f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{COMMAND_DUPLICATE}"
         payload = {COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD: acknowledgement}
 
-    if correlated_record is not None and event_type == COMMAND_REGISTERED_EVENT_TYPE:
-        payload = dict(payload)
-        payload.update({key: dict(value) for key, value in correlated_record.items()})
+    if event_type == COMMAND_REGISTERED_EVENT_TYPE:
+        if correlated_record is not None:
+            payload = dict(payload)
+            payload.update({key: dict(value) for key, value in correlated_record.items()})
+        if declarations is not None:
+            # The derived ledger's active pointers are declared by the very event
+            # that creates the mission, so `ledger.json` can never claim an active
+            # mission no committed event authorized.  A redelivery commits only a
+            # duplicate acknowledgement and therefore re-declares nothing.
+            payload = dict(payload)
+            payload.update(dict(declarations))
 
     publication = publish_control_event(
         root,
@@ -5657,6 +6336,7 @@ def register_mission_command(
     timeout_seconds: Optional[float] = None,
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
+    declarations: Optional[Mapping[str, Any]] = None,
 ) -> MissionControlResult:
     """Deliver one managed mission command with its correlated record atomically.
 
@@ -5676,6 +6356,7 @@ def register_mission_command(
         poll_seconds=poll_seconds,
         dry_run=dry_run,
         correlated_record={record_field: dict(record)},
+        declarations=declarations,
     )
     state = fold_mission_state(_committed_events_after_publication(result.publication))
     # A redelivery commits only the stored duplicate acknowledgement, so its
@@ -5858,6 +6539,1176 @@ def observe_mission_control(
             key: entry["lifecycle"]["state"] for key, entry in state.missions.items()
         },
     )
+
+
+# --- deterministic controller reconciliation (ADR-014, sections 6 and 11) ----
+
+
+@dataclass(frozen=True)
+class QueueItemObservation:
+    """One durable queue item as the controller may read it, never own it."""
+
+    item_id: str
+    state: str
+    created_at: str
+
+    @property
+    def active(self) -> bool:
+        return self.state in QUEUE_ACTIVE_STATES
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in QUEUE_TERMINAL_STATES
+
+    @property
+    def worker_id(self) -> Optional[str]:
+        """Return the worker this product state is implementable by, if any."""
+
+        return CONTROLLER_WORKER_BY_QUEUE_STATE.get(self.state)
+
+
+@dataclass(frozen=True)
+class QueueObservation:
+    """Everything precedence rule 2 says about product work at one moment.
+
+    `cockpit-queue` owns this state; the controller only reads it.  Nothing here
+    writes a queue file, appends a queue event, or repairs a queue item: a queue
+    the controller cannot read is reported as unreadable rather than corrected.
+    """
+
+    root: str
+    paused: bool
+    items: Tuple[QueueItemObservation, ...]
+
+    @property
+    def active(self) -> Tuple[QueueItemObservation, ...]:
+        return tuple(item for item in self.items if item.active)
+
+    @property
+    def queued(self) -> Tuple[QueueItemObservation, ...]:
+        return tuple(item for item in self.items if item.state == QUEUE_STATE_QUEUED)
+
+
+def _queue_item_observation(path: Path, label: str) -> QueueItemObservation:
+    """Read and validate one durable queue item, failing closed."""
+
+    record = _require_object(_load_json(path, label), label)
+    item_id = _require_identifier(record, "id", label)
+    if item_id != path.name[: -len(QUEUE_ITEM_SUFFIX)]:
+        raise ControlStoreError(f"{label} declares id {item_id}, which is not its own file name")
+    state = _require_string(record, "state", label)
+    if state not in QUEUE_STATES:
+        raise ControlStoreError(
+            f"{label} declares unknown state {state!r}; expected one of "
+            f"{', '.join(sorted(QUEUE_STATES))}"
+        )
+    return QueueItemObservation(
+        item_id=item_id,
+        state=state,
+        created_at=_require_string(record, "created_at", label),
+    )
+
+
+def _queue_paused(root: Path) -> bool:
+    """Replay the queue's own event log for the latest explicit human pause.
+
+    A pause is an explicit human stop, which ADR-014 rule 1 puts above every
+    other source, so it is read from the queue journal the human actually wrote
+    to rather than mirrored into control state that could disagree with it.
+    """
+
+    path = root / QUEUE_EVENTS_NAME
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {QUEUE_EVENTS_NAME}: {exc}") from None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise ControlStoreError(
+            f"{QUEUE_EVENTS_NAME} must be a regular file, not a symlink or directory"
+        )
+    paused = False
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError as exc:
+                    raise ControlStoreError(
+                        f"malformed {QUEUE_EVENTS_NAME}:{number}: {exc}"
+                    ) from None
+                except RecursionError:
+                    raise ControlStoreError(
+                        f"malformed {QUEUE_EVENTS_NAME}:{number}: nested too deeply to parse"
+                    ) from None
+                if not isinstance(record, dict):
+                    raise ControlStoreError(
+                        f"malformed {QUEUE_EVENTS_NAME}:{number}: not a JSON object"
+                    )
+                if record.get("type") == QUEUE_PAUSED_EVENT:
+                    paused = True
+                elif record.get("type") == QUEUE_RESUMED_EVENT:
+                    paused = False
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ControlStoreError(f"cannot read {QUEUE_EVENTS_NAME}: {exc}") from None
+    return paused
+
+
+def observe_queue(root: Path) -> QueueObservation:
+    """Read the durable product-work authority without changing one byte of it."""
+
+    root = _require_absolute_root(str(root), "declared", QUEUE_ROOT_VARIABLE)
+    _require_directory(root, QUEUE_ROOT_VARIABLE)
+    items_path = root / QUEUE_ITEMS_DIR_NAME
+    items: List[QueueItemObservation] = []
+    try:
+        mode: Optional[int] = items_path.lstat().st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {QUEUE_ITEMS_DIR_NAME}: {exc}") from None
+    if mode is not None:
+        if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+            raise ControlStoreError(
+                f"{QUEUE_ITEMS_DIR_NAME} must be a directory, not a symlink or file"
+            )
+        try:
+            entries = sorted(items_path.iterdir())
+        except OSError as exc:
+            raise ControlStoreError(f"cannot read {QUEUE_ITEMS_DIR_NAME}: {exc}") from None
+        for entry in entries:
+            if not entry.name.endswith(QUEUE_ITEM_SUFFIX):
+                continue
+            items.append(
+                _queue_item_observation(entry, f"{QUEUE_ITEMS_DIR_NAME}/{entry.name}")
+            )
+    # FIFO order is the queue's, not the controller's: creation order first, then
+    # the item identifier, exactly as `cockpit-queue` itself enumerates items.
+    items.sort(key=lambda item: (item.created_at, item.item_id))
+    return QueueObservation(root=str(root), paused=_queue_paused(root), items=tuple(items))
+
+
+@dataclass(frozen=True)
+class ControllerDiagnostic:
+    """One worker's ADR-014 rule 7 and rule 8 observations, diagnostic-only.
+
+    Live protocol reachability and pane text are reported so an operator can see
+    what the controller saw, and are deliberately absent from
+    `ControllerEvidence`: `select_controller_action` has no parameter that could
+    carry them, so no pane can advance authoritative state by construction
+    rather than by anyone remembering the rule.
+    """
+
+    worker_id: str
+    live_status: str
+    pane_status: str
+
+    @staticmethod
+    def build(worker_id: str, live_status: str, pane_status: str) -> "ControllerDiagnostic":
+        """Validate one diagnostic before it is rendered into a payload line."""
+
+        label = "controller diagnostic"
+        return ControllerDiagnostic(
+            worker_id=_require_identifier({"worker_id": worker_id}, "worker_id", label),
+            live_status=_require_identifier({"live_status": live_status}, "live_status", label),
+            pane_status=_require_identifier({"pane_status": pane_status}, "pane_status", label),
+        )
+
+
+@dataclass(frozen=True)
+class ControllerEvidence:
+    """Exactly the ADR-014 rule 1-6 sources, and deliberately nothing else.
+
+    Rules 7 and 8 -- live protocol observation and raw pane text -- have no
+    field here.  That absence is the enforcement: the only function allowed to
+    choose an action takes this record and nothing else, so pane text cannot
+    reach a decision even if a future caller wanted it to.
+    """
+
+    control_root: str
+    control_id: str
+    journal_revision: int
+    ledger_revision: Optional[int]
+    ledger_reason: str
+    declared_queue_root: Optional[str]
+    exported_queue_root: Optional[str]
+    queue_root_fault: Optional[str]
+    queue: Optional[QueueObservation]
+    state: MissionState
+    dispatched_pairs: Tuple[Tuple[str, str], ...]
+    correlated_records: int
+    uncorrelated_records: int
+    as_of: str
+
+    @property
+    def ledger_divergent(self) -> bool:
+        """True only for a projection no section 8.3 writer could have left.
+
+        A projection that is simply behind the committed journal is excluded
+        here on purpose: it is what a reader sees inside the window between a
+        committed event and its replaced projection, and it is what a writer
+        interrupted in that window leaves behind.  Both are repaired by the next
+        replay and neither changes one fact the decision below is derived from.
+        """
+
+        return self.ledger_reason in CONTROLLER_PROJECTION_DIVERGENT_REASONS
+
+    @property
+    def controller(self) -> Optional[Dict[str, Any]]:
+        """Return the one decision a previous tick recorded, if there was one."""
+
+        return dict(self.state.controller) or None
+
+    def dispatch_attempt(self, queue_item_id: str, worker_id: str) -> int:
+        """Return which dispatch of this queue item to this worker comes next."""
+
+        return 1 + sum(1 for pair in self.dispatched_pairs if pair == (queue_item_id, worker_id))
+
+
+@dataclass(frozen=True)
+class ControllerAction:
+    """The at most one action a tick selected, and the evidence key behind it.
+
+    There is one action, never a list.  A tick that wants to do two things
+    cannot express that here, which is why "at most one state-changing action"
+    survives every later edit to the decision ladder.
+    """
+
+    kind: str
+    outcome: str
+    reason: str
+    state_key: str
+    queue_item_id: Optional[str] = None
+    worker_id: Optional[str] = None
+    mission_id: Optional[str] = None
+    command_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    payload_digest: Optional[str] = None
+    evidence_refs: Tuple[str, ...] = ()
+
+    @property
+    def blocking(self) -> bool:
+        return self.reason in CONTROLLER_BLOCKING_REASONS
+
+
+def controller_state_key(fields: Mapping[str, Any]) -> str:
+    """Digest the exact reconciled evidence one decision was taken on.
+
+    The digest, not the evidence, is what a committed event carries.  That keeps
+    configured roots, environment values, and pane content out of an immutable
+    record that is never rewritten, while still letting the next tick tell "the
+    same situation" from "a new one" byte-exactly.
+    """
+
+    return command_payload_digest(dict(fields), "controller state")
+
+
+def _controller_derived_uuid(control_id: str, derivation: str, *parts: str) -> str:
+    """Derive one stable identifier from the control root and explicit parts."""
+
+    try:
+        namespace = UUID(control_id)
+    except (ValueError, AttributeError):
+        raise ControlStoreError(f"{CONTROL_METADATA_NAME} requires UUID control_id") from None
+    return str(uuid5(namespace, "/".join((derivation,) + tuple(parts))))
+
+
+def _controller_observation_action(
+    evidence: ControllerEvidence,
+    reason: str,
+    fields: Mapping[str, Any],
+    queue_item_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    command_id: Optional[str] = None,
+    evidence_refs: Tuple[str, ...] = (),
+) -> ControllerAction:
+    """Build the observation a tick records, or nothing at all if it is old news.
+
+    Recording an observation is how a no-action tick terminates with durable
+    state instead of silence.  Recording it *again* would be exactly the
+    repeated investigation AC3 forbids, so an observation whose state key the
+    controller already holds collapses to `none` here, in the deterministic
+    path, and is refused a second time by the fold as well.
+    """
+
+    outcome = CONTROLLER_BLOCKED if reason in CONTROLLER_BLOCKING_REASONS else CONTROLLER_OBSERVED
+    state_key = controller_state_key(dict(fields, reason=reason))
+    recorded = evidence.controller
+    kind = CONTROLLER_ACTION_OBSERVE
+    if recorded is not None and recorded["state_key"] == state_key:
+        kind = CONTROLLER_ACTION_NONE
+    return ControllerAction(
+        kind=kind,
+        outcome=outcome,
+        reason=reason,
+        state_key=state_key,
+        queue_item_id=queue_item_id,
+        worker_id=worker_id,
+        mission_id=mission_id,
+        command_id=command_id,
+        evidence_refs=evidence_refs,
+    )
+
+
+def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
+    """Choose the at most one action ADR-014 precedence allows, and no more.
+
+    The ladder is read top to bottom in precedence order and returns at the
+    first source that answers:
+
+    * root agreement is a precondition, because without agreeing roots there is
+      no product-work authority to consult at all;
+    * a divergent derived ledger blocks rather than being trusted -- rule 5 is a
+      rebuildable projection, so a projection no writer could have produced is
+      repaired explicitly and never quietly obeyed, while a projection that is
+      merely behind the committed journal is the published window of a
+      concurrent write and is left for the next writer to replace;
+    * rule 1, an explicit human stop, outranks everything the queue and the
+      workers say;
+    * rule 2, `cockpit-queue`, decides what product work exists and what state
+      it is in; the controller never invents or reopens a queue state;
+    * rules 3 and 4, the durable lifecycle, command, and slot evidence replayed
+      from committed events, decide whether a worker is already carrying work.
+
+    Rules 7 and 8 are unreachable from here: this function cannot see them.
+    """
+
+    if evidence.queue_root_fault is not None:
+        fault = evidence.queue_root_fault
+        return _controller_observation_action(
+            evidence,
+            fault,
+            {
+                "declared_queue_root": evidence.declared_queue_root,
+                "exported_queue_root": evidence.exported_queue_root,
+            },
+        )
+
+    if evidence.ledger_divergent:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_LEDGER_DIVERGENT,
+            {
+                "ledger_reason": evidence.ledger_reason,
+                "journal_revision": evidence.journal_revision,
+                "ledger_revision": evidence.ledger_revision,
+            },
+        )
+
+    queue = evidence.queue
+    if queue is None:
+        # A tick that cannot read product work always carries the root fault
+        # answered above, so this is the structural half of the same rule: no
+        # evidence without product-work authority can reach a dispatch, however
+        # the record reached this function.
+        return _controller_observation_action(
+            evidence, CONTROLLER_REASON_NO_ROOT, {"control_id": evidence.control_id}
+        )
+
+    if queue.paused:
+        return _controller_observation_action(
+            evidence, CONTROLLER_REASON_QUEUE_PAUSED, {"queue_root": queue.root}
+        )
+
+    active = queue.active
+    if not active:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_QUEUE_EMPTY,
+            {"queue_root": queue.root, "queued": len(queue.queued)},
+        )
+    if len(active) > 1:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_QUEUE_AMBIGUOUS,
+            {"active_items": [item.item_id for item in active]},
+            evidence_refs=tuple(f"queue:{item.item_id}" for item in active),
+        )
+
+    item = active[0]
+    references = (f"queue:{item.item_id}",)
+    worker_id = item.worker_id
+    if worker_id is None:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_NOT_IMPLEMENTABLE,
+            {"queue_item_id": item.item_id, "queue_item_state": item.state},
+            queue_item_id=item.item_id,
+            evidence_refs=references,
+        )
+
+    for holder, slot in evidence.state.claimed_slots:
+        if slot["queue_item_id"] == item.item_id:
+            return _controller_observation_action(
+                evidence,
+                CONTROLLER_REASON_MISSION_IN_PROGRESS,
+                {
+                    "queue_item_id": item.item_id,
+                    "queue_item_state": item.state,
+                    "worker_id": holder,
+                    "mission_id": slot["mission_id"],
+                    "slot_state": slot["state"],
+                },
+                queue_item_id=item.item_id,
+                worker_id=holder,
+                mission_id=slot["mission_id"],
+                command_id=slot["command_id"],
+                evidence_refs=references,
+            )
+
+    busy = evidence.state.worker_slots.get(worker_id)
+    if busy is not None and busy["state"] in MISSION_SLOT_CLAIMED_STATES:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_WORKER_BUSY,
+            {
+                "queue_item_id": item.item_id,
+                "worker_id": worker_id,
+                "mission_id": busy["mission_id"],
+                "held_queue_item_id": busy["queue_item_id"],
+            },
+            queue_item_id=item.item_id,
+            worker_id=worker_id,
+            mission_id=busy["mission_id"],
+            evidence_refs=references,
+        )
+
+    attempt = evidence.dispatch_attempt(item.item_id, worker_id)
+    mission_id = _controller_derived_uuid(
+        evidence.control_id,
+        CONTROLLER_MISSION_DERIVATION,
+        item.item_id,
+        worker_id,
+        str(attempt),
+    )
+    command_id = _controller_derived_uuid(
+        evidence.control_id, CONTROLLER_COMMAND_DERIVATION, mission_id
+    )
+    trace_id = _controller_derived_uuid(
+        evidence.control_id, CONTROLLER_TRACE_DERIVATION, mission_id
+    )
+    return ControllerAction(
+        kind=CONTROLLER_ACTION_DISPATCH,
+        outcome=CONTROLLER_DISPATCHED,
+        reason=CONTROLLER_REASON_IMPLEMENTABLE,
+        state_key=controller_state_key(
+            {
+                "reason": CONTROLLER_REASON_IMPLEMENTABLE,
+                "queue_item_id": item.item_id,
+                "queue_item_state": item.state,
+                "worker_id": worker_id,
+                "mission_id": mission_id,
+            }
+        ),
+        queue_item_id=item.item_id,
+        worker_id=worker_id,
+        mission_id=mission_id,
+        command_id=command_id,
+        trace_id=trace_id,
+        payload_digest=command_payload_digest(
+            {
+                "command_type": COMMAND_TYPE_MISSION_DISPATCH,
+                "mission_id": mission_id,
+                "queue_item_id": item.item_id,
+                "queue_item_state": item.state,
+                "trace_id": trace_id,
+                "worker_id": worker_id,
+            },
+            "controller dispatch payload",
+        ),
+        evidence_refs=references,
+    )
+
+
+def build_controller_dispatch(
+    command_id: str,
+    mission_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    trace_id: str,
+    reason: str,
+    state_key: str,
+    parent_trace_id: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    decided_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete controller dispatch and validate it before use."""
+
+    record = {
+        "schema_version": CONTROLLER_SCHEMA_VERSION,
+        "record_type": CONTROLLER_DISPATCH_RECORD_TYPE,
+        "command_id": command_id,
+        "mission_id": mission_id,
+        "worker_id": worker_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "reason": reason,
+        "state_key": state_key,
+        "evidence_refs": list(evidence_refs),
+        "decided_at": decided_at if decided_at is not None else utc_timestamp(),
+    }
+    return validate_controller_dispatch(record)
+
+
+def build_controller_observation(
+    outcome: str,
+    reason: str,
+    state_key: str,
+    queue_item_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    command_id: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    observed_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete controller observation and validate it before use."""
+
+    record = {
+        "schema_version": CONTROLLER_SCHEMA_VERSION,
+        "record_type": CONTROLLER_OBSERVATION_RECORD_TYPE,
+        "outcome": outcome,
+        "reason": reason,
+        "state_key": state_key,
+        "queue_item_id": queue_item_id,
+        "worker_id": worker_id,
+        "mission_id": mission_id,
+        "command_id": command_id,
+        "evidence_refs": list(evidence_refs),
+        "observed_at": observed_at if observed_at is not None else utc_timestamp(),
+    }
+    return validate_controller_observation(record)
+
+
+@dataclass(frozen=True)
+class ControllerTickResult:
+    """Everything one tick reconciled, decided, and durably recorded."""
+
+    root: Path
+    outcome: str
+    action: ControllerAction
+    evidence: ControllerEvidence
+    diagnostics: Tuple[ControllerDiagnostic, ...]
+    applied: bool
+    fold_outcome: str
+    controller: Optional[Dict[str, Any]]
+    publication: Optional[EventPublicationResult]
+    command: Optional[CommandRecordResult]
+    conflict: Optional[Dict[str, Any]]
+    queue_fault: Optional[str]
+    dry_run: bool
+
+    @property
+    def blocked(self) -> bool:
+        return self.action.outcome == CONTROLLER_BLOCKED
+
+    @property
+    def dispatched(self) -> bool:
+        return self.outcome == CONTROLLER_TICK_DISPATCHED
+
+    @property
+    def committed_events(self) -> int:
+        """Report how many events this tick actually committed: never above one."""
+
+        if self.publication is None or not self.publication.committed:
+            return 0
+        return 1
+
+
+def _controller_dispatched_pairs(
+    events: Sequence[CommittedEvent] = (),
+) -> Tuple[Tuple[str, str], ...]:
+    """List every committed dispatch as the (queue item, worker) pair it named.
+
+    The next mission identifier is derived from how many of these already exist,
+    so two concurrent ticks reading the same committed prefix mint one command
+    rather than two, and a queue item that is legitimately dispatched again
+    after a terminal mission gets a new identity instead of a reuse conflict.
+    """
+
+    pairs: List[Tuple[str, str]] = []
+    for event in events:
+        field, record = event_mission_control(
+            event.record, f"{EVENTS_DIR_NAME}/{event.path.name}"
+        )
+        if field == CONTROLLER_DISPATCH_PAYLOAD_FIELD and record is not None:
+            pairs.append((record["queue_item_id"], record["worker_id"]))
+    return tuple(pairs)
+
+
+def _correlation_counts(state: MissionState) -> Tuple[int, int]:
+    """Count durable records that correlate with a mission, and those that do not.
+
+    ADR-014 rule 6 admits a worker report as evidence only when it matches the
+    mission it claims.  The same test is what the committed fold already applies
+    to every lifecycle event and every managed record, so this reports the fold's
+    own answer rather than inventing a second notion of "matching".
+    """
+
+    correlated = 0
+    uncorrelated = 0
+    for outcomes in (state.lifecycle_outcomes, state.mission_outcomes):
+        for applied, _outcome in outcomes.values():
+            if applied:
+                correlated += 1
+            else:
+                uncorrelated += 1
+    return correlated, uncorrelated
+
+
+@dataclass(frozen=True)
+class ControllerJournalObservation:
+    """One reading of the committed journal and the projection derived from it.
+
+    The four values belong together: the ledger classification only means
+    anything against the exact replay it was compared with, so they are read and
+    carried as a single observation rather than as four independent reads.
+    """
+
+    metadata: Dict[str, Any]
+    history: EventHistory
+    ledger_revision: Optional[int]
+    ledger_reason: str
+
+    @property
+    def settled(self) -> bool:
+        """True when the projection equals the rebuild of this exact replay."""
+
+        return self.ledger_reason == PROJECTION_REASON_CURRENT
+
+
+class ControllerTick:
+    """Reconcile durable evidence, take at most one action, and terminate.
+
+    The bounded loop of architecture section 11 runs exactly once per invocation:
+    validate the control and queue roots, replay the committed journal and check
+    the derived ledger against it, read product-work and worker state, apply
+    ADR-014 precedence, choose at most one state-changing action, persist it, and
+    exit.  There is no retry, no polling, and no second pass, so a tick that can
+    make no progress terminates with a recorded observation instead of looking
+    again.
+
+    The lease acquisition and release that section 11 also lists are deliberately
+    absent: they are wake-model concerns, and this class is shaped so a lease can
+    wrap `run()` without changing how a decision is reached.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        diagnostics: Sequence[ControllerDiagnostic] = (),
+        as_of: Optional[str] = None,
+        environ: Optional[Mapping[str, str]] = None,
+        command: str = DEFAULT_CONTROLLER_TICK_COMMAND,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+        dry_run: bool = False,
+    ) -> None:
+        self.root = _require_absolute_root(str(root), "configured")
+        self.diagnostics = tuple(diagnostics)
+        for diagnostic in self.diagnostics:
+            if not isinstance(diagnostic, ControllerDiagnostic):
+                raise ControlStoreError(
+                    "controller diagnostics must be ControllerDiagnostic records"
+                )
+        self.as_of = (
+            _require_timestamp({"as_of": as_of}, "as_of", "controller tick")
+            if as_of is not None
+            else utc_timestamp()
+        )
+        self.environ = os.environ if environ is None else environ
+        self.command = command.strip() if isinstance(command, str) else ""
+        if not self.command:
+            raise ControlStoreError("a controller tick requires a non-empty command")
+        self.timeout_seconds = timeout_seconds
+        self.poll_seconds = poll_seconds
+        self.dry_run = bool(dry_run)
+        self.queue_fault: Optional[str] = None
+        self._acted = False
+
+    def _resolved_queue_root(
+        self,
+        metadata: Mapping[str, Any],
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Agree the one queue root, or name exactly how the two roots disagree.
+
+        `control.json` declares the queue boundary the mission was created with
+        and the shell exports the one this process would actually read.  When
+        they name different cockpits there is no safe reading of product work at
+        all, so dispatch is blocked instead of one of them being preferred.
+        """
+
+        declared = metadata["canonical_roots"]["queue_root"]
+        exported = self.environ.get(QUEUE_ROOT_VARIABLE)
+        if exported is not None:
+            exported = str(_require_absolute_root(exported, "shell", QUEUE_ROOT_VARIABLE))
+        if declared is None:
+            if exported is None:
+                return None, None, CONTROLLER_REASON_NO_ROOT
+            return declared, exported, CONTROLLER_REASON_ROOT_UNDECLARED
+        if exported is not None and exported != declared:
+            return declared, exported, CONTROLLER_REASON_ROOT_CONFLICT
+        return declared, exported, None
+
+    def _observed_journal(self) -> ControllerJournalObservation:
+        """Replay the committed events once and classify the published ledger."""
+
+        metadata, history = inspect_control_events(self.root)
+        rebuilt = build_ledger_projection(metadata, history.events)
+        ledger_revision, ledger_reason = _classify_published_ledger(
+            self.root, metadata["control_id"], _serialized_record(rebuilt).encode("utf-8")
+        )
+        return ControllerJournalObservation(
+            metadata=metadata,
+            history=history,
+            ledger_revision=ledger_revision,
+            ledger_reason=ledger_reason,
+        )
+
+    def _settled_journal(self) -> ControllerJournalObservation:
+        """Read the journal and its projection as one settled observation.
+
+        A reader holding nothing can land inside the window architecture section
+        8.3 opens between step 4, where the event becomes committed authority,
+        and step 8, where the projection derived from it is replaced.  Inside
+        that window the store is entirely healthy and the two disagree anyway, so
+        a lock-free reading that is not settled says nothing about the store: it
+        may equally be a concurrent writer or a hand-edited ledger.
+
+        One reading is therefore taken again while holding `control.lock`, where
+        no writer can be part-way through the sequence and the answer is a fact
+        about the store rather than about this process's timing.  The lock is
+        taken only for the reading that was unsettled, it commits nothing, and it
+        is released before any action is chosen, so a tick that finds a healthy
+        store still reads it without ever excluding a writer.
+        """
+
+        observation = self._observed_journal()
+        if observation.settled:
+            return observation
+        with PortableControlLock(
+            self.root,
+            self.command,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        ):
+            return self._observed_journal()
+
+    def _gathered_evidence(self) -> ControllerEvidence:
+        """Perform steps 1, 3, and 4 of the bounded loop, mutating nothing."""
+
+        # Step 1: the control root must be a complete, current, valid store
+        # before any of its content is treated as authority.
+        validate_control_store(self.root)
+        # Step 3: committed events are replayed, and the derived ledger is
+        # checked against that replay rather than being read as authority.
+        observation = self._settled_journal()
+        metadata = observation.metadata
+        history = observation.history
+        ledger_revision = observation.ledger_revision
+        ledger_reason = observation.ledger_reason
+        declared, exported, fault = self._resolved_queue_root(metadata)
+
+        # Step 4: read product-work authority and worker state.
+        queue: Optional[QueueObservation] = None
+        if fault is None and declared is not None:
+            try:
+                queue = observe_queue(Path(declared))
+            except ControlStoreError as exc:
+                # A queue this controller cannot read is reported, never
+                # repaired: `cockpit-queue` owns every byte under that root.
+                self.queue_fault = str(exc)
+                fault = CONTROLLER_REASON_QUEUE_UNREADABLE
+        state = fold_mission_state(history.events)
+        correlated, uncorrelated = _correlation_counts(state)
+        return ControllerEvidence(
+            control_root=str(self.root),
+            control_id=metadata["control_id"],
+            journal_revision=history.latest_revision,
+            ledger_revision=ledger_revision,
+            ledger_reason=ledger_reason,
+            declared_queue_root=declared,
+            exported_queue_root=exported,
+            queue_root_fault=fault,
+            queue=queue,
+            state=state,
+            dispatched_pairs=_controller_dispatched_pairs(history.events),
+            correlated_records=correlated,
+            uncorrelated_records=uncorrelated,
+            as_of=self.as_of,
+        )
+
+    def _dispatch(
+        self,
+        action: ControllerAction,
+        evidence: ControllerEvidence,
+    ) -> ControllerTickResult:
+        """Persist the one dispatch command this tick selected, exactly once."""
+
+        metadata = validate_root_metadata(
+            _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), self.root
+        )
+        roots = metadata["canonical_roots"]
+        envelope = build_command_envelope(
+            command_id=str(action.command_id),
+            command_type=COMMAND_TYPE_MISSION_DISPATCH,
+            mission_id=str(action.mission_id),
+            queue_item_id=str(action.queue_item_id),
+            target_kind=COMMAND_TARGET_WORKER,
+            target_id=str(action.worker_id),
+            trace_id=str(action.trace_id),
+            payload_digest=str(action.payload_digest),
+            control_root=str(self.root),
+            queue_root=roots["queue_root"],
+            planning_root=roots["planning_root"],
+            implementation_roots=tuple(roots["implementation_roots"]),
+            created_at=self.as_of,
+        )
+        record = build_controller_dispatch(
+            command_id=str(action.command_id),
+            mission_id=str(action.mission_id),
+            worker_id=str(action.worker_id),
+            queue_item_id=str(action.queue_item_id),
+            trace_id=str(action.trace_id),
+            reason=action.reason,
+            state_key=action.state_key,
+            evidence_refs=action.evidence_refs,
+            decided_at=self.as_of,
+        )
+        result = register_mission_command(
+            self.root,
+            envelope,
+            CONTROLLER_DISPATCH_PAYLOAD_FIELD,
+            record,
+            actor=CONTROLLER_TICK_ACTOR,
+            command=self.command,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+            dry_run=self.dry_run,
+            declarations={
+                "active_queue_item_id": action.queue_item_id,
+                "active_mission_id": action.mission_id,
+            },
+        )
+        outcome = CONTROLLER_TICK_WOULD_DISPATCH if self.dry_run else CONTROLLER_TICK_DISPATCHED
+        if not result.applied:
+            # The command is durably committed either way; only the fold decides
+            # whether it also claimed the worker's single mission slot.
+            outcome = CONTROLLER_TICK_UNCHANGED
+        return ControllerTickResult(
+            root=self.root,
+            outcome=outcome,
+            action=action,
+            evidence=evidence,
+            diagnostics=self.diagnostics,
+            applied=result.applied,
+            fold_outcome=result.outcome,
+            controller=dict(result.state.controller) or None,
+            publication=result.command.publication,
+            command=result.command,
+            conflict=result.recorded_conflict,
+            queue_fault=self.queue_fault,
+            dry_run=self.dry_run,
+        )
+
+    def _observe(
+        self,
+        action: ControllerAction,
+        evidence: ControllerEvidence,
+    ) -> ControllerTickResult:
+        """Persist the observation or escalation state this tick reconciled to."""
+
+        record = build_controller_observation(
+            outcome=action.outcome,
+            reason=action.reason,
+            state_key=action.state_key,
+            queue_item_id=action.queue_item_id,
+            worker_id=action.worker_id,
+            mission_id=action.mission_id,
+            command_id=action.command_id,
+            evidence_refs=action.evidence_refs,
+            observed_at=self.as_of,
+        )
+        publication = publish_control_event(
+            self.root,
+            f"{CONTROLLER_OBSERVATION_EVENT_PREFIX}{action.outcome}",
+            actor=CONTROLLER_TICK_ACTOR,
+            payload={CONTROLLER_OBSERVATION_PAYLOAD_FIELD: record},
+            command=self.command,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+            dry_run=self.dry_run,
+        )
+        state = fold_mission_state(_committed_events_after_publication(publication))
+        applied, fold_outcome = state.mission_outcomes.get(
+            publication.event_id, (False, CONTROLLER_FOLD_RETAINED_UNCHANGED)
+        )
+        outcome = CONTROLLER_TICK_WOULD_RECORD if self.dry_run else CONTROLLER_TICK_RECORDED
+        if not applied:
+            outcome = CONTROLLER_TICK_UNCHANGED
+        return ControllerTickResult(
+            root=self.root,
+            outcome=outcome,
+            action=action,
+            evidence=evidence,
+            diagnostics=self.diagnostics,
+            applied=applied,
+            fold_outcome=fold_outcome,
+            controller=dict(state.controller) or None,
+            publication=publication,
+            command=None,
+            conflict=None,
+            queue_fault=self.queue_fault,
+            dry_run=self.dry_run,
+        )
+
+    def _commit(
+        self,
+        action: ControllerAction,
+        evidence: ControllerEvidence,
+    ) -> ControllerTickResult:
+        """Perform the at most one action a tick may take, and refuse a second.
+
+        This is the only place in the module that can turn a controller decision
+        into a committed event, and it can run once per tick.  A second call --
+        from a future edit, an extra branch, or any other surface reaching in --
+        is refused before it can publish anything.
+        """
+
+        if self._acted:
+            raise ControlStoreError(
+                "a controller tick takes at most one state-changing action; this tick "
+                "already acted"
+            )
+        self._acted = True
+        if action.kind == CONTROLLER_ACTION_DISPATCH:
+            return self._dispatch(action, evidence)
+        if action.kind == CONTROLLER_ACTION_OBSERVE:
+            return self._observe(action, evidence)
+        return ControllerTickResult(
+            root=self.root,
+            outcome=CONTROLLER_TICK_UNCHANGED,
+            action=action,
+            evidence=evidence,
+            diagnostics=self.diagnostics,
+            applied=False,
+            fold_outcome=CONTROLLER_FOLD_RETAINED_UNCHANGED,
+            controller=evidence.controller,
+            publication=None,
+            command=None,
+            conflict=None,
+            queue_fault=self.queue_fault,
+            dry_run=self.dry_run,
+        )
+
+    def run(self) -> ControllerTickResult:
+        """Run the bounded loop once and exit, whatever it found."""
+
+        evidence = self._gathered_evidence()
+        return self._commit(select_controller_action(evidence), evidence)
+
+
+def controller_tick(
+    root: Path,
+    diagnostics: Sequence[ControllerDiagnostic] = (),
+    as_of: Optional[str] = None,
+    environ: Optional[Mapping[str, str]] = None,
+    command: str = DEFAULT_CONTROLLER_TICK_COMMAND,
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> ControllerTickResult:
+    """Run one deterministic controller tick over one explicit control root."""
+
+    return ControllerTick(
+        root,
+        diagnostics=diagnostics,
+        as_of=as_of,
+        environ=environ,
+        command=command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+        dry_run=dry_run,
+    ).run()
+
+
+def _precedence_verdicts(result: ControllerTickResult) -> Dict[int, str]:
+    """Render one closed-vocabulary verdict for each ADR-014 precedence rule.
+
+    Every value is a validated identifier, an integer, a closed token, or `-`.
+    Nothing an operator, a worker, or a pane wrote is rendered verbatim, so a
+    verdict line cannot be forged into an extra line or an extra field.
+    """
+
+    evidence = result.evidence
+    queue = evidence.queue
+    slots = evidence.state.claimed_slots
+    only_slot = slots[0] if len(slots) == 1 else None
+    if queue is None:
+        human = f"queue-pause {CONTROLLER_PANE_UNOBSERVED}"
+        product = f"queue {CONTROLLER_PANE_UNOBSERVED}"
+    else:
+        active = queue.active
+        only_item = active[0] if len(active) == 1 else None
+        human = f"queue-pause {'yes' if queue.paused else 'no'}"
+        product = (
+            f"items {len(queue.items)} active {len(active)} queued {len(queue.queued)} "
+            f"item {only_item.item_id if only_item else '-'} "
+            f"state {only_item.state if only_item else '-'}"
+        )
+    return {
+        1: human,
+        2: product,
+        3: (
+            f"claimed-slots {len(slots)} "
+            f"worker {only_slot[0] if only_slot else '-'} "
+            f"mission {only_slot[1]['mission_id'] if only_slot else '-'} "
+            f"slot-state {only_slot[1]['state'] if only_slot else '-'}"
+        ),
+        4: f"revision {evidence.journal_revision}",
+        5: (
+            f"revision "
+            f"{evidence.ledger_revision if evidence.ledger_revision is not None else '-'} "
+            f"{evidence.ledger_reason}"
+        ),
+        6: (
+            f"correlated {evidence.correlated_records} "
+            f"uncorrelated {evidence.uncorrelated_records}"
+        ),
+    }
+
+
+def controller_precedence_lines(result: ControllerTickResult) -> List[str]:
+    """Render the ADR-014 ladder the tick applied, rule by rule, in order.
+
+    Rules 7 and 8 are printed with `advances-state no` on every line.  They are
+    reported because an operator needs to see what the controller saw; they are
+    marked because nothing they say ever changed what it did.
+    """
+
+    verdicts = _precedence_verdicts(result)
+    lines: List[str] = []
+    for rule, name, role in CONTROLLER_PRECEDENCE:
+        if rule in CONTROLLER_DIAGNOSTIC_RULES:
+            continue
+        lines.append(f"precedence {rule} {name} {role} {verdicts[rule]}")
+    for rule, name, role in CONTROLLER_PRECEDENCE:
+        if rule not in CONTROLLER_DIAGNOSTIC_RULES:
+            continue
+        if not result.diagnostics:
+            lines.append(
+                f"precedence {rule} {name} {role} - {CONTROLLER_PANE_UNOBSERVED} "
+                "advances-state no"
+            )
+            continue
+        for diagnostic in result.diagnostics:
+            observed = diagnostic.live_status if rule == 7 else diagnostic.pane_status
+            lines.append(
+                f"precedence {rule} {name} {role} {diagnostic.worker_id} {observed} "
+                "advances-state no"
+            )
+    return lines
+
+
+def controller_tick_lines(result: ControllerTickResult) -> List[str]:
+    """Render the decision, its evidence ladder, and what was persisted."""
+
+    action = result.action
+    lines = [
+        f"tick {result.outcome} action {action.kind} outcome {action.outcome} "
+        f"reason {action.reason} state-key {action.state_key} "
+        f"journal-revision {result.evidence.journal_revision} "
+        f"events-committed {result.committed_events} as-of {result.evidence.as_of}"
+    ]
+    lines.extend(controller_precedence_lines(result))
+    if action.kind == CONTROLLER_ACTION_DISPATCH:
+        lines.append(
+            f"dispatch command {action.command_id} worker {action.worker_id} "
+            f"mission {action.mission_id} queue-item {action.queue_item_id} "
+            f"trace {action.trace_id} digest {action.payload_digest}"
+        )
+    controller = result.controller
+    if controller is not None:
+        lines.append(
+            f"controller outcome {controller['outcome']} reason {controller['reason']} "
+            f"state-key {controller['state_key']} "
+            f"queue-item {controller['queue_item_id'] or '-'} "
+            f"worker {controller['worker_id'] or '-'} "
+            f"mission {controller['mission_id'] or '-'} "
+            f"command {controller['command_id'] or '-'} "
+            f"revision {controller['revision']} at {controller['recorded_at']}"
+        )
+    if result.conflict is not None:
+        lines.append(_mission_conflict_line(str(action.worker_id), result.conflict))
+    return lines
+
+
+def controller_blocking_repair(result: ControllerTickResult) -> str:
+    """Return the exact repair the operator must perform to unblock this tick."""
+
+    evidence = result.evidence
+    template = CONTROLLER_BLOCKING_REPAIRS.get(result.action.reason, PREFLIGHT_COMMAND)
+    return template.format(
+        declared=evidence.declared_queue_root or "-",
+        exported=evidence.exported_queue_root or "-",
+    )
+
+
+def report_controller_tick(
+    result: ControllerTickResult,
+    prefix: str = CONTROLLER_TICK_ACTOR,
+) -> int:
+    """Print the tick payload on stdout and any refusal on stderr, then exit.
+
+    A tick that decided nothing new is a success: it terminated cleanly with
+    durable state, which is exactly what a recurrent wake must do.  A blocked
+    tick is a refusal to guess, so it names the exact repair and exits non-zero.
+    """
+
+    verb = "would take" if result.dry_run else "took"
+    print(
+        f"{prefix}: tick {verb} action {result.action.kind} "
+        f"({result.action.outcome}/{result.action.reason}) in {result.root}"
+    )
+    for line in controller_tick_lines(result):
+        print(line)
+    if result.queue_fault is not None:
+        print(
+            f"{prefix}: the declared queue root cannot be read: {result.queue_fault}",
+            file=os.sys.stderr,
+        )
+    if result.blocked:
+        print(
+            f"{prefix}: dispatch is blocked ({result.action.reason}); one conflict "
+            f"observation is recorded and no mission state changed "
+            f"[repair: {controller_blocking_repair(result)}]",
+            file=os.sys.stderr,
+        )
+        return 1
+    if result.action.kind == CONTROLLER_ACTION_DISPATCH and not result.applied:
+        if result.fold_outcome == MISSION_FOLD_RETAINED_DUPLICATE:
+            # Retrying an uncertain delivery of the same command ID is the
+            # architecture section 17 rule, not a failure: the stored dispatch is
+            # returned and the worker keeps the one mission it already has.
+            print(
+                f"{prefix}: the dispatch of mission {result.action.mission_id} to worker "
+                f"{result.action.worker_id} is a redelivery of command "
+                f"{result.action.command_id}; the stored dispatch stands and no second "
+                "mission was created"
+            )
+            return 0
+        print(
+            f"{prefix}: the dispatch command is committed but did not claim worker "
+            f"{result.action.worker_id}'s mission slot ({result.fold_outcome}); no "
+            "second mission was created",
+            file=os.sys.stderr,
+        )
+        return 1
+    return 0
 
 
 # --- read-only preflight and explicit guarded store repair -------------------
@@ -8081,6 +9932,12 @@ def _mission_record_summary(result: MissionControlResult) -> str:
             f"mission cancellation {record['command_id']} for mission "
             f"{record['mission_id']} worker {record['worker_id']} "
             f"deadline {record['acknowledge_deadline_at']}"
+        )
+    if result.record_field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
+        return (
+            f"controller dispatch {record['command_id']} of mission "
+            f"{record['mission_id']} to worker {record['worker_id']} for queue item "
+            f"{record['queue_item_id']}"
         )
     return (
         f"mission replacement {record['command_id']} replacing mission "

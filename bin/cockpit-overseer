@@ -4,6 +4,7 @@ cockpit-overseer — compact overseer helper for delta-only cockpit loops.
 
 Subcommands:
   start     Atomically initialize and validate the explicit VP3 control store.
+  tick      Reconcile durable evidence and take at most one action, then exit.
   loop      Print only changed worker pane tails since the last snapshot.
   status    Print a one-shot compact snapshot without updating state.
   dispatch  Paste a mission brief into a worker pane from a reference file.
@@ -29,8 +30,15 @@ from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from cockpit_control import (
+    CONTROLLER_LIVE_REACHABLE,
+    CONTROLLER_LIVE_UNOBSERVED,
+    CONTROLLER_LIVE_UNREACHABLE,
+    CONTROLLER_PANE_UNOBSERVED,
+    ControllerDiagnostic,
     ControlStoreError,
+    controller_tick,
     initialize_control_store,
+    report_controller_tick,
     resolve_control_root,
     validate_control_store,
 )
@@ -338,6 +346,50 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def pane_diagnostics(session: str, windows: List[str]) -> List[ControllerDiagnostic]:
+    """Observe each worker pane as ADR-014 rule 7 and rule 8 evidence only.
+
+    Capturing a pane is the last thing a controller does and the least thing it
+    trusts.  The result is handed to the tick as a `ControllerDiagnostic`, which
+    the decision function has no parameter for, so what is read here can be
+    reported to an operator and can never advance authoritative state.
+    """
+
+    diagnostics: List[ControllerDiagnostic] = []
+    for window in windows:
+        live = CONTROLLER_LIVE_UNOBSERVED
+        pane = CONTROLLER_PANE_UNOBSERVED
+        if session:
+            try:
+                text = capture(session, window)
+            except (RuntimeError, OSError):
+                live = CONTROLLER_LIVE_UNREACHABLE
+            else:
+                live = CONTROLLER_LIVE_REACHABLE
+                pane = status_label(text)
+        diagnostics.append(ControllerDiagnostic.build(window, live, pane))
+    return diagnostics
+
+
+def cmd_tick(args: argparse.Namespace) -> int:
+    """Run one bounded controller tick and report exactly what it decided."""
+
+    session = args.session or current_session()
+    windows = args.window or list(DEFAULT_WINDOWS)
+    try:
+        return report_controller_tick(
+            controller_tick(
+                resolve_control_root().path,
+                diagnostics=pane_diagnostics(session, windows),
+                as_of=args.as_of,
+                dry_run=args.dry_run,
+            )
+        )
+    except ControlStoreError as exc:
+        print(f"cockpit-overseer: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     args.session = args.session or current_session()
     if not args.session:
@@ -434,6 +486,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     start = sub.add_parser("start", help="initialize the explicit versioned control store")
     start.set_defaults(func=cmd_start)
+
+    tick = sub.add_parser(
+        "tick",
+        help=(
+            "reconcile durable evidence in ADR-014 precedence order, take at most one "
+            "state-changing action, persist it, and exit"
+        ),
+    )
+    tick.add_argument("-s", "--session", default=os.environ.get("TMUX_SESSION"))
+    tick.add_argument(
+        "-w",
+        "--window",
+        action="append",
+        default=[],
+        help="worker window to observe as diagnostic-only evidence; repeatable",
+    )
+    tick.add_argument(
+        "--as-of",
+        default=None,
+        metavar="UTC",
+        help="reconcile at this explicit UTC moment instead of now",
+    )
+    tick.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the action that would be taken without changing any state",
+    )
+    tick.set_defaults(func=cmd_tick)
 
     loop = sub.add_parser("loop", parents=[common], help="delta-only loop snapshot")
     loop.set_defaults(func=cmd_loop)

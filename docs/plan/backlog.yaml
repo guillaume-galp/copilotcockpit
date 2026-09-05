@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-04T18:20:05+01:00"
+last-updated: "2026-09-05T13:32:10+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -411,12 +411,12 @@ themes:
       - id: TH3.E3
         title: "Overseer reconciliation and bounded recovery"
         slug: overseer-reconciliation
-        status: todo
+        status: in-progress
         depends_on: [TH3.E1, TH3.E2]
         stories:
           - id: TH3.E3.US1
             title: "One-action controller tick and evidence precedence"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US1-controller-tick-precedence.md

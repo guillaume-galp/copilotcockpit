@@ -268,6 +268,45 @@ Before VP3 controller work, run `cockpit-overseer start`; it requires an absolut
 `COCKPIT_CONTROL_ROOT` from the shell, or (only when absent from the shell) the
 active tmux session. Never derive the control root from `cwd`.
 
+### Controller tick
+
+`cockpit-overseer tick` is the deterministic reconciler. One tick validates the
+control and queue roots, replays the committed journal, checks the derived
+ledger against that replay, reads queue and worker state, applies the ADR-014
+precedence order, takes **at most one** state-changing action, persists it, and
+exits.
+
+```bash
+cockpit-overseer tick --window worker-dev --window worker-test --window worker-fix
+cockpit-overseer tick --dry-run          # report the decision, change nothing
+```
+
+Read the `precedence <n> <source> <role> ...` lines it prints: they are the
+ADR-014 ladder it actually applied, in order. Rules 7 (`live-status`) and 8
+(`pane-text`) always carry `advances-state no` — pane text is diagnostic only
+and can never dispatch, complete, or advance a mission.
+
+Exit codes: `0` when the tick dispatched, recorded an observation, redelivered
+a command that already stands, or found nothing new. It exits `1` in exactly two
+cases, both of which print a named diagnostic on stderr and never a traceback:
+
+* the decision is **blocked** — the tick refuses to guess, names the exact
+  repair, and records one conflict observation;
+* the dispatch command was committed but **did not claim the worker's mission
+  slot** — the fold, not the tick, decides who holds a slot, so the tick reports
+  what the fold recorded and creates no second mission.
+
+Ticking again over the same evidence persists nothing, so a recurrent wake
+terminates instead of re-investigating.
+
+A concurrent writer is ordinary operation, not an incident: while another
+process is between committing its event and replacing `ledger.json`, a reader
+legitimately sees a projection one revision behind. The tick settles that
+reading before deciding and reports rule 5 as `stale` only for a projection a
+writer never finished replacing — which the next writer or
+`cockpit-control replay-ledger` repairs. Only a projection ahead of the journal,
+or one that disagrees with it at the same revision, blocks.
+
 ### Queue intake
 
 ```bash
