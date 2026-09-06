@@ -462,12 +462,27 @@ MISSION_DIALOG_PAYLOAD_FIELD = "mission_dialog"
 MISSION_CANCELLATION_PAYLOAD_FIELD = "mission_cancellation"
 MISSION_REPLACEMENT_PAYLOAD_FIELD = "mission_replacement"
 CONTROLLER_DISPATCH_PAYLOAD_FIELD = "controller_dispatch"
+# A bounded recovery request is the fifth managed interaction: the correlated
+# command a controller sends one mission whose heartbeat expired.  ADR-014 says
+# stale observation "triggers bounded recovery but does not automatically mean
+# mission failure", so recovery is a *command* exactly like a question or a
+# cancellation and never a lifecycle state: only a worker's own lifecycle event
+# or an explicit human decision ever ends a mission.
+MISSION_RECOVERY_RECORD_TYPE = "mission-recovery"
+MISSION_RECOVERY_PAYLOAD_FIELD = "mission_recovery"
+# The two ladder rungs that need a record of their own.  `cancel` and `replace`
+# are already complete managed interactions with their own records, so recovery
+# deliberately reuses those rather than restating them under a second name.
+MISSION_RECOVERY_NUDGE = "nudge"
+MISSION_RECOVERY_TROUBLESHOOT = "troubleshoot"
+MISSION_RECOVERY_ACTIONS = (MISSION_RECOVERY_NUDGE, MISSION_RECOVERY_TROUBLESHOOT)
 # One event carries at most one mission-control record.  The tuple is ordered so
 # a record is always looked for under exactly one closed set of payload fields.
 MISSION_CONTROL_PAYLOAD_FIELDS = (
     MISSION_DIALOG_PAYLOAD_FIELD,
     MISSION_CANCELLATION_PAYLOAD_FIELD,
     MISSION_REPLACEMENT_PAYLOAD_FIELD,
+    MISSION_RECOVERY_PAYLOAD_FIELD,
     CONTROLLER_DISPATCH_PAYLOAD_FIELD,
 )
 
@@ -551,6 +566,33 @@ MISSION_REPLACEMENT_FIELDS = (
     "requested_at",
 )
 
+# The complete, closed field set of one bounded recovery request.  Like a
+# cancellation it always declares the explicit moment a response is expected by,
+# because a rung whose response window was never declared could not be observed
+# as elapsed without inventing a policy the control plane has not been told, and
+# the ladder could then only advance by guessing.  There is no free prose: the
+# reason comes from the closed observation vocabulary that made recovery owed.
+MISSION_RECOVERY_FIELDS = (
+    "schema_version",
+    "record_type",
+    "command_id",
+    "action",
+    "mission_id",
+    "worker_id",
+    "queue_item_id",
+    "trace_id",
+    "parent_trace_id",
+    "reason",
+    "evidence_refs",
+    "requested_at",
+    "respond_deadline_at",
+)
+
+# Why a bounded recovery was owed at all.  The vocabulary is closed and is the
+# same token `lifecycle-status` already reports, so a recovery record can never
+# claim a cause the freshness observation cannot produce.
+MISSION_RECOVERY_REASONS = (LIFECYCLE_STALE_REASON,)
+
 # The complete, closed field set of one controller dispatch.  It carries no
 # mission brief and no prose: the brief is digested by the carrying envelope,
 # `evidence_refs` says which queue item authorized the work, and `state_key`
@@ -582,6 +624,12 @@ COMMAND_TYPE_MISSION_ACCESS_PROMPT_RESPONSE = "mission-access-prompt-response"
 COMMAND_TYPE_MISSION_CANCEL = "mission-cancel"
 COMMAND_TYPE_MISSION_REPLACE = "mission-replace"
 COMMAND_TYPE_MISSION_DISPATCH = "mission-dispatch"
+COMMAND_TYPE_MISSION_NUDGE = "mission-nudge"
+COMMAND_TYPE_MISSION_TROUBLESHOOT = "mission-troubleshoot"
+MISSION_RECOVERY_COMMAND_TYPES = {
+    MISSION_RECOVERY_NUDGE: COMMAND_TYPE_MISSION_NUDGE,
+    MISSION_RECOVERY_TROUBLESHOOT: COMMAND_TYPE_MISSION_TROUBLESHOOT,
+}
 MISSION_DIALOG_COMMAND_TYPES = {
     MISSION_DIALOG_QUESTION: COMMAND_TYPE_MISSION_QUESTION,
     MISSION_DIALOG_ACCESS_PROMPT: COMMAND_TYPE_MISSION_ACCESS_PROMPT,
@@ -591,10 +639,14 @@ MISSION_DIALOG_COMMAND_TYPES = {
 MISSION_DIALOG_RESPONSES = {
     prompt: response for response, prompt in MISSION_DIALOG_ANSWERS.items()
 }
-MANAGED_COMMAND_TYPES = tuple(sorted(MISSION_DIALOG_COMMAND_TYPES.values())) + (
-    COMMAND_TYPE_MISSION_CANCEL,
-    COMMAND_TYPE_MISSION_DISPATCH,
-    COMMAND_TYPE_MISSION_REPLACE,
+MANAGED_COMMAND_TYPES = (
+    tuple(sorted(MISSION_DIALOG_COMMAND_TYPES.values()))
+    + tuple(sorted(MISSION_RECOVERY_COMMAND_TYPES.values()))
+    + (
+        COMMAND_TYPE_MISSION_CANCEL,
+        COMMAND_TYPE_MISSION_DISPATCH,
+        COMMAND_TYPE_MISSION_REPLACE,
+    )
 )
 
 # Materialized dialog state.  A prompt is `pending` until exactly one correlated
@@ -638,6 +690,13 @@ LEDGER_MISSION_DIALOG_FIELDS = (
 LEDGER_MISSION_CANCELLATIONS_FIELD = "mission_cancellations"
 LEDGER_MISSION_CANCELLATION_FIELDS = (
     "cancellation",
+    "revision",
+    "event_id",
+    "recorded_at",
+)
+LEDGER_MISSION_RECOVERIES_FIELD = "mission_recoveries"
+LEDGER_MISSION_RECOVERY_FIELDS = (
+    "recovery",
     "revision",
     "event_id",
     "recorded_at",
@@ -694,6 +753,13 @@ MISSION_SLOT_CONFLICT_REASONS = (
     MISSION_SLOT_CONFLICT_UNMATCHED,
     MISSION_SLOT_CONFLICT_REUSED,
 )
+# The two refusals that mean one worker was claimed by *two* missions at once.
+# `unmatched-mission-slot` is deliberately absent: it refuses a claim for lack of
+# correlation, which leaves exactly one mission on the slot rather than two.
+MISSION_SLOT_DUPLICATE_CLAIM_REASONS = (
+    MISSION_SLOT_CONFLICT_SECOND_ACTIVE,
+    MISSION_SLOT_CONFLICT_REUSED,
+)
 MISSION_SLOT_CONFLICT_LIFECYCLE = "lifecycle"
 MISSION_SLOT_CONFLICT_REPLACEMENT = "replacement"
 MISSION_SLOT_CONFLICT_DISPATCH = "dispatch"
@@ -726,6 +792,7 @@ MISSION_SLOT_CONFLICT_EXPLANATIONS = {
 MISSION_FOLD_RAISED = "raised"
 MISSION_FOLD_ANSWERED = "answered"
 MISSION_FOLD_REQUESTED = "requested"
+MISSION_FOLD_RECOVERY_REQUESTED = "recovery-requested"
 MISSION_FOLD_REPLACED = "replaced"
 MISSION_FOLD_CONFLICT_RECORDED = "conflict-recorded"
 MISSION_FOLD_RETAINED_DUPLICATE = "retained-duplicate-record"
@@ -809,6 +876,9 @@ CONTROLLER_REASON_QUEUE_AMBIGUOUS = "multiple-active-queue-items"
 CONTROLLER_REASON_NOT_IMPLEMENTABLE = "queue-item-not-implementable"
 CONTROLLER_REASON_MISSION_IN_PROGRESS = "mission-in-progress"
 CONTROLLER_REASON_WORKER_BUSY = "worker-busy"
+CONTROLLER_REASON_WORKER_CONFLICT = "worker-mission-conflict"
+CONTROLLER_REASON_RECOVERY_AWAITING = "awaiting-recovery-response"
+CONTROLLER_REASON_RECOVERY_ESCALATED = "bounded-recovery-escalated"
 CONTROLLER_DISPATCH_REASONS = (CONTROLLER_REASON_IMPLEMENTABLE,)
 CONTROLLER_OBSERVATION_REASONS = (
     CONTROLLER_REASON_LEDGER_DIVERGENT,
@@ -819,11 +889,45 @@ CONTROLLER_OBSERVATION_REASONS = (
     CONTROLLER_REASON_QUEUE_EMPTY,
     CONTROLLER_REASON_QUEUE_PAUSED,
     CONTROLLER_REASON_QUEUE_UNREADABLE,
+    CONTROLLER_REASON_RECOVERY_AWAITING,
+    CONTROLLER_REASON_RECOVERY_ESCALATED,
     CONTROLLER_REASON_ROOT_CONFLICT,
     CONTROLLER_REASON_ROOT_UNDECLARED,
     CONTROLLER_REASON_WORKER_BUSY,
+    CONTROLLER_REASON_WORKER_CONFLICT,
 )
 CONTROLLER_REASONS = CONTROLLER_DISPATCH_REASONS + CONTROLLER_OBSERVATION_REASONS
+
+# Why a tick sent one bounded recovery command.  These reasons ride on the
+# managed record the rung committed -- a recovery request, a cooperative
+# cancellation, or a replacement -- and never on a controller observation, so
+# they are deliberately outside `CONTROLLER_REASONS`: the observation vocabulary
+# stays exactly what a tick that changed no mission state may record.
+CONTROLLER_REASON_RECOVERY_NUDGE = "stale-mission-nudged"
+CONTROLLER_REASON_RECOVERY_TROUBLESHOOT = "stale-mission-troubleshot"
+CONTROLLER_REASON_RECOVERY_CANCEL = "stale-mission-cancelled"
+CONTROLLER_REASON_RECOVERY_REPLACE = "stale-mission-replaced"
+CONTROLLER_REASON_QUEUE_ITEM_TERMINAL = "queue-item-terminal"
+CONTROLLER_RECOVERY_REASONS = (
+    CONTROLLER_REASON_QUEUE_ITEM_TERMINAL,
+    CONTROLLER_REASON_RECOVERY_CANCEL,
+    CONTROLLER_REASON_RECOVERY_NUDGE,
+    CONTROLLER_REASON_RECOVERY_REPLACE,
+    CONTROLLER_REASON_RECOVERY_TROUBLESHOOT,
+)
+# Every reason one tick may decide on, whichever half of the contract records it.
+CONTROLLER_ACTION_REASONS = CONTROLLER_REASONS + CONTROLLER_RECOVERY_REASONS
+
+# The reasons a committed controller record carries *because* it is walking one
+# bounded recovery episode.  A record carrying one of them about a mission is
+# the controller continuing that mission's episode, so it may never be read back
+# as evidence that the episode ended -- otherwise a mission the ladder is
+# deliberately still recovering could close its own episode and start again.
+CONTROLLER_EPISODE_REASONS = CONTROLLER_RECOVERY_REASONS + (
+    CONTROLLER_REASON_RECOVERY_AWAITING,
+    CONTROLLER_REASON_RECOVERY_ESCALATED,
+)
+
 # Reasons that stop dispatch until a human or another tool changes something.
 # They are still recorded exactly once and still terminate the tick cleanly;
 # `blocked` is a refusal to guess, never a loop and never a retry.
@@ -831,8 +935,10 @@ CONTROLLER_BLOCKING_REASONS = (
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_QUEUE_AMBIGUOUS,
     CONTROLLER_REASON_QUEUE_UNREADABLE,
+    CONTROLLER_REASON_RECOVERY_ESCALATED,
     CONTROLLER_REASON_ROOT_CONFLICT,
     CONTROLLER_REASON_ROOT_UNDECLARED,
+    CONTROLLER_REASON_WORKER_CONFLICT,
 )
 
 # The exact repair each blocking reason asks a human for.  A refusal that does
@@ -850,12 +956,67 @@ CONTROLLER_BLOCKING_REPAIRS = {
         "repair the queue root {declared} with cockpit-queue before the "
         "controller can read product-work authority from it"
     ),
-    CONTROLLER_REASON_LEDGER_DIVERGENT: "cockpit-control replay-ledger",
+    # `ledger-projection-divergent` is deliberately absent.  Every derived
+    # disagreement replay can settle is repaired by the tick itself, and the one
+    # it must not settle is refused before any evidence is assembled, so this
+    # reason is now only ever read back off a store an earlier build wrote.  Its
+    # repair is therefore whatever `cockpit-control preflight` currently
+    # diagnoses rather than a sentence that may since have gone stale.
+    # The repair names the *duplicate*, because that is the only claim ending
+    # which clears this block: the retained mission is the one being kept, and
+    # a mission that does not hold the worker's slot can only be ended by its
+    # own worker's terminal lifecycle event, which `cancel-mission` requests
+    # cooperatively.  It also names the exact lifecycle events that end it,
+    # computed from the section 9 transition table the fold enforces: `cancelled`
+    # is not reachable from `accepted`, so a mission a worker has only accepted
+    # must be run before it can be cancelled, and a sentence that said otherwise
+    # could be followed to the letter and leave the cockpit blocked -- the dead
+    # end this table exists to prevent.
+    CONTROLLER_REASON_WORKER_CONFLICT: (
+        "worker {worker} keeps its earliest accepted mission {mission}; dispatch "
+        "resumes when the duplicate mission {duplicate} ends -- request that with "
+        "`cockpit-control cancel-mission` and have its worker record {terminal} "
+        "-- and never by ending {mission}, which this control root is keeping"
+    ),
+    CONTROLLER_REASON_RECOVERY_ESCALATED: (
+        "decide mission {mission} on worker {worker} yourself: bounded recovery "
+        "is exhausted, so end it with `cockpit-control cancel-mission` or "
+        "`cockpit-control replace-mission`, or transition queue item {queue_item} "
+        "with cockpit-queue"
+    ),
     CONTROLLER_REASON_QUEUE_AMBIGUOUS: (
         "keep the earliest valid active queue item and transition the others "
         "with cockpit-queue before dispatch"
     ),
 }
+
+# What a tick must do about each authoritative-journal refusal.  Committed
+# events are the only authority this control plane has, so nothing here is a
+# command that rewrites them: the operator is told exactly where to look and
+# that the tool will not guess on their behalf.
+CONTROLLER_JOURNAL_REPAIR = (
+    "run `cockpit-control preflight` to name the exact file under "
+    f"{EVENTS_DIR_NAME}/, then restore or correct that one file yourself; "
+    "cockpit-control never rewrites, reorders, or removes committed authority"
+)
+
+# A projection recording revisions the committed journal does not hold is not a
+# derived fault at all: it is the visible half of committed authority having
+# disappeared.  Rebuilding it would rewind derived state and settle that
+# disappearance silently, so the tick refuses before it assembles one piece of
+# evidence, commits nothing -- committing anything would itself replace the
+# projection and destroy the evidence -- and names the explicit repair.
+CONTROLLER_LEDGER_AHEAD_REPAIR = (
+    "restore the committed event file(s) that {ledger} names but "
+    f"{EVENTS_DIR_NAME}/ no longer holds; run `cockpit-control preflight` to "
+    "name them, and only if the removal was intended run `cockpit-control "
+    "replay-ledger` to rewind the derived ledger to revision {journal}"
+)
+CONTROLLER_LEDGER_UNREPAIRED_REPAIR = (
+    "repair {ledger} yourself and run `cockpit-control preflight`; replaying "
+    "the committed journal did not make the derived projection equal the "
+    "rebuild at revision {journal}"
+)
 
 # How each derived-ledger classification is read by a decision, and why they are
 # not read the same way.  Architecture section 8.3 commits an event into
@@ -873,13 +1034,49 @@ CONTROLLER_BLOCKING_REPAIRS = {
 # A projection that is absent or unparseable is refused earlier still, by the
 # store validation that opens every tick; both are classified here anyway so this
 # is a complete reading of the vocabulary rather than of what happens to reach it.
-CONTROLLER_PROJECTION_DIVERGENT_REASONS = (
-    PROJECTION_REASON_AHEAD,
+# A missing, stale, unreadable, or disagreeing projection is *derived* state
+# that the committed events reproduce exactly, so section 17's "corrupt ledger:
+# replay the journal and atomically rebuild it" applies without guessing one
+# byte: the rebuild is a pure function of authority the tick has already read.
+# A projection *ahead* of the committed journal is the single exception, because
+# rebuilding it would rewind derived state past revisions `events/` no longer
+# holds and would quietly settle the disappearance of committed authority.
+CONTROLLER_PROJECTION_REPAIRABLE_REASONS = (
     PROJECTION_REASON_CORRUPT,
     PROJECTION_REASON_DIVERGENT,
     PROJECTION_REASON_MISSING,
+    PROJECTION_REASON_STALE,
+    PROJECTION_REASON_VIEW,
 )
-CONTROLLER_PROJECTION_BEHIND_REASONS = (PROJECTION_REASON_STALE,)
+CONTROLLER_PROJECTION_DIVERGENT_REASONS = (PROJECTION_REASON_AHEAD,)
+
+# What one tick did about the derived projection it read.  Repair is part of
+# step 3 of the bounded loop -- replaying the journal and validating the derived
+# revision -- and commits no event, so it is never the tick's one state-changing
+# action and never competes with the decision that follows it.
+CONTROLLER_LEDGER_CURRENT = "current"
+CONTROLLER_LEDGER_REPAIRED = "repaired"
+CONTROLLER_LEDGER_WOULD_REPAIR = "would-repair"
+# A projection replay ran against and still did not settle.  It is a
+# classification a tick may hold but never one it decides from: reaching it
+# raises before any evidence exists, exactly as `refused` does.
+CONTROLLER_LEDGER_UNREPAIRED = "unrepaired"
+CONTROLLER_LEDGER_REFUSED = "refused"
+CONTROLLER_LEDGER_OUTCOMES = (
+    CONTROLLER_LEDGER_CURRENT,
+    CONTROLLER_LEDGER_REFUSED,
+    CONTROLLER_LEDGER_REPAIRED,
+    CONTROLLER_LEDGER_UNREPAIRED,
+    CONTROLLER_LEDGER_WOULD_REPAIR,
+)
+# The classifications one tick may go on to decide from.  Everything else is a
+# refusal raised before any evidence exists, so this is the structural guard the
+# decision keeps for itself rather than the path a healthy store takes.
+CONTROLLER_LEDGER_DECIDABLE = (
+    CONTROLLER_LEDGER_CURRENT,
+    CONTROLLER_LEDGER_REPAIRED,
+    CONTROLLER_LEDGER_WOULD_REPAIR,
+)
 
 # ADR-014 precedence, in rule order, with the role each source plays.  The order
 # is data rather than control flow so it can be reported verbatim and asserted
@@ -949,20 +1146,114 @@ CONTROLLER_FOLD_OBSERVED = "observed"
 CONTROLLER_FOLD_RETAINED_UNCHANGED = "retained-unchanged-observation"
 CONTROLLER_FOLD_CONFLICT_RECORDED = "conflict-recorded"
 
+# The fixed bounded recovery ladder of architecture section 9: "The controller
+# must reconcile and either nudge, troubleshoot, cancel, replace, or escalate."
+# It is data rather than control flow so it can be reported verbatim, asserted by
+# a test, and counted: a staleness episode attempts each command rung at most
+# once and then escalates, and an episode ends only when the controller records
+# that it looked and the mission was fresh, so recovery is finite by
+# construction and can never nudge forever however often a worker reports
+# freshness windows that have already expired.
+CONTROLLER_RECOVERY_NUDGE = MISSION_RECOVERY_NUDGE
+CONTROLLER_RECOVERY_TROUBLESHOOT = MISSION_RECOVERY_TROUBLESHOOT
+CONTROLLER_RECOVERY_CANCEL = "cancel"
+CONTROLLER_RECOVERY_REPLACE = "replace"
+CONTROLLER_RECOVERY_ESCALATE = "escalate"
+# Not a rung: the state between a delivered rung and its declared deadline, in
+# which the ladder deliberately does nothing rather than advancing on a worker
+# that was never given the response window its own record declared.
+CONTROLLER_RECOVERY_AWAIT = "await"
+CONTROLLER_RECOVERY_LADDER = (
+    CONTROLLER_RECOVERY_NUDGE,
+    CONTROLLER_RECOVERY_TROUBLESHOOT,
+    CONTROLLER_RECOVERY_CANCEL,
+    CONTROLLER_RECOVERY_REPLACE,
+    CONTROLLER_RECOVERY_ESCALATE,
+)
+# The rungs that deliver a correlated command; `escalate` is the terminal rung
+# and delivers nothing at all, which is why the ladder terminates.
+CONTROLLER_RECOVERY_COMMAND_RUNGS = CONTROLLER_RECOVERY_LADDER[:-1]
+# Product work owned by `cockpit-queue` that has left the active set cannot be
+# redone by a replacement mission, and nudging or troubleshooting a mission whose
+# reason to exist is gone would be recovery for its own sake.  The controller
+# therefore asks for cooperative cancellation and, if that is not acknowledged by
+# its declared deadline, escalates -- and it never reopens the queue item.
+CONTROLLER_TERMINAL_ITEM_LADDER = (
+    CONTROLLER_RECOVERY_CANCEL,
+    CONTROLLER_RECOVERY_ESCALATE,
+)
+# Product work is still active but `cockpit-queue` no longer names this worker
+# for it, so cooperative recovery is allowed and minting a replacement mission
+# on this worker is not.
+CONTROLLER_UNREPLACEABLE_LADDER = (
+    CONTROLLER_RECOVERY_NUDGE,
+    CONTROLLER_RECOVERY_TROUBLESHOOT,
+    CONTROLLER_RECOVERY_CANCEL,
+    CONTROLLER_RECOVERY_ESCALATE,
+)
+# The managed command type each command rung delivers, which is what its
+# canonical payload digest is bound to.
+CONTROLLER_RECOVERY_COMMAND_PAYLOAD_TYPES = {
+    CONTROLLER_RECOVERY_NUDGE: COMMAND_TYPE_MISSION_NUDGE,
+    CONTROLLER_RECOVERY_TROUBLESHOOT: COMMAND_TYPE_MISSION_TROUBLESHOOT,
+    CONTROLLER_RECOVERY_CANCEL: COMMAND_TYPE_MISSION_CANCEL,
+    CONTROLLER_RECOVERY_REPLACE: COMMAND_TYPE_MISSION_REPLACE,
+}
+# The closed reason each command rung records, by rung.
+CONTROLLER_RECOVERY_RUNG_REASONS = {
+    CONTROLLER_RECOVERY_NUDGE: CONTROLLER_REASON_RECOVERY_NUDGE,
+    CONTROLLER_RECOVERY_TROUBLESHOOT: CONTROLLER_REASON_RECOVERY_TROUBLESHOOT,
+    CONTROLLER_RECOVERY_CANCEL: CONTROLLER_REASON_RECOVERY_CANCEL,
+    CONTROLLER_RECOVERY_REPLACE: CONTROLLER_REASON_RECOVERY_REPLACE,
+}
+# The fixed sentence each cooperative cancellation the controller mints carries.
+# It is a constant rather than assembled prose so nothing an operator, a worker,
+# or a pane wrote can reach a committed record through this path.
+CONTROLLER_CANCEL_REASONS = {
+    CONTROLLER_REASON_RECOVERY_CANCEL: (
+        "bounded recovery: the mission heartbeat expired and neither a nudge nor "
+        "focused troubleshooting produced a fresh lifecycle event"
+    ),
+    CONTROLLER_REASON_QUEUE_ITEM_TERMINAL: (
+        "bounded recovery: the queue item this mission implements reached a "
+        "terminal product state, which the controller never reopens"
+    ),
+}
+CONTROLLER_REPLACE_REASON = (
+    "bounded recovery: the mission heartbeat expired and cooperative "
+    "cancellation was not acknowledged by its declared deadline"
+)
+# How long a recovery rung waits for the worker before the ladder may advance.
+# Both windows are declared on the committed record itself, so the ladder is a
+# pure function of committed evidence and one explicit as-of moment and never of
+# the wall clock the tick happens to run on.
+CONTROLLER_RECOVERY_RESPOND_SECONDS = 300.0
+CONTROLLER_RECOVERY_ACKNOWLEDGE_SECONDS = 900.0
+
 # The one action a tick may take, and what actually happened when it tried.
 CONTROLLER_ACTION_DISPATCH = "dispatch-mission"
 CONTROLLER_ACTION_OBSERVE = "record-observation"
 CONTROLLER_ACTION_NONE = "none"
+CONTROLLER_ACTION_RECOVER = "recover-mission"
 CONTROLLER_ACTIONS = (
     CONTROLLER_ACTION_DISPATCH,
     CONTROLLER_ACTION_OBSERVE,
+    CONTROLLER_ACTION_RECOVER,
     CONTROLLER_ACTION_NONE,
 )
 CONTROLLER_TICK_DISPATCHED = "dispatched"
 CONTROLLER_TICK_RECORDED = "recorded"
+CONTROLLER_TICK_RECOVERED = "recovered"
 CONTROLLER_TICK_UNCHANGED = "unchanged"
 CONTROLLER_TICK_WOULD_DISPATCH = "would-dispatch"
 CONTROLLER_TICK_WOULD_RECORD = "would-record"
+CONTROLLER_TICK_WOULD_RECOVER = "would-recover"
+
+# The tick-level outcome of one bounded recovery command.  It is deliberately
+# absent from `CONTROLLER_OUTCOMES`: that vocabulary is what a *controller
+# record* may declare, and a recovery rung is carried by a managed
+# mission-control record instead, so no controller observation can claim it.
+CONTROLLER_RECOVERED = "recovered"
 
 # Live-status and pane observations, both diagnostic-only (ADR-014 rules 7-8).
 CONTROLLER_PANE_UNOBSERVED = "unobserved"
@@ -978,6 +1269,15 @@ CONTROLLER_LIVE_UNOBSERVED = "unobserved"
 CONTROLLER_MISSION_DERIVATION = "cockpit-overseer/mission"
 CONTROLLER_COMMAND_DERIVATION = "cockpit-overseer/dispatch-command"
 CONTROLLER_TRACE_DERIVATION = "cockpit-overseer/mission-trace"
+# The same derivation for every recovery rung.  A rung identifier is a pure
+# function of the mission, the rung, and the committed revision that keys the
+# mission's recovery episode, so "has this rung already been attempted for this
+# episode?" is answered by asking whether that exact command ID is already
+# committed -- and an episode the controller has recorded as over moves the next
+# one onto identifiers no rung has ever used, which is how the ladder resets.
+CONTROLLER_RECOVERY_COMMAND_DERIVATION = "cockpit-overseer/recovery-command"
+CONTROLLER_RECOVERY_TRACE_DERIVATION = "cockpit-overseer/recovery-trace"
+CONTROLLER_RECOVERY_MISSION_DERIVATION = "cockpit-overseer/recovery-mission"
 CONTROLLER_TICK_ACTOR = "cockpit-overseer"
 DEFAULT_CONTROLLER_TICK_COMMAND = "cockpit-overseer tick"
 
@@ -1471,6 +1771,26 @@ def validate_mission_cancellations(value: Any, label: str) -> Dict[str, Any]:
     return value
 
 
+def validate_mission_recoveries(value: Any, label: str) -> Dict[str, Any]:
+    """Validate every committed bounded recovery request the ledger projects."""
+
+    if not isinstance(value, dict):
+        raise ControlStoreError(f"{label} requires object {LEDGER_MISSION_RECOVERIES_FIELD}")
+    for command_id in sorted(value):
+        entry_label = f"{label} {LEDGER_MISSION_RECOVERIES_FIELD}[{command_id}]"
+        entry = value[command_id]
+        if not isinstance(entry, dict):
+            raise ControlStoreError(f"{entry_label} must be a JSON object")
+        _require_closed_fields(entry, LEDGER_MISSION_RECOVERY_FIELDS, entry_label)
+        recovery = validate_mission_recovery(entry["recovery"], f"{entry_label} recovery")
+        if recovery["command_id"] != command_id:
+            raise ControlStoreError(f"{entry_label} is keyed by a different command_id")
+        _require_positive_integer(entry, "revision", entry_label)
+        _require_uuid(entry, "event_id", entry_label)
+        _require_timestamp(entry, "recorded_at", entry_label)
+    return value
+
+
 def validate_mission_slots(value: Any, label: str) -> Dict[str, Any]:
     """Validate the one mission slot each worker holds in the derived ledger.
 
@@ -1607,6 +1927,7 @@ def validate_ledger(record: Any, control_id: str, root: Optional[Path] = None) -
     for field, validator in (
         (LEDGER_MISSION_DIALOGS_FIELD, validate_mission_dialogs),
         (LEDGER_MISSION_CANCELLATIONS_FIELD, validate_mission_cancellations),
+        (LEDGER_MISSION_RECOVERIES_FIELD, validate_mission_recoveries),
         (LEDGER_MISSION_SLOTS_FIELD, validate_mission_slots),
         (LEDGER_CONTROLLER_FIELD, validate_controller_projection),
     ):
@@ -2357,6 +2678,54 @@ def validate_mission_replacement(
     return data
 
 
+def validate_mission_recovery(
+    record: Any,
+    label: str = "mission recovery",
+) -> Dict[str, Any]:
+    """Validate one versioned bounded recovery request, failing closed.
+
+    A recovery request is the controller asking one worker to prove it is still
+    carrying the mission the control plane believes it has.  It declares which
+    rung of the fixed ladder it is, why recovery was owed, and the explicit
+    moment a response is expected by -- exactly like a cooperative cancellation,
+    and for the same reason: a rung whose response window was never declared
+    could not be observed as elapsed, so the ladder could only advance by
+    guessing.  Nothing here claims a mission state: `stale` is an observation,
+    and a mission ends only through a worker lifecycle event or a human decision.
+    """
+
+    data = _require_object(record, label)
+    _require_mission_control_schema_version(data, label)
+    _require_record_type(data, MISSION_RECOVERY_RECORD_TYPE, label)
+    _require_closed_fields(data, MISSION_RECOVERY_FIELDS, label)
+
+    _require_uuid(data, "command_id", label)
+    action = _require_string(data, "action", label)
+    if action not in MISSION_RECOVERY_ACTIONS:
+        raise ControlStoreError(
+            f"{label} declares unknown action {action!r}; expected one of "
+            f"{', '.join(MISSION_RECOVERY_ACTIONS)}"
+        )
+    _require_uuid(data, "mission_id", label)
+    _require_mission_correlation(data, label)
+    reason = _require_string(data, "reason", label)
+    if reason not in MISSION_RECOVERY_REASONS:
+        raise ControlStoreError(
+            f"{label} declares unknown reason {reason!r}; expected one of "
+            f"{', '.join(MISSION_RECOVERY_REASONS)}"
+        )
+    _require_evidence_refs(data, label, required=True)
+    requested_at = _require_timestamp(data, "requested_at", label)
+    deadline = _parsed_timestamp(
+        _require_string(data, "respond_deadline_at", label),
+        "respond_deadline_at",
+        label,
+    )
+    if deadline <= _parsed_timestamp(requested_at, "requested_at", label):
+        raise ControlStoreError(f"{label} requires respond_deadline_at after requested_at")
+    return data
+
+
 def _require_controller_schema_version(record: Mapping[str, Any], label: str) -> None:
     """Require the exact reconciliation contract version this tool implements."""
 
@@ -2465,6 +2834,7 @@ MISSION_CONTROL_VALIDATORS = {
     MISSION_DIALOG_PAYLOAD_FIELD: validate_mission_dialog,
     MISSION_CANCELLATION_PAYLOAD_FIELD: validate_mission_cancellation,
     MISSION_REPLACEMENT_PAYLOAD_FIELD: validate_mission_replacement,
+    MISSION_RECOVERY_PAYLOAD_FIELD: validate_mission_recovery,
     CONTROLLER_DISPATCH_PAYLOAD_FIELD: validate_controller_dispatch,
 }
 
@@ -2476,6 +2846,8 @@ def _mission_control_command_type(field: str, record: Mapping[str, Any]) -> str:
         return MISSION_DIALOG_COMMAND_TYPES[record["kind"]]
     if field == MISSION_CANCELLATION_PAYLOAD_FIELD:
         return COMMAND_TYPE_MISSION_CANCEL
+    if field == MISSION_RECOVERY_PAYLOAD_FIELD:
+        return MISSION_RECOVERY_COMMAND_TYPES[record["action"]]
     if field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
         return COMMAND_TYPE_MISSION_DISPATCH
     return COMMAND_TYPE_MISSION_REPLACE
@@ -2908,26 +3280,63 @@ def inspect_control_events(root: Path) -> Tuple[Dict[str, Any], EventHistory]:
     return metadata, read_committed_events(root, metadata["control_id"])
 
 
-def validate_control_store(root: Path) -> Dict[str, Any]:
-    """Validate every authoritative root-level record without changing state."""
+def validate_control_authority(
+    root: Path,
+    journal_repair: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate every *authoritative* record without reading derived state.
+
+    `control.json`, the committed events, and the stored command and escalation
+    records are the store's authority: nothing regenerates them, so a fault in
+    any of them stops mutation and is repaired only by an explicit human action.
+    `ledger.json` and `events.jsonl` are deliberately absent here because they
+    are pure functions of the events above and are therefore rebuilt rather than
+    refused; the one caller that must tell those two cases apart is the
+    controller tick, which repairs the derived half itself.
+    """
 
     root = _require_absolute_root(str(root), "configured")
     _require_directory(root, "COCKPIT_CONTROL_ROOT")
-    metadata_path = root / CONTROL_METADATA_NAME
-    ledger_path = root / LEDGER_NAME
-    events_path = root / EVENTS_NAME
-    metadata = validate_root_metadata(_load_json(metadata_path, CONTROL_METADATA_NAME), root)
-    ledger = validate_ledger(_load_json(ledger_path, LEDGER_NAME), metadata["control_id"], root)
+    metadata = validate_root_metadata(
+        _load_json(root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), root
+    )
+    try:
+        read_committed_events(root, metadata["control_id"])
+    except ControlStoreError as exc:
+        # A caller that owns a repair for authoritative corruption says so here.
+        # Nothing rebuilds, reorders, quarantines, or guesses past a malformed
+        # committed event: the refusal names the one file and the one repair.
+        if journal_repair is None:
+            raise
+        raise ControlStoreError(
+            f"the committed control journal cannot be replayed: {exc}; no mission state "
+            f"was derived and nothing was guessed [repair: {journal_repair}]"
+        ) from None
+    _validate_record_directory(root / COMMANDS_DIR_NAME, COMMANDS_DIR_NAME, metadata["control_id"])
+    _validate_record_directory(root / ESCALATIONS_DIR_NAME, ESCALATIONS_DIR_NAME, metadata["control_id"])
+    _require_directory(root / LOCKS_DIR_NAME, LOCKS_DIR_NAME)
+    return metadata
+
+
+def validate_control_store(root: Path) -> Dict[str, Any]:
+    """Validate every authoritative root-level record without changing state.
+
+    The derived projection and compatibility view are validated here too, so
+    every surface that is not able to rebuild them keeps failing closed on
+    derived corruption exactly as it did before.
+    """
+
+    metadata = validate_control_authority(root)
+    root = _require_absolute_root(str(root), "configured")
+    ledger = validate_ledger(
+        _load_json(root / LEDGER_NAME, LEDGER_NAME), metadata["control_id"], root
+    )
     for field in ("control_root", "queue_root", "planning_root", "implementation_roots"):
         if ledger["canonical_roots"][field] != metadata["canonical_roots"][field]:
             raise ControlStoreError(
                 f"{LEDGER_NAME} canonical_roots.{field} does not match {CONTROL_METADATA_NAME}"
             )
-    _validate_events(events_path, metadata["control_id"])
-    read_committed_events(root, metadata["control_id"])
-    _validate_record_directory(root / COMMANDS_DIR_NAME, COMMANDS_DIR_NAME, metadata["control_id"])
-    _validate_record_directory(root / ESCALATIONS_DIR_NAME, ESCALATIONS_DIR_NAME, metadata["control_id"])
-    _require_directory(root / LOCKS_DIR_NAME, LOCKS_DIR_NAME)
+    _validate_events(root / EVENTS_NAME, metadata["control_id"])
     return metadata
 
 
@@ -4179,6 +4588,28 @@ def apply_mission_cancellation(
     return True, MISSION_FOLD_REQUESTED
 
 
+def apply_mission_recovery(
+    recoveries: Dict[str, Dict[str, Any]],
+    recovery: Mapping[str, Any],
+    event: "CommittedEvent",
+) -> Tuple[bool, str]:
+    """Fold one committed bounded recovery request into the projection.
+
+    The request is the durable half and is all this fold records: whether the
+    worker answered it is derived later from the correlated lifecycle events and
+    command acknowledgements, at one explicit moment.  A recovery request never
+    moves a mission state, so a silent worker can never be folded into `failed`.
+    """
+
+    command_id = recovery["command_id"]
+    if command_id in recoveries:
+        return False, MISSION_FOLD_RETAINED_DUPLICATE
+    entry = {"recovery": dict(recovery)}
+    entry.update(_mission_event_stamp(event))
+    recoveries[command_id] = entry
+    return True, MISSION_FOLD_RECOVERY_REQUESTED
+
+
 def apply_mission_replacement(
     missions: Dict[str, Dict[str, Any]],
     worker_slots: Dict[str, Dict[str, Any]],
@@ -4402,10 +4833,25 @@ class MissionState:
     missions: Dict[str, Dict[str, Any]]
     dialogs: Dict[str, Dict[str, Any]]
     cancellations: Dict[str, Dict[str, Any]]
+    recoveries: Dict[str, Dict[str, Any]]
     worker_slots: Dict[str, Dict[str, Any]]
     controller: Dict[str, Any]
     lifecycle_outcomes: Dict[str, Tuple[bool, str]]
     mission_outcomes: Dict[str, Tuple[bool, str]]
+    # For every worker, the committed revision at which its slot's *current*
+    # mission first claimed it, and which mission that is.  This is derived from
+    # commit order alone and is deliberately not projected into `ledger.json`:
+    # it exists so a durable conflict can be told from a historical one without
+    # anything having to remember, and without a second schema to keep honest.
+    slot_claims: Dict[str, Tuple[int, str]]
+    # For every materialized mission, the committed revision that keys its
+    # bounded recovery episode and whether that episode is still open.  It is
+    # derived from commit order and the moments committed controller records
+    # declare, and, like `slot_claims`, is deliberately not projected into
+    # `ledger.json`: it exists so "is the ladder still walking the same
+    # staleness?" is answered from committed authority rather than from a
+    # projection that would have to be migrated and kept honest.
+    recovery_episodes: Dict[str, Tuple[int, bool]]
 
     @property
     def claimed_slots(self) -> Tuple[Tuple[str, Dict[str, Any]], ...]:
@@ -4417,6 +4863,262 @@ class MissionState:
             if self.worker_slots[worker_id]["state"] in MISSION_SLOT_CLAIMED_STATES
         )
 
+    def duplicate_claim_is_live(self, conflict: Mapping[str, Any]) -> bool:
+        """Say whether the claim one conflict refused is still a live mission.
+
+        A duplicate claim is live exactly while the mission it named is
+        materialized and has not reached a terminal state.  Nothing else counts:
+        a claim the fold refused before it ever materialized a mission never put
+        a second mission on the worker, and a mission an operator or its own
+        worker has since ended is evidence about a finished episode.  This is
+        what makes the refusal repairable -- ending the duplicate is an action
+        an operator can actually take, and taking it clears the block -- rather
+        than a dead end that names a repair which can never satisfy it.
+        """
+
+        duplicate = self.missions.get(conflict["mission_id"])
+        if duplicate is None:
+            return False
+        return duplicate["lifecycle"]["state"] not in WORKER_LIFECYCLE_TERMINAL_STATES
+
+    @property
+    def contested_slots(self) -> Tuple[Tuple[str, Dict[str, Any], Dict[str, Any]], ...]:
+        """Return every worker two live missions claimed, with the refused claim.
+
+        The mission the worker keeps is the one the deterministic fold admitted
+        first *in committed revision order*, never the one with the newest
+        timestamp: ADR-014 rejects "latest timestamp wins" because clocks and
+        late observations do not establish ownership.  A conflict counts only
+        while the claim it was refused against is still the one the slot holds
+        *and* the duplicate claim it refused is still a live mission, so a worker
+        whose contested mission ended, and which was later claimed again, is not
+        blocked forever by evidence about a finished episode -- and neither is a
+        worker whose duplicate claim an operator has ended exactly as the
+        refusal told them to.
+
+        A worker whose *retained* mission ends releases its slot, and the next
+        tick may dispatch to it while the refused duplicate is still live.  That
+        is deliberate and predates this story: the conflict is evidence about
+        two claims on one slot, and once the slot is free there is no longer a
+        second claim on it -- the duplicate is then an uncorrelated mission its
+        own worker still owns, which the lifecycle surface reports and nothing
+        here may end on its behalf.
+        """
+
+        found: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        for worker_id in sorted(self.worker_slots):
+            slot = self.worker_slots[worker_id]
+            if slot["state"] not in MISSION_SLOT_CLAIMED_STATES:
+                continue
+            claim = self.slot_claims.get(worker_id)
+            if claim is None or claim[1] != slot["mission_id"]:
+                continue
+            for conflict in slot["conflicts"]:
+                if conflict["reason"] not in MISSION_SLOT_DUPLICATE_CLAIM_REASONS:
+                    continue
+                if conflict["revision"] < claim[0]:
+                    continue
+                if not self.duplicate_claim_is_live(conflict):
+                    continue
+                found.append((worker_id, slot, conflict))
+                break
+        return tuple(found)
+
+
+def _episode_moment(value: Any) -> Optional[datetime]:
+    """Parse one declared moment, or nothing at all if it cannot be read.
+
+    A fold may never raise on a committed record: refusing to project committed
+    authority would wedge the whole store.  An unreadable moment therefore
+    proves nothing, and proving nothing keeps an open recovery episode open,
+    which is the bounded direction to fail in.
+    """
+
+    try:
+        return _parsed_timestamp(value, "moment", "recovery episode")
+    except ControlStoreError:
+        return None
+
+
+def _record_episode_evidence(
+    episodes: Dict[str, Tuple[int, bool]],
+    mission_id: str,
+    event: "CommittedEvent",
+) -> None:
+    """Key one mission's next recovery episode on its newest lifecycle evidence.
+
+    Evidence that arrives while no episode is open keys the episode that any
+    later staleness will be recovered under.  Evidence that arrives *while an
+    episode is open* deliberately does not: a worker whose declared freshness
+    window is shorter than the interval it reports on is stale at every moment
+    the controller ever looks, and if such evidence re-keyed the episode it
+    would move every rung onto identifiers no rung has used and restart the walk
+    at `nudge` forever.  Only being seen fresh by the controller ends an
+    episode, which is what makes the ladder finite in wall-clock time and not
+    merely finite per key.
+    """
+
+    episode = episodes.get(mission_id)
+    if episode is None or not episode[1]:
+        episodes[mission_id] = (event.revision, False)
+
+
+def _open_recovery_episode(
+    episodes: Dict[str, Tuple[int, bool]],
+    mission_id: str,
+    revision: int,
+) -> None:
+    """Record that the controller has begun recovering one mission."""
+
+    episode = episodes.get(mission_id)
+    episodes[mission_id] = (episode[0] if episode is not None else revision, True)
+
+
+def _close_observed_episodes(
+    episodes: Dict[str, Tuple[int, bool]],
+    missions: Mapping[str, Mapping[str, Any]],
+    moment: Any,
+    mission_id: Any,
+    reason: Any,
+) -> None:
+    """End every open episode whose mission was fresh when the controller looked.
+
+    A committed controller record is the durable evidence that the controller
+    read the whole cockpit at the moment it declares.  A mission whose declared
+    freshness still covered that moment was not stale when it was looked at, so
+    its episode is over and the next staleness is a new one -- which is exactly
+    the reset the ladder documents.  A record the controller wrote *because* it
+    is walking that mission's own episode is excluded: an `awaiting-recovery-
+    response` observation about a mission whose queue item left the active set
+    would otherwise close and reopen its own episode on every wake.
+
+    Only a *recorded* look ends an episode, and the observation that reports a
+    mission in progress carries the freshness its worker declared exactly so
+    that rule costs nothing: a mission that went stale and came back has
+    necessarily declared a window it had not declared before, so restored
+    freshness is always a new situation and is always recorded.  A look whose
+    observation repeats the controller's last recorded decision saw the same
+    declared freshness that look already closed on, and re-recording it would be
+    the repeated investigation a stalled cockpit must not grow one event per
+    wake for.  Evidence that does not restore freshness never reaches an
+    in-progress observation at all, so it can never end an episode either: the
+    ladder stays finite in wall-clock time for a worker whose every report is
+    already expired, and restarts at `nudge` for one that answers.
+    """
+
+    if not episodes:
+        return
+    looked_at = _episode_moment(moment)
+    if looked_at is None:
+        return
+    for observed_mission in sorted(episodes):
+        revision, opened = episodes[observed_mission]
+        if not opened:
+            continue
+        if observed_mission == mission_id and reason in CONTROLLER_EPISODE_REASONS:
+            continue
+        slot = missions.get(observed_mission)
+        if slot is None:
+            continue
+        lifecycle = slot["lifecycle"]
+        if lifecycle["state"] in WORKER_LIFECYCLE_TERMINAL_STATES:
+            # Deliberately redundant with the `expiry is None` arm below: a
+            # terminal state declares no freshness at all, so an ended mission
+            # is refused twice rather than once.  It is kept because it states
+            # the invariant -- an episode is about a mission that is still
+            # running -- and neither guard alone can be removed by anyone
+            # reading only the other.
+            continue
+        expiry = _episode_moment(lifecycle["fresh_until"])
+        if expiry is None or looked_at > expiry:
+            continue
+        episodes[observed_mission] = (slot["revision"], False)
+
+
+def _fold_one_event(
+    event: "CommittedEvent",
+    label: str,
+    missions: Dict[str, Dict[str, Any]],
+    dialogs: Dict[str, Dict[str, Any]],
+    cancellations: Dict[str, Dict[str, Any]],
+    recoveries: Dict[str, Dict[str, Any]],
+    worker_slots: Dict[str, Dict[str, Any]],
+    controller: Dict[str, Any],
+    lifecycle_outcomes: Dict[str, Tuple[bool, str]],
+    mission_outcomes: Dict[str, Tuple[bool, str]],
+    episodes: Dict[str, Tuple[int, bool]],
+) -> None:
+    """Fold exactly one committed event into every materialized projection."""
+
+    observation = event_controller_observation(event.record, label)
+    if observation is not None:
+        mission_outcomes[event.event_id] = apply_controller_observation(
+            controller, observation, event
+        )
+        _close_observed_episodes(
+            episodes,
+            missions,
+            observation["observed_at"],
+            observation["mission_id"],
+            observation["reason"],
+        )
+        return
+    lifecycle = event_worker_lifecycle(event.record, label)
+    if lifecycle is not None:
+        fault = _mission_slot_claim_fault(worker_slots, lifecycle)
+        if fault is not None:
+            # The event stays committed audit evidence; it simply may not
+            # take a mission slot another claim already holds.
+            lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
+            entry = _mission_slot_entry(worker_slots, lifecycle["worker_id"], event)
+            entry["conflicts"].append(
+                _mission_slot_conflict(
+                    lifecycle["mission_id"],
+                    fault,
+                    MISSION_SLOT_CONFLICT_LIFECYCLE,
+                    None,
+                    event,
+                )
+            )
+            return
+        applied, outcome = apply_worker_lifecycle(missions, lifecycle, event)
+        lifecycle_outcomes[event.event_id] = (applied, outcome)
+        # Only an event that moved the materialized mission may move the
+        # slot with it; audit-only evidence claims nothing.
+        if applied:
+            apply_lifecycle_mission_slot(worker_slots, lifecycle, event)
+            _record_episode_evidence(episodes, lifecycle["mission_id"], event)
+        return
+    field, record = event_mission_control(event.record, label)
+    if record is None:
+        return
+    if field == MISSION_DIALOG_PAYLOAD_FIELD:
+        mission_outcomes[event.event_id] = apply_mission_dialog(dialogs, record, event)
+    elif field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        mission_outcomes[event.event_id] = apply_mission_cancellation(
+            cancellations, record, event
+        )
+        # A cooperative cancellation the *controller* minted is a rung of a
+        # bounded ladder, and the terminal-item ladder opens with it, so the
+        # episode it belongs to starts here.  An operator's own cancellation
+        # carries their reason and opens nothing.
+        if record["reason"] in CONTROLLER_CANCEL_REASONS.values():
+            _open_recovery_episode(episodes, record["mission_id"], event.revision)
+    elif field == MISSION_RECOVERY_PAYLOAD_FIELD:
+        mission_outcomes[event.event_id] = apply_mission_recovery(recoveries, record, event)
+        _open_recovery_episode(episodes, record["mission_id"], event.revision)
+    elif field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
+        mission_outcomes[event.event_id] = apply_controller_dispatch(
+            missions, worker_slots, controller, record, event
+        )
+        _close_observed_episodes(
+            episodes, missions, record["decided_at"], record["mission_id"], record["reason"]
+        )
+    else:
+        mission_outcomes[event.event_id] = apply_mission_replacement(
+            missions, worker_slots, record, event
+        )
+
 
 def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
     """Replay committed events into every materialized mission projection."""
@@ -4424,70 +5126,59 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
     missions: Dict[str, Dict[str, Any]] = {}
     dialogs: Dict[str, Dict[str, Any]] = {}
     cancellations: Dict[str, Dict[str, Any]] = {}
+    recoveries: Dict[str, Dict[str, Any]] = {}
     worker_slots: Dict[str, Dict[str, Any]] = {}
     controller: Dict[str, Any] = {}
     lifecycle_outcomes: Dict[str, Tuple[bool, str]] = {}
     mission_outcomes: Dict[str, Tuple[bool, str]] = {}
+    slot_claims: Dict[str, Tuple[int, str]] = {}
+    recovery_episodes: Dict[str, Tuple[int, bool]] = {}
+
+    def record_slot_claims(event: "CommittedEvent") -> None:
+        """Stamp the revision at which each worker's current claim began.
+
+        This is observed from the folded slots rather than threaded through
+        every applier on purpose: any future claim path is covered without a
+        second place to keep in step, and reserving a slot and later accepting
+        the same mission on it stay one claim rather than two.
+        """
+
+        for worker_id in worker_slots:
+            entry = worker_slots[worker_id]
+            if entry["state"] not in MISSION_SLOT_CLAIMED_STATES:
+                continue
+            claim = slot_claims.get(worker_id)
+            if claim is None or claim[1] != entry["mission_id"]:
+                slot_claims[worker_id] = (event.revision, entry["mission_id"])
 
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
-        observation = event_controller_observation(event.record, label)
-        if observation is not None:
-            mission_outcomes[event.event_id] = apply_controller_observation(
-                controller, observation, event
-            )
-            continue
-        lifecycle = event_worker_lifecycle(event.record, label)
-        if lifecycle is not None:
-            fault = _mission_slot_claim_fault(worker_slots, lifecycle)
-            if fault is not None:
-                # The event stays committed audit evidence; it simply may not
-                # take a mission slot another claim already holds.
-                lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
-                entry = _mission_slot_entry(worker_slots, lifecycle["worker_id"], event)
-                entry["conflicts"].append(
-                    _mission_slot_conflict(
-                        lifecycle["mission_id"],
-                        fault,
-                        MISSION_SLOT_CONFLICT_LIFECYCLE,
-                        None,
-                        event,
-                    )
-                )
-                continue
-            applied, outcome = apply_worker_lifecycle(missions, lifecycle, event)
-            lifecycle_outcomes[event.event_id] = (applied, outcome)
-            # Only an event that moved the materialized mission may move the
-            # slot with it; audit-only evidence claims nothing.
-            if applied:
-                apply_lifecycle_mission_slot(worker_slots, lifecycle, event)
-            continue
-        field, record = event_mission_control(event.record, label)
-        if record is None:
-            continue
-        if field == MISSION_DIALOG_PAYLOAD_FIELD:
-            mission_outcomes[event.event_id] = apply_mission_dialog(dialogs, record, event)
-        elif field == MISSION_CANCELLATION_PAYLOAD_FIELD:
-            mission_outcomes[event.event_id] = apply_mission_cancellation(
-                cancellations, record, event
-            )
-        elif field == CONTROLLER_DISPATCH_PAYLOAD_FIELD:
-            mission_outcomes[event.event_id] = apply_controller_dispatch(
-                missions, worker_slots, controller, record, event
-            )
-        else:
-            mission_outcomes[event.event_id] = apply_mission_replacement(
-                missions, worker_slots, record, event
-            )
+        _fold_one_event(
+            event,
+            label,
+            missions=missions,
+            dialogs=dialogs,
+            cancellations=cancellations,
+            recoveries=recoveries,
+            worker_slots=worker_slots,
+            controller=controller,
+            lifecycle_outcomes=lifecycle_outcomes,
+            mission_outcomes=mission_outcomes,
+            episodes=recovery_episodes,
+        )
+        record_slot_claims(event)
 
     return MissionState(
         missions=missions,
         dialogs=dialogs,
         cancellations=cancellations,
+        recoveries=recoveries,
         worker_slots=worker_slots,
         controller=controller,
         lifecycle_outcomes=lifecycle_outcomes,
         mission_outcomes=mission_outcomes,
+        slot_claims=slot_claims,
+        recovery_episodes=recovery_episodes,
     )
 
 
@@ -4682,6 +5373,7 @@ def build_ledger_projection(
         LEDGER_COMMANDS_FIELD: commands,
         LEDGER_MISSION_DIALOGS_FIELD: mission_state.dialogs,
         LEDGER_MISSION_CANCELLATIONS_FIELD: mission_state.cancellations,
+        LEDGER_MISSION_RECOVERIES_FIELD: mission_state.recoveries,
         LEDGER_MISSION_SLOTS_FIELD: mission_state.worker_slots,
         LEDGER_CONTROLLER_FIELD: dict(mission_state.controller) or None,
         "canonical_roots": {
@@ -4832,6 +5524,30 @@ def _classify_published_ledger(
     return observed, PROJECTION_REASON_DIVERGENT
 
 
+def _published_view_matches(root: Path, expected: str) -> bool:
+    """Report whether the derived compatibility view equals the rebuild.
+
+    Like the ledger classification beside it this is a pure read: it never
+    mutates, never locks, and never trusts the published bytes, so the locked
+    projection and the read-only controller observation cannot describe the same
+    derived view two different ways.
+    """
+
+    view_path = root / EVENTS_NAME
+    try:
+        mode = view_path.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {EVENTS_NAME}: {exc}") from None
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        return False
+    try:
+        return view_path.read_bytes() == expected.encode("utf-8")
+    except OSError:
+        return False
+
+
 def _ledger_projection_fault(boundary: str, projection: "ControlLedgerProjection") -> None:
     """No-op named projection hook used by deterministic protocol tests."""
 
@@ -4931,18 +5647,7 @@ class ControlLedgerProjection:
     def _view_matches(self, expected: str) -> bool:
         """Report whether the derived compatibility view equals the rebuild."""
 
-        try:
-            mode = self.view_path.lstat().st_mode
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            raise ControlStoreError(f"cannot inspect {EVENTS_NAME}: {exc}") from None
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            return False
-        try:
-            return self.view_path.read_bytes() == expected.encode("utf-8")
-        except OSError:
-            return False
+        return _published_view_matches(self.root, expected)
 
     def _result(self, outcome: str) -> LedgerProjectionResult:
         record = dict(self.record or {})
@@ -6237,6 +6942,39 @@ def build_mission_replacement(
     return validate_mission_replacement(record)
 
 
+def build_mission_recovery(
+    command_id: str,
+    action: str,
+    mission_id: str,
+    worker_id: str,
+    queue_item_id: str,
+    trace_id: str,
+    reason: str,
+    respond_deadline_at: str,
+    parent_trace_id: Optional[str] = None,
+    evidence_refs: Sequence[str] = (),
+    requested_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assemble one complete bounded recovery request and validate it before use."""
+
+    record = {
+        "schema_version": MISSION_CONTROL_SCHEMA_VERSION,
+        "record_type": MISSION_RECOVERY_RECORD_TYPE,
+        "command_id": command_id,
+        "action": action,
+        "mission_id": mission_id,
+        "worker_id": worker_id,
+        "queue_item_id": queue_item_id,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+        "reason": reason,
+        "evidence_refs": list(evidence_refs),
+        "requested_at": requested_at if requested_at is not None else utc_timestamp(),
+        "respond_deadline_at": respond_deadline_at,
+    }
+    return validate_mission_recovery(record)
+
+
 def read_mission_state(root: Path) -> MissionState:
     """Fold the committed events of a control root into every mission projection.
 
@@ -6742,19 +7480,42 @@ class ControllerEvidence:
     correlated_records: int
     uncorrelated_records: int
     as_of: str
+    # Freshness of every materialized mission at `as_of`, derived from committed
+    # lifecycle events alone.  `stale` is an observation and never a state: it
+    # is what makes a bounded recovery action *owed*, and nothing here can fold
+    # a silent worker into `failed`.
+    observations: Tuple[WorkerLifecycleObservation, ...]
+    # Every command ID this control root has committed.  A recovery rung asks
+    # whether its own derived identifier is among them, which is how "already
+    # attempted for this staleness episode" is answered from committed authority
+    # rather than from a counter anybody has to maintain.
+    command_ids: Tuple[str, ...]
+    ledger_repair: str
+    repaired_from: Optional[str]
+
+    def __post_init__(self) -> None:
+        """Refuse a derived-state classification outside the closed vocabulary."""
+
+        if self.ledger_repair not in CONTROLLER_LEDGER_OUTCOMES:
+            raise ControlStoreError(
+                f"unknown derived-state classification {self.ledger_repair!r}; expected "
+                f"one of {', '.join(CONTROLLER_LEDGER_OUTCOMES)}"
+            )
 
     @property
-    def ledger_divergent(self) -> bool:
-        """True only for a projection no section 8.3 writer could have left.
+    def ledger_undecidable(self) -> bool:
+        """True for derived state no tick may go on to decide from.
 
-        A projection that is simply behind the committed journal is excluded
-        here on purpose: it is what a reader sees inside the window between a
-        committed event and its replaced projection, and it is what a writer
-        interrupted in that window leaves behind.  Both are repaired by the next
-        replay and neither changes one fact the decision below is derived from.
+        A projection that is missing, behind, unreadable, or disagreeing is
+        derived state the committed events reproduce exactly, and the tick has
+        already rebuilt it before this record was assembled.  Anything else is
+        refused earlier, before one piece of evidence exists, so reaching this
+        property at all means a caller assembled evidence some other way -- and
+        the decision refuses to dispatch from it rather than trusting the shape
+        of the record it was handed.
         """
 
-        return self.ledger_reason in CONTROLLER_PROJECTION_DIVERGENT_REASONS
+        return self.ledger_repair not in CONTROLLER_LEDGER_DECIDABLE
 
     @property
     def controller(self) -> Optional[Dict[str, Any]]:
@@ -6766,6 +7527,95 @@ class ControllerEvidence:
         """Return which dispatch of this queue item to this worker comes next."""
 
         return 1 + sum(1 for pair in self.dispatched_pairs if pair == (queue_item_id, worker_id))
+
+    def observation(self, mission_id: str) -> Optional[WorkerLifecycleObservation]:
+        """Return the freshness observation of one materialized mission."""
+
+        for observed in self.observations:
+            if observed.mission_id == mission_id:
+                return observed
+        return None
+
+    @property
+    def stale_missions(self) -> Tuple[WorkerLifecycleObservation, ...]:
+        """Return every materialized mission whose declared freshness expired."""
+
+        return tuple(observed for observed in self.observations if observed.stale)
+
+    def active_item(self, queue_item_id: str) -> Optional[QueueItemObservation]:
+        """Return the queue item only while product work still owns it."""
+
+        if self.queue is None:
+            return None
+        for item in self.queue.active:
+            if item.item_id == queue_item_id:
+                return item
+        return None
+
+    def episode_revision(self, mission_id: str) -> int:
+        """Return the committed revision that keys one mission's recovery episode.
+
+        Every recovery identifier is derived from this number, so the episode it
+        keys is exactly the run of ticks a rung may be attempted once in.  The
+        key comes from the deterministic fold rather than from "the newest
+        lifecycle evidence", because those are not the same thing: evidence that
+        arrives while the controller is still finding the mission stale did not
+        end the staleness, and letting it re-key the episode would move every
+        rung onto identifiers no rung has used and restart the walk at `nudge`
+        on every wake -- a worker reporting every ten minutes with a two-minute
+        freshness window would then never be troubleshot, cancelled, replaced,
+        or escalated to a human.  The episode ends when the *controller* records
+        that it looked and the mission was fresh; the next staleness is then a
+        new episode keyed on the evidence that ended this one.
+        """
+
+        episode = self.state.recovery_episodes.get(mission_id)
+        if episode is None:
+            return self.state.missions[mission_id]["revision"]
+        return episode[0]
+
+    def recovery_command_id(self, mission_id: str, rung: str, episode: int) -> str:
+        """Return the one command ID this rung of this episode may ever use."""
+
+        return _controller_derived_uuid(
+            self.control_id,
+            CONTROLLER_RECOVERY_COMMAND_DERIVATION,
+            mission_id,
+            rung,
+            str(episode),
+        )
+
+    def recovery_trace_id(self, mission_id: str, rung: str, episode: int) -> str:
+        """Return the child trace ADR-016 gives one focused recovery dialog."""
+
+        return _controller_derived_uuid(
+            self.control_id,
+            CONTROLLER_RECOVERY_TRACE_DERIVATION,
+            mission_id,
+            rung,
+            str(episode),
+        )
+
+    def recovery_mission_id(self, mission_id: str, episode: int) -> str:
+        """Return the new mission ID a replacement rung of this episode creates."""
+
+        return _controller_derived_uuid(
+            self.control_id,
+            CONTROLLER_RECOVERY_MISSION_DERIVATION,
+            mission_id,
+            str(episode),
+        )
+
+    def recovery_deadline(self, command_id: str) -> Optional[str]:
+        """Return the moment one delivered rung declared a response is due by."""
+
+        entry = self.state.recoveries.get(command_id)
+        if entry is not None:
+            return entry["recovery"]["respond_deadline_at"]
+        entry = self.state.cancellations.get(command_id)
+        if entry is not None:
+            return entry["cancellation"]["acknowledge_deadline_at"]
+        return None
 
 
 @dataclass(frozen=True)
@@ -6788,6 +7638,30 @@ class ControllerAction:
     trace_id: Optional[str] = None
     payload_digest: Optional[str] = None
     evidence_refs: Tuple[str, ...] = ()
+    parent_trace_id: Optional[str] = None
+    recovery_rung: Optional[str] = None
+    deadline_at: Optional[str] = None
+    replacement_mission_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Refuse an action outside the closed decision vocabulary.
+
+        The kind, the outcome, and the reason are all rendered into parseable
+        positions of the tick payload, so a future branch that invented one
+        would put free text where a skill or a test reads a closed token.  This
+        is the choke point every decision passes through, so it is refused here
+        rather than in each of the places that build one.
+        """
+
+        if self.kind not in CONTROLLER_ACTIONS:
+            raise ControlStoreError(
+                f"a controller tick cannot take unknown action {self.kind!r}; expected one "
+                f"of {', '.join(CONTROLLER_ACTIONS)}"
+            )
+        if self.reason not in CONTROLLER_ACTION_REASONS:
+            raise ControlStoreError(
+                f"a controller tick cannot decide for unknown reason {self.reason!r}"
+            )
 
     @property
     def blocking(self) -> bool:
@@ -6804,6 +7678,28 @@ def controller_state_key(fields: Mapping[str, Any]) -> str:
     """
 
     return command_payload_digest(dict(fields), "controller state")
+
+
+def controller_ledger_plan(reason: str) -> str:
+    """Say what one tick must do about a derived-projection classification.
+
+    Every classification `_classify_published_ledger` and the compatibility-view
+    comparison can produce is read here exactly once, and an unrecognised one is
+    a refusal rather than a default.  A future classification that nobody
+    consciously placed on one side of this partition therefore stops a tick
+    instead of being silently treated as healthy or silently rebuilt.
+    """
+
+    if reason == PROJECTION_REASON_CURRENT:
+        return CONTROLLER_LEDGER_CURRENT
+    if reason in CONTROLLER_PROJECTION_REPAIRABLE_REASONS:
+        return CONTROLLER_LEDGER_REPAIRED
+    if reason in CONTROLLER_PROJECTION_DIVERGENT_REASONS:
+        return CONTROLLER_LEDGER_REFUSED
+    raise ControlStoreError(
+        f"{LEDGER_NAME} classification {reason!r} is not classified as repairable derived "
+        "state or as refused authority loss; a controller tick will not guess which"
+    )
 
 
 def _controller_derived_uuid(control_id: str, derivation: str, *parts: str) -> str:
@@ -6836,11 +7732,41 @@ def _controller_observation_action(
     """
 
     outcome = CONTROLLER_BLOCKED if reason in CONTROLLER_BLOCKING_REASONS else CONTROLLER_OBSERVED
+    # Include whether a bounded recovery episode is open for the mission the
+    # observation is about in the controller state key.  The observation key
+    # must change when an episode is open so that a genuine fresh lifecycle
+    # event can close that episode even if some of the raw freshness fields
+    # (for example `fresh_until`) happen to repeat a previously-seen value.
+    # This encodes episode-open as part of the reconciled evidence digest but
+    # only when a mission_id is present so other observation kinds are
+    # unaffected.
     state_key = controller_state_key(dict(fields, reason=reason))
     recorded = evidence.controller
     kind = CONTROLLER_ACTION_OBSERVE
+    # Normally an observation whose state key the controller already holds
+    # collapses to `none` to avoid repeated investigation.  However, if a
+    # bounded recovery episode for this mission is currently open, a genuine
+    # fresh lifecycle event must close that episode even when some of the
+    # observed fields happen to repeat a previous value.  In that case record
+    # the observation so the episode-reset semantics run.  The presence of a
+    # mission_id in the fields is used to detect this special-case only.
     if recorded is not None and recorded["state_key"] == state_key:
-        kind = CONTROLLER_ACTION_NONE
+        mission_id = dict(fields).get("mission_id")
+        # Only force-record duplicated observations when the controller is
+        # seeing a mission-in-progress observation that can legitimately
+        # close a bounded recovery episode.  Other observation kinds (for
+        # example awaiting/escalated/repair) must continue to collapse to
+        # `none` to avoid committing spurious controller-observation events.
+        episode_open = False
+        if mission_id is not None and reason == CONTROLLER_REASON_MISSION_IN_PROGRESS:
+            try:
+                ep = evidence.state.recovery_episodes.get(mission_id)
+            except Exception:
+                ep = None
+            episode_open = bool(ep and ep[1])
+        if not episode_open:
+            kind = CONTROLLER_ACTION_NONE
+
     return ControllerAction(
         kind=kind,
         outcome=outcome,
@@ -6852,6 +7778,219 @@ def _controller_observation_action(
         command_id=command_id,
         evidence_refs=evidence_refs,
     )
+
+
+@dataclass(frozen=True)
+class ControllerRecoveryStep:
+    """The one rung of the bounded ladder this episode has reached."""
+
+    rung: str
+    command_id: Optional[str]
+    deadline_at: Optional[str]
+
+
+def controller_recovery_ladder(
+    evidence: ControllerEvidence,
+    observation: WorkerLifecycleObservation,
+) -> Tuple[str, ...]:
+    """Return the fixed ladder that applies to one stale or orphaned mission.
+
+    The ladder is chosen from product-work authority, never from what would be
+    convenient: a mission whose queue item left the active set has nothing left
+    to be nudged, troubleshot, or redone, so it is asked to cancel and is
+    escalated if it will not -- and the queue item is never reopened.  A mission
+    whose queue item is active but is no longer implementable by this worker
+    loses only the replacement rung, because minting a replacement mission there
+    would put work on a worker `cockpit-queue` no longer names for it.
+    """
+
+    item = evidence.active_item(observation.queue_item_id)
+    if item is None:
+        return CONTROLLER_TERMINAL_ITEM_LADDER
+    if CONTROLLER_WORKER_BY_QUEUE_STATE.get(item.state) != observation.worker_id:
+        return CONTROLLER_UNREPLACEABLE_LADDER
+    return CONTROLLER_RECOVERY_LADDER
+
+
+def select_recovery_step(
+    evidence: ControllerEvidence,
+    observation: WorkerLifecycleObservation,
+    ladder: Sequence[str],
+) -> ControllerRecoveryStep:
+    """Return the next rung of one staleness episode, and never a later one.
+
+    The walk is finite by construction.  Each command rung owns exactly one
+    derived command ID per episode, so a rung already committed is never
+    delivered twice, and the walk can only ever run off the end of a fixed
+    ladder into `escalate`, which delivers nothing.  It is finite in wall-clock
+    time as well, because the episode a rung is keyed to ends only when the
+    controller records that it looked and the mission was fresh: lifecycle
+    evidence that is already expired when it arrives cannot restart the walk.  A rung that has been
+    delivered but whose declared response window has not elapsed at this
+    explicit moment holds the ladder still rather than advancing it, so a worker
+    is never cancelled for not answering inside a window it was never given.
+    """
+
+    episode = evidence.episode_revision(observation.mission_id)
+    now = _parsed_timestamp(evidence.as_of, "as_of", "controller tick")
+    for rung in ladder:
+        if rung == CONTROLLER_RECOVERY_ESCALATE:
+            break
+        command_id = evidence.recovery_command_id(observation.mission_id, rung, episode)
+        if command_id not in evidence.command_ids:
+            return ControllerRecoveryStep(rung, command_id, None)
+        deadline = evidence.recovery_deadline(command_id)
+        if deadline is None:
+            # A replacement declares no response window: it either created the
+            # mission that ends this episode or it was refused and recorded as
+            # a durable conflict, and neither is waited on.
+            continue
+        if now <= _parsed_timestamp(deadline, "respond_deadline_at", "controller tick"):
+            return ControllerRecoveryStep(CONTROLLER_RECOVERY_AWAIT, command_id, deadline)
+    return ControllerRecoveryStep(CONTROLLER_RECOVERY_ESCALATE, None, None)
+
+
+def _recovery_action(
+    evidence: ControllerEvidence,
+    worker_id: str,
+    slot: Mapping[str, Any],
+    observation: WorkerLifecycleObservation,
+) -> ControllerAction:
+    """Build the one bounded recovery action this mission's episode has reached."""
+
+    ladder = controller_recovery_ladder(evidence, observation)
+    terminal_item = ladder is CONTROLLER_TERMINAL_ITEM_LADDER
+    step = select_recovery_step(evidence, observation, ladder)
+    episode = evidence.episode_revision(observation.mission_id)
+    references = (
+        f"queue:{observation.queue_item_id}",
+        f"mission:{observation.mission_id}",
+        f"trace:{observation.trace_id}",
+    )
+    fields = {
+        "worker_id": worker_id,
+        "mission_id": observation.mission_id,
+        "queue_item_id": observation.queue_item_id,
+        "mission_state": observation.state,
+        "observation": observation.observation,
+        "episode_revision": episode,
+        "ladder": list(ladder),
+        "rung": step.rung,
+    }
+
+    if step.rung == CONTROLLER_RECOVERY_AWAIT:
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_RECOVERY_AWAITING,
+            dict(fields, command_id=step.command_id, deadline_at=step.deadline_at),
+            queue_item_id=observation.queue_item_id,
+            worker_id=worker_id,
+            mission_id=observation.mission_id,
+            command_id=step.command_id,
+            evidence_refs=references,
+        )
+    if step.rung == CONTROLLER_RECOVERY_ESCALATE:
+        # Every rung this ladder had has been delivered and answered by nothing.
+        # The controller stops here: it has taken every bounded action it is
+        # allowed to take, and the next decision is a human's.
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_RECOVERY_ESCALATED,
+            fields,
+            queue_item_id=observation.queue_item_id,
+            worker_id=worker_id,
+            mission_id=observation.mission_id,
+            command_id=slot["command_id"],
+            evidence_refs=references,
+        )
+
+    reason = CONTROLLER_RECOVERY_RUNG_REASONS[step.rung]
+    if terminal_item and step.rung == CONTROLLER_RECOVERY_CANCEL:
+        reason = CONTROLLER_REASON_QUEUE_ITEM_TERMINAL
+    command_id = str(step.command_id)
+    trace_id = evidence.recovery_trace_id(observation.mission_id, step.rung, episode)
+    replacement_mission_id = None
+    if step.rung == CONTROLLER_RECOVERY_REPLACE:
+        replacement_mission_id = evidence.recovery_mission_id(observation.mission_id, episode)
+    seconds = (
+        CONTROLLER_RECOVERY_ACKNOWLEDGE_SECONDS
+        if step.rung == CONTROLLER_RECOVERY_CANCEL
+        else CONTROLLER_RECOVERY_RESPOND_SECONDS
+    )
+    deadline_at = None
+    if step.rung != CONTROLLER_RECOVERY_REPLACE:
+        deadline_at = _shifted_timestamp(
+            evidence.as_of,
+            seconds,
+            field="requested_at",
+            label="controller recovery",
+            option="the bounded recovery response window",
+            noun="recovery response deadline",
+        )
+    return ControllerAction(
+        kind=CONTROLLER_ACTION_RECOVER,
+        outcome=CONTROLLER_RECOVERED,
+        reason=reason,
+        state_key=controller_state_key(dict(fields, reason=reason)),
+        queue_item_id=observation.queue_item_id,
+        worker_id=worker_id,
+        mission_id=observation.mission_id,
+        command_id=command_id,
+        trace_id=trace_id,
+        payload_digest=command_payload_digest(
+            {
+                "command_type": CONTROLLER_RECOVERY_COMMAND_PAYLOAD_TYPES[step.rung],
+                "episode_revision": episode,
+                "mission_id": observation.mission_id,
+                "queue_item_id": observation.queue_item_id,
+                "reason": reason,
+                "rung": step.rung,
+                "worker_id": worker_id,
+            },
+            "controller recovery payload",
+        ),
+        evidence_refs=references,
+        parent_trace_id=observation.trace_id,
+        recovery_rung=step.rung,
+        deadline_at=deadline_at,
+        replacement_mission_id=replacement_mission_id,
+    )
+
+
+def select_recovery_action(evidence: ControllerEvidence) -> Optional[ControllerAction]:
+    """Return the one bounded recovery a stale or orphaned mission is owed.
+
+    Only a worker's own claimed, materialized, still-active mission is
+    recoverable, and only one worker is acted on per tick: the slots are walked
+    in worker order so two ticks reading the same committed prefix always choose
+    the same worker, the same rung, and therefore the same command ID.
+    """
+
+    for worker_id, slot in evidence.state.claimed_slots:
+        mission_id = slot["mission_id"]
+        observation = evidence.observation(mission_id)
+        if observation is None or observation.terminal:
+            # A reserved slot whose worker has not accepted yet has no declared
+            # freshness at all, so there is nothing to observe as expired.  The
+            # `terminal` half of this guard is deliberately unreachable from a
+            # claimed slot -- the fold releases the slot on the same event that
+            # makes its mission terminal -- and is kept because it is the
+            # invariant this loop depends on, not because a caller relies on it.
+            #
+            # Note (TH3.E3.US3): this is also why a replacement mission nobody
+            # ever accepts is observed as `mission-in-progress` for good rather
+            # than recovered again, and why `escalate` is not reachable on the
+            # full ladder.  Chasing an unaccepted dispatch is a delivery
+            # concern, not a reconciliation one; it is US1-shaped behaviour this
+            # story deliberately does not change.
+            continue
+        if observation.worker_id != worker_id:
+            continue
+        owned = evidence.active_item(observation.queue_item_id) is not None
+        if not observation.stale and owned:
+            continue
+        return _recovery_action(evidence, worker_id, slot, observation)
+    return None
 
 
 def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
@@ -6888,7 +8027,7 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             },
         )
 
-    if evidence.ledger_divergent:
+    if evidence.ledger_undecidable:
         return _controller_observation_action(
             evidence,
             CONTROLLER_REASON_LEDGER_DIVERGENT,
@@ -6913,6 +8052,44 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
         return _controller_observation_action(
             evidence, CONTROLLER_REASON_QUEUE_PAUSED, {"queue_root": queue.root}
         )
+
+    # Rule 3 again, and before any product-work observation: two missions
+    # claiming one worker is a split in the control plane's own durable state.
+    # The fold has already kept the mission that claimed the slot first in
+    # committed revision order; what is left is to stop dispatching while the
+    # cockpit is in that state and to escalate it exactly once.
+    contested = evidence.state.contested_slots
+    if contested:
+        worker_id, slot, conflict = contested[0]
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_WORKER_CONFLICT,
+            {
+                "worker_id": worker_id,
+                "retained_mission_id": slot["mission_id"],
+                "retained_at_revision": conflict["revision"],
+                "refused_mission_id": conflict["mission_id"],
+                "conflict_reason": conflict["reason"],
+                "conflict_source": conflict["source"],
+            },
+            queue_item_id=slot["queue_item_id"],
+            worker_id=worker_id,
+            mission_id=slot["mission_id"],
+            command_id=slot["command_id"],
+            evidence_refs=(
+                f"mission:{slot['mission_id']}",
+                f"mission:{conflict['mission_id']}",
+            ),
+        )
+
+    # Rules 3 and 6 again: a mission the control plane still believes is running
+    # while its declared freshness has expired, or whose product work has left
+    # the active set, is owed exactly one bounded recovery action.  It is never
+    # marked failed here or anywhere else -- `stale` is an observation, and only
+    # the worker's own lifecycle event or a human decision ends a mission.
+    recovery = select_recovery_action(evidence)
+    if recovery is not None:
+        return recovery
 
     active = queue.active
     if not active:
@@ -6943,6 +8120,16 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
 
     for holder, slot in evidence.state.claimed_slots:
         if slot["queue_item_id"] == item.item_id:
+            # The freshness the worker has itself declared is part of *which*
+            # situation this is, not decoration on it.  Reaching here at all
+            # means the mission was fresh at this moment, so a worker that went
+            # stale and then came back has necessarily declared a window it had
+            # not declared before: including it is what makes "the controller
+            # looked and the mission was fresh" a recorded observation rather
+            # than one that collapses into an older, expired look and is never
+            # written down.  Evidence that does not restore freshness never
+            # reaches this branch, so it can never re-key an episode either.
+            observed = evidence.observation(slot["mission_id"])
             return _controller_observation_action(
                 evidence,
                 CONTROLLER_REASON_MISSION_IN_PROGRESS,
@@ -6952,6 +8139,7 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
                     "worker_id": holder,
                     "mission_id": slot["mission_id"],
                     "slot_state": slot["state"],
+                    "fresh_until": None if observed is None else observed.fresh_until,
                 },
                 queue_item_id=item.item_id,
                 worker_id=holder,
@@ -7173,12 +8361,26 @@ class ControllerJournalObservation:
     history: EventHistory
     ledger_revision: Optional[int]
     ledger_reason: str
+    repair: str = CONTROLLER_LEDGER_CURRENT
+    repaired_from: Optional[str] = None
 
     @property
     def settled(self) -> bool:
         """True when the projection equals the rebuild of this exact replay."""
 
         return self.ledger_reason == PROJECTION_REASON_CURRENT
+
+    def with_repair(self, repair: str, repaired_from: str) -> "ControllerJournalObservation":
+        """Return this reading annotated with what the tick did about it."""
+
+        return ControllerJournalObservation(
+            metadata=self.metadata,
+            history=self.history,
+            ledger_revision=self.ledger_revision,
+            ledger_reason=self.ledger_reason,
+            repair=repair,
+            repaired_from=repaired_from,
+        )
 
 
 class ControllerTick:
@@ -7255,13 +8457,23 @@ class ControllerTick:
         return declared, exported, None
 
     def _observed_journal(self) -> ControllerJournalObservation:
-        """Replay the committed events once and classify the published ledger."""
+        """Replay the committed events once and classify every derived record.
+
+        The compatibility view is classified beside the ledger rather than
+        separately: both are pure functions of the same committed events, one
+        replay rebuilds both, and a tick that repaired only half of the derived
+        state would leave a store `cockpit-control validate` still refuses.
+        """
 
         metadata, history = inspect_control_events(self.root)
         rebuilt = build_ledger_projection(metadata, history.events)
         ledger_revision, ledger_reason = _classify_published_ledger(
             self.root, metadata["control_id"], _serialized_record(rebuilt).encode("utf-8")
         )
+        if ledger_reason == PROJECTION_REASON_CURRENT and not _published_view_matches(
+            self.root, build_events_view(history.events)
+        ):
+            ledger_reason = PROJECTION_REASON_VIEW
         return ControllerJournalObservation(
             metadata=metadata,
             history=history,
@@ -7295,17 +8507,74 @@ class ControllerTick:
             self.command,
             timeout_seconds=self.timeout_seconds,
             poll_seconds=self.poll_seconds,
-        ):
-            return self._observed_journal()
+        ) as lock:
+            observation = self._observed_journal()
+            if observation.settled:
+                return observation
+            return self._repaired_projection(observation, lock)
+
+    def _repaired_projection(
+        self,
+        observation: ControllerJournalObservation,
+        lock: PortableControlLock,
+    ) -> ControllerJournalObservation:
+        """Rebuild derived state from the committed journal, or refuse to.
+
+        This is step 3 of the bounded loop -- "replay new events and validate the
+        ledger revision" -- and not the tick's one state-changing action: replay
+        commits no event, invents no revision, and is a pure function of the
+        committed authority this method has just read under the same lock, so
+        running it twice changes nothing the second time.
+
+        Exactly one classification is refused instead of repaired.  A projection
+        *ahead* of the committed journal records revisions `events/` no longer
+        holds, so rebuilding it would rewind derived state and quietly settle the
+        disappearance of committed authority.  ADR-014 keeps authoritative repair
+        explicit, so that one is named, blocked, and left untouched.
+        """
+
+        journal = observation.history.latest_revision
+        if controller_ledger_plan(observation.ledger_reason) == CONTROLLER_LEDGER_REFUSED:
+            raise ControlStoreError(
+                f"{LEDGER_NAME} records revision {observation.ledger_revision} but "
+                f"{EVENTS_DIR_NAME}/ ends at revision {journal}; committed events appear "
+                "to have been removed and replay would rewind derived state, so no "
+                "decision was taken and not one byte was changed [repair: "
+                + CONTROLLER_LEDGER_AHEAD_REPAIR.format(ledger=LEDGER_NAME, journal=journal)
+                + "]"
+            )
+        if self.dry_run:
+            return observation.with_repair(
+                CONTROLLER_LEDGER_WOULD_REPAIR, observation.ledger_reason
+            )
+        ControlLedgerProjection(self.root, command=self.command, held_lock=lock).run()
+        rebuilt = self._observed_journal()
+        if not rebuilt.settled:
+            # Committing anything now would replace the projection and destroy
+            # the evidence of whatever is rewriting it, so the tick stops here.
+            raise ControlStoreError(
+                f"{LEDGER_NAME} still does not equal the committed rebuild after replay "
+                f"({rebuilt.ledger_reason}); no decision was taken and no event was "
+                "committed [repair: "
+                + CONTROLLER_LEDGER_UNREPAIRED_REPAIR.format(
+                    ledger=LEDGER_NAME, journal=journal
+                )
+                + "]"
+            )
+        return rebuilt.with_repair(CONTROLLER_LEDGER_REPAIRED, observation.ledger_reason)
 
     def _gathered_evidence(self) -> ControllerEvidence:
         """Perform steps 1, 3, and 4 of the bounded loop, mutating nothing."""
 
-        # Step 1: the control root must be a complete, current, valid store
-        # before any of its content is treated as authority.
-        validate_control_store(self.root)
-        # Step 3: committed events are replayed, and the derived ledger is
-        # checked against that replay rather than being read as authority.
+        # Step 1: every authoritative record must be complete and valid before
+        # any of its content is treated as authority.  The derived projection is
+        # deliberately not validated here: it is rebuilt below from the very
+        # events this call has just proved readable, so refusing it first would
+        # turn a repairable projection into a dead end.
+        self._validated_authority()
+        # Step 3: committed events are replayed, the derived ledger and view are
+        # checked against that replay rather than read as authority, and anything
+        # replay can settle is settled before one decision is derived.
         observation = self._settled_journal()
         metadata = observation.metadata
         history = observation.history
@@ -7325,6 +8594,12 @@ class ControllerTick:
                 fault = CONTROLLER_REASON_QUEUE_UNREADABLE
         state = fold_mission_state(history.events)
         correlated, uncorrelated = _correlation_counts(state)
+        now = _parsed_timestamp(self.as_of, "as_of", "controller tick")
+        observations = tuple(
+            _observed_slot(state.missions[mission_id], now, self.as_of)
+            for mission_id in sorted(state.missions)
+        )
+        commands, _outcomes = fold_commands(history.events)
         return ControllerEvidence(
             control_root=str(self.root),
             control_id=metadata["control_id"],
@@ -7340,6 +8615,140 @@ class ControllerTick:
             correlated_records=correlated,
             uncorrelated_records=uncorrelated,
             as_of=self.as_of,
+            observations=observations,
+            command_ids=tuple(sorted(commands)),
+            ledger_repair=observation.repair,
+            repaired_from=observation.repaired_from,
+        )
+
+    def _validated_authority(self) -> Dict[str, Any]:
+        """Validate committed authority, naming the explicit repair if it fails.
+
+        A malformed committed event, a gap, a duplicate revision, or a record
+        whose declared identity disagrees with its filename is authoritative
+        corruption.  Nothing here rebuilds, reorders, quarantines, or guesses
+        past it: the tick stops before it has read one fact from the store, says
+        which file is at fault, and names the one explicit repair that exists.
+        """
+
+        return validate_control_authority(self.root, CONTROLLER_JOURNAL_REPAIR)
+
+    def _recover(
+        self,
+        action: ControllerAction,
+        evidence: ControllerEvidence,
+    ) -> ControllerTickResult:
+        """Deliver the one bounded recovery command this tick's rung selected.
+
+        Every rung rides the ordinary managed-command path, so recovery inherits
+        durable command IDs, canonical payload digests, idempotent redelivery,
+        and the one-slot-per-worker fold unchanged.  `cancel` and `replace` are
+        the very records `cockpit-control cancel-mission` and `replace-mission`
+        commit, so the ladder has no private way to end a mission that an
+        operator's own command does not already have.
+        """
+
+        roots = validate_root_metadata(
+            _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), self.root
+        )["canonical_roots"]
+        rung = action.recovery_rung
+        declarations: Optional[Dict[str, Any]] = None
+        if rung in MISSION_RECOVERY_ACTIONS:
+            field = MISSION_RECOVERY_PAYLOAD_FIELD
+            command_type = MISSION_RECOVERY_COMMAND_TYPES[str(rung)]
+            record = build_mission_recovery(
+                command_id=str(action.command_id),
+                action=str(rung),
+                mission_id=str(action.mission_id),
+                worker_id=str(action.worker_id),
+                queue_item_id=str(action.queue_item_id),
+                trace_id=str(action.trace_id),
+                reason=LIFECYCLE_STALE_REASON,
+                respond_deadline_at=str(action.deadline_at),
+                parent_trace_id=action.parent_trace_id,
+                evidence_refs=action.evidence_refs,
+                requested_at=self.as_of,
+            )
+        elif rung == CONTROLLER_RECOVERY_CANCEL:
+            field = MISSION_CANCELLATION_PAYLOAD_FIELD
+            command_type = COMMAND_TYPE_MISSION_CANCEL
+            record = build_mission_cancellation(
+                command_id=str(action.command_id),
+                mission_id=str(action.mission_id),
+                worker_id=str(action.worker_id),
+                queue_item_id=str(action.queue_item_id),
+                trace_id=str(action.trace_id),
+                reason=CONTROLLER_CANCEL_REASONS[action.reason],
+                acknowledge_deadline_at=str(action.deadline_at),
+                parent_trace_id=action.parent_trace_id,
+                evidence_refs=action.evidence_refs,
+                requested_at=self.as_of,
+            )
+        else:
+            field = MISSION_REPLACEMENT_PAYLOAD_FIELD
+            command_type = COMMAND_TYPE_MISSION_REPLACE
+            record = build_mission_replacement(
+                command_id=str(action.command_id),
+                worker_id=str(action.worker_id),
+                queue_item_id=str(action.queue_item_id),
+                replaced_mission_id=str(action.mission_id),
+                replacement_mission_id=str(action.replacement_mission_id),
+                trace_id=str(action.trace_id),
+                reason=CONTROLLER_REPLACE_REASON,
+                parent_trace_id=action.parent_trace_id,
+                evidence_refs=action.evidence_refs,
+                requested_at=self.as_of,
+            )
+            declarations = {
+                "active_queue_item_id": action.queue_item_id,
+                "active_mission_id": action.replacement_mission_id,
+            }
+        envelope = build_command_envelope(
+            command_id=str(action.command_id),
+            command_type=command_type,
+            mission_id=str(action.mission_id),
+            queue_item_id=str(action.queue_item_id),
+            target_kind=COMMAND_TARGET_WORKER,
+            target_id=str(action.worker_id),
+            trace_id=str(action.trace_id),
+            payload_digest=str(action.payload_digest),
+            control_root=str(self.root),
+            parent_trace_id=action.parent_trace_id,
+            queue_root=roots["queue_root"],
+            planning_root=roots["planning_root"],
+            implementation_roots=tuple(roots["implementation_roots"]),
+            deadline_at=action.deadline_at,
+            created_at=self.as_of,
+        )
+        result = register_mission_command(
+            self.root,
+            envelope,
+            field,
+            record,
+            actor=CONTROLLER_TICK_ACTOR,
+            command=self.command,
+            timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+            dry_run=self.dry_run,
+            declarations=declarations,
+        )
+        outcome = CONTROLLER_TICK_WOULD_RECOVER if self.dry_run else CONTROLLER_TICK_RECOVERED
+        if not result.applied:
+            outcome = CONTROLLER_TICK_UNCHANGED
+        return ControllerTickResult(
+            root=self.root,
+            outcome=outcome,
+            action=action,
+            evidence=evidence,
+            diagnostics=self.diagnostics,
+            applied=result.applied,
+            fold_outcome=result.outcome,
+            controller=dict(result.state.controller) or None,
+            publication=result.command.publication,
+            command=result.command,
+            conflict=result.recorded_conflict,
+            queue_fault=self.queue_fault,
+            dry_run=self.dry_run,
         )
 
     def _dispatch(
@@ -7487,6 +8896,8 @@ class ControllerTick:
         self._acted = True
         if action.kind == CONTROLLER_ACTION_DISPATCH:
             return self._dispatch(action, evidence)
+        if action.kind == CONTROLLER_ACTION_RECOVER:
+            return self._recover(action, evidence)
         if action.kind == CONTROLLER_ACTION_OBSERVE:
             return self._observe(action, evidence)
         return ControllerTickResult(
@@ -7567,13 +8978,15 @@ def _precedence_verdicts(result: ControllerTickResult) -> Dict[int, str]:
             f"claimed-slots {len(slots)} "
             f"worker {only_slot[0] if only_slot else '-'} "
             f"mission {only_slot[1]['mission_id'] if only_slot else '-'} "
-            f"slot-state {only_slot[1]['state'] if only_slot else '-'}"
+            f"slot-state {only_slot[1]['state'] if only_slot else '-'} "
+            f"stale {len(evidence.stale_missions)} "
+            f"contested {len(evidence.state.contested_slots)}"
         ),
         4: f"revision {evidence.journal_revision}",
         5: (
             f"revision "
             f"{evidence.ledger_revision if evidence.ledger_revision is not None else '-'} "
-            f"{evidence.ledger_reason}"
+            f"{evidence.ledger_reason} repair {evidence.ledger_repair}"
         ),
         6: (
             f"correlated {evidence.correlated_records} "
@@ -7625,11 +9038,41 @@ def controller_tick_lines(result: ControllerTickResult) -> List[str]:
         f"events-committed {result.committed_events} as-of {result.evidence.as_of}"
     ]
     lines.extend(controller_precedence_lines(result))
+    evidence = result.evidence
+    observed_revision = evidence.ledger_revision
+    lines.append(
+        f"ledger repair {evidence.ledger_repair} "
+        f"from {evidence.repaired_from or '-'} "
+        f"ledger-revision {observed_revision if observed_revision is not None else '-'} "
+        f"journal-revision {evidence.journal_revision}"
+    )
+    for observed in evidence.stale_missions:
+        lines.append(
+            f"stale-mission {observed.mission_id} worker {observed.worker_id} "
+            f"queue-item {observed.queue_item_id} state {observed.state} "
+            f"reason {observed.reason or '-'} recovery {observed.recovery or '-'} "
+            f"fresh-until {observed.fresh_until or '-'} as-of {observed.as_of}"
+        )
+    for worker_id, slot, conflict in evidence.state.contested_slots:
+        lines.append(
+            f"mission-contest {worker_id} retained {slot['mission_id']} "
+            f"refused {conflict['mission_id']} reason {conflict['reason']} "
+            f"source {conflict['source']} revision {conflict['revision']}"
+        )
     if action.kind == CONTROLLER_ACTION_DISPATCH:
         lines.append(
             f"dispatch command {action.command_id} worker {action.worker_id} "
             f"mission {action.mission_id} queue-item {action.queue_item_id} "
             f"trace {action.trace_id} digest {action.payload_digest}"
+        )
+    if action.kind == CONTROLLER_ACTION_RECOVER:
+        lines.append(
+            f"recovery rung {action.recovery_rung} command {action.command_id} "
+            f"worker {action.worker_id} mission {action.mission_id} "
+            f"queue-item {action.queue_item_id} trace {action.trace_id} "
+            f"parent-trace {action.parent_trace_id or '-'} "
+            f"replacement {action.replacement_mission_id or '-'} "
+            f"deadline {action.deadline_at or '-'} digest {action.payload_digest}"
         )
     controller = result.controller
     if controller is not None:
@@ -7647,14 +9090,82 @@ def controller_tick_lines(result: ControllerTickResult) -> List[str]:
     return lines
 
 
+def _contested_duplicate(
+    evidence: ControllerEvidence, worker_id: Optional[str]
+) -> Optional[Mapping[str, Any]]:
+    """Return the live duplicate claim one worker's contest refused, if any.
+
+    A refusal has to name the mission an operator is being asked to end, and it
+    must be the one the tick is actually blocking on, so it is read back off the
+    same contested slot the decision was taken from rather than assembled from
+    anything a surface reported.
+    """
+
+    for contested_worker, _slot, conflict in evidence.state.contested_slots:
+        if contested_worker == worker_id:
+            return conflict
+    return None
+
+
+def worker_lifecycle_cancellation_route(state: Optional[str]) -> Tuple[str, ...]:
+    """Return the lifecycle states a worker must record to reach `cancelled`.
+
+    The architecture section 9 table is not fully connected: `cancelled` has no
+    edge from `accepted`, so a mission a worker has only accepted has to be
+    recorded `running` before it can be cancelled at all.  The route is walked
+    over the same table the fold enforces, shortest first, so a repair sentence
+    can never name a step the fold will retain for audit and refuse to apply.
+    """
+
+    if state is None or state in WORKER_LIFECYCLE_TERMINAL_STATES:
+        return ()
+    frontier: List[Tuple[str, Tuple[str, ...]]] = [(state, ())]
+    seen = {state}
+    while frontier:
+        current, route = frontier.pop(0)
+        for successor in WORKER_LIFECYCLE_TRANSITIONS.get(current, ()):
+            if successor == LIFECYCLE_CANCELLED:
+                return route + (successor,)
+            if successor in seen:
+                continue
+            seen.add(successor)
+            frontier.append((successor, route + (successor,)))
+    return ()
+
+
+def controller_duplicate_repair_route(state: Optional[str]) -> str:
+    """Say exactly which lifecycle events end one duplicate claim, in order."""
+
+    route = worker_lifecycle_cancellation_route(state)
+    if not route:
+        return "the terminal lifecycle event that ends it"
+    if len(route) == 1:
+        return f"the terminal lifecycle event `{route[0]}`"
+    return (
+        "lifecycle " + ", then ".join(f"`{step}`" for step in route)
+        + f", because `{route[-1]}` is not reachable from `{state}` in one step"
+    )
+
+
 def controller_blocking_repair(result: ControllerTickResult) -> str:
     """Return the exact repair the operator must perform to unblock this tick."""
 
     evidence = result.evidence
-    template = CONTROLLER_BLOCKING_REPAIRS.get(result.action.reason, PREFLIGHT_COMMAND)
+    action = result.action
+    template = CONTROLLER_BLOCKING_REPAIRS.get(action.reason, PREFLIGHT_COMMAND)
+    conflict = _contested_duplicate(evidence, action.worker_id)
+    duplicate = None if conflict is None else str(conflict["mission_id"])
+    materialized = None if duplicate is None else evidence.state.missions.get(duplicate)
     return template.format(
         declared=evidence.declared_queue_root or "-",
         exported=evidence.exported_queue_root or "-",
+        worker=action.worker_id or "-",
+        mission=action.mission_id or "-",
+        queue_item=action.queue_item_id or "-",
+        duplicate=duplicate or "-",
+        terminal=controller_duplicate_repair_route(
+            None if materialized is None else materialized["lifecycle"]["state"]
+        ),
     )
 
 
@@ -7686,6 +9197,25 @@ def report_controller_tick(
             f"{prefix}: dispatch is blocked ({result.action.reason}); one conflict "
             f"observation is recorded and no mission state changed "
             f"[repair: {controller_blocking_repair(result)}]",
+            file=os.sys.stderr,
+        )
+        return 1
+    if result.action.kind == CONTROLLER_ACTION_RECOVER and not result.applied:
+        if result.fold_outcome == MISSION_FOLD_RETAINED_DUPLICATE:
+            # One rung owns exactly one command ID per staleness episode, so a
+            # concurrent tick reaching the same rung redelivers that command
+            # instead of adding a second one; the stored result stands.
+            print(
+                f"{prefix}: the {result.action.recovery_rung} recovery of mission "
+                f"{result.action.mission_id} is a redelivery of command "
+                f"{result.action.command_id}; the stored request stands and no second "
+                "recovery was created"
+            )
+            return 0
+        print(
+            f"{prefix}: the {result.action.recovery_rung} recovery command is committed "
+            f"but did not move worker {result.action.worker_id}'s mission slot "
+            f"({result.fold_outcome}); no mission state changed",
             file=os.sys.stderr,
         )
         return 1
@@ -9440,6 +10970,17 @@ def _report_lifecycle_record(result: LifecycleRecordResult) -> int:
             print(
                 f"cockpit-control: {location} is durable audit evidence that did not change "
                 f"the materialized mission state ({result.outcome})",
+                file=os.sys.stderr,
+            )
+        if result.outcome == LIFECYCLE_RETAINED_INVALID_TRANSITION and materialized is not None:
+            # An operator following a repair sentence deserves to be told which
+            # states the section 9 table actually allows next, rather than only
+            # that this one changed nothing.
+            current = materialized["lifecycle"]["state"]
+            allowed = ", ".join(WORKER_LIFECYCLE_TRANSITIONS.get(current, ())) or "no state"
+            print(
+                f"cockpit-control: {lifecycle['state']} is not reachable from {current}; "
+                f"this mission can record {allowed} next",
                 file=os.sys.stderr,
             )
     if publication.projection is not None:

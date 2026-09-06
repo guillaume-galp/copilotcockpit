@@ -40,6 +40,7 @@ from cockpit_control import (
     initialize_control_store,
     report_controller_tick,
     resolve_control_root,
+    validate_control_authority,
     validate_control_store,
 )
 
@@ -549,7 +550,14 @@ def main(argv: List[str]) -> int:
     # other overseer command is fail-closed until it resolves and validates the
     # same explicit root, so no command can fall back to its working directory
     # or silently operate on incompatible control state.
-    if args.cmd != "start":
+    #
+    # `tick` is deliberately absent from this pre-check. Architecture section 17
+    # repairs a corrupt ledger by replaying the journal, so refusing the tick for
+    # derived state it is about to rebuild would turn the one command that can
+    # perform that repair into the one command that cannot run. The tick
+    # validates committed authority itself, with the explicit repair a malformed
+    # committed event requires; every other command keeps failing closed here.
+    if args.cmd not in {"start", "tick"}:
         try:
             validate_control_store(resolve_control_root().path)
         except ControlStoreError as exc:

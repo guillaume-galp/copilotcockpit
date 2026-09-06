@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-05T13:32:10+01:00"
+last-updated: "2026-09-06T20:54:01+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -423,7 +423,7 @@ themes:
             depends_on: [TH3.E1.US7, TH3.E2.US2]
           - id: TH3.E3.US2
             title: "Stale-worker recovery and conflict reconciliation"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E3-overseer-reconciliation/stories/US2-stale-conflict-recovery.md

@@ -276,14 +276,52 @@ with open(path, "w") as handle:
 
 	local before
 	before="$(cc_events "$COCKPIT_CONTROL_ROOT")"
-	cc_tick --as-of 2026-09-04T10:05:00.000000Z
+	local contents
+	contents="$(cc_control_contents "$COCKPIT_CONTROL_ROOT")"
+	local out="$BATS_TEST_TMPDIR/ahead.out" err="$BATS_TEST_TMPDIR/ahead.err"
+	local code=0
+	"$OVERSEER_BIN" tick --as-of 2026-09-04T10:05:00.000000Z >"$out" 2>"$err" || code=$?
+	[ "$code" -ne 0 ]
+	[ ! -s "$out" ]
+
+	# TH3.E3.US2 repairs every derived disagreement the committed journal can
+	# settle, so the repair a refusal names is never one the tick could have
+	# performed itself. A projection *ahead* of the journal is the one exception:
+	# replaying it would rewind derived state past revisions events/ no longer
+	# holds, which would quietly settle the disappearance of committed authority.
+	# Recording even a blocking observation would replace the projection through
+	# the ordinary publication path and destroy that evidence, so the tick
+	# refuses before it assembles evidence and commits nothing at all.
+	grep -Fq "ledger.json records revision 99 but events/ ends at revision 1" "$err"
+	grep -Fq "committed events appear to have been removed and replay would rewind derived state" "$err"
+	grep -Fq "[repair: restore the committed event file(s) that ledger.json names but events/ no longer holds" "$err"
+	grep -Fq "only if the removal was intended run \`cockpit-control replay-ledger\` to rewind the derived ledger to revision 1]" "$err"
+	cc_no_traceback "$err"
+
+	# Nothing was committed and the projection it refused is byte-identical.
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq "$before" ]
+	[ "$(cc_control_contents "$COCKPIT_CONTROL_ROOT")" = "$contents" ]
+
+	# The decision function still keeps its own structural guard for derived
+	# state no tick may decide from, and that guard can never reach a dispatch.
+	run python3 -c '
+import dataclasses
+import sys
+
+sys.path.insert(0, sys.argv[1])
+import cockpit_control
+
+tick = cockpit_control.ControllerTick(sys.argv[2], as_of="2026-09-04T10:06:00.000000Z")
+probe = dataclasses.replace(
+    tick._gathered_evidence(),
+    ledger_repair=cockpit_control.CONTROLLER_LEDGER_UNREPAIRED,
+    ledger_reason=cockpit_control.PROJECTION_REASON_DIVERGENT,
+)
+action = cockpit_control.select_controller_action(probe)
+print("action", action.kind, action.outcome, action.reason)
+' "$MODULE_DIR" "$COCKPIT_CONTROL_ROOT"
 	[ "$status" -eq 1 ]
-	echo "$output" | grep -Fq "outcome blocked reason ledger-projection-divergent"
-	echo "$output" | grep -Fq "[repair: cockpit-control replay-ledger]"
-	echo "$output" | grep -Fq "precedence 5 ledger-projection derived revision 99 ahead"
-	# The blocked tick recorded exactly one observation and dispatched nothing.
-	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq $((before + 1)) ]
-	cc_absent_output "^dispatch command"
+	echo "$output" | grep -Fq "ledger.json records revision 99"
 }
 
 @test "AC1 the window a concurrent writer holds open is not evidence of divergence" {
@@ -395,16 +433,21 @@ cockpit_control.publish_control_event(
 	[ ! -e "$COCKPIT_CONTROL_ROOT/locks/control.lock" ]
 
 	# Nothing holds the lock now, so this lag is a settled fact rather than a
-	# window; it is still derived state the committed journal already answers.
+	# window; it is derived state the committed journal already answers, and
+	# TH3.E3.US2 makes the tick itself perform the replay section 17 names.
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
-	echo "$output" | grep -Fq "precedence 5 ledger-projection derived revision 0 stale"
+	echo "$output" | grep -Fq "ledger repair repaired from stale ledger-revision 1 journal-revision 1"
+	echo "$output" | grep -Fq "precedence 5 ledger-projection derived revision 1 current repair repaired"
 	echo "$output" | grep -Fq "outcome dispatched reason queue-item-implementable"
 	cc_absent_output "ledger-projection-divergent"
 	cc_absent_events "ledger-projection-divergent"
 
-	# The lagging projection was replaced by the next writer's own projection,
-	# which is the repair the architecture names; the tick never repaired it.
+	# The repair commits no event of its own: the only event this tick added is
+	# the one dispatch it decided on, so repair is never the tick's one action.
+	echo "$output" | grep -Fq "events-committed 1"
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 2 ]
+
 	run "$CONTROL_BIN" replay-ledger
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger.json projection is current at revision 2"
@@ -412,15 +455,17 @@ cockpit_control.publish_control_event(
 	[ "$status" -eq 0 ]
 }
 
-@test "AC1 only a projection no writer could have published refuses a decision" {
+@test "AC1 every derived disagreement the journal can settle is repaired, not refused" {
 	cc_cockpit forged
 	cc_active_item implementing >/dev/null
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
+	local clean before
 
 	# The same revision the journal reached, carrying derived state the journal
-	# never produced: no writer following section 8.3 can publish this, so it is
-	# an edit rather than a window and the controller refuses to decide from it.
+	# never produced: no writer following section 8.3 can publish this. It is
+	# still *derived* state the committed events reproduce exactly, so TH3.E3.US2
+	# rebuilds it in step 3 of the bounded loop rather than refusing to decide.
 	python3 -c '
 import json
 import sys
@@ -433,62 +478,88 @@ with open(path, "w") as handle:
     handle.write(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 ' "$COCKPIT_CONTROL_ROOT"
 	cc_tick --as-of 2026-09-04T10:05:00.000000Z
-	[ "$status" -eq 1 ]
-	echo "$output" | grep -Fq "outcome blocked reason ledger-projection-divergent"
-	echo "$output" | grep -Fq "[repair: cockpit-control replay-ledger]"
-	echo "$output" | grep -Eq "^precedence 5 ledger-projection derived revision [0-9]+ divergent$"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger repair repaired from divergent"
+	echo "$output" | grep -Eq "^precedence 5 ledger-projection derived revision [0-9]+ current repair repaired$"
 	cc_absent_output "^dispatch command"
+	cc_absent_output "QI-forged"
 
-	# A projection that cannot be read at all never reaches the ladder: the
-	# store validation that opens every tick refuses it by name first.
+	# From here the situation is unchanged, so every later tick decides nothing
+	# and commits nothing: what follows measures repair alone.
+	before="$(cc_events "$COCKPIT_CONTROL_ROOT")"
+	clean="$(cat "$COCKPIT_CONTROL_ROOT/ledger.json")"
+
+	# A projection that cannot be read at all is derived corruption too, and
+	# architecture section 17 rebuilds it from the journal by exactly the same
+	# replay. The rebuild is byte-identical to the clean projection.
 	printf 'not a projection\n' >"$COCKPIT_CONTROL_ROOT/ledger.json"
 	cc_tick --as-of 2026-09-04T10:10:00.000000Z
-	[ "$status" -eq 1 ]
-	echo "$output" | grep -Fq "cockpit-overseer: malformed ledger.json"
-	cc_absent_output "^dispatch command"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger repair repaired from corrupt"
+	echo "$output" | grep -Fq "events-committed 0"
+	cc_absent_output "malformed ledger.json"
 	printf '%s\n' "$output" >"$BATS_TEST_TMPDIR/forged.log"
 	cc_no_traceback "$BATS_TEST_TMPDIR/forged.log"
-	run "$CONTROL_BIN" replay-ledger
+
+	# The rebuildable compatibility view is repaired by the same one replay.
+	printf '{"torn":\n' >"$COCKPIT_CONTROL_ROOT/events.jsonl"
+	cc_tick --as-of 2026-09-04T10:15:00.000000Z
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger repair repaired from derived-view"
+	echo "$output" | grep -Fq "events-committed 0"
+	run "$CONTROL_BIN" validate
 	[ "$status" -eq 0 ]
 
-	# Every classification the tick can observe is read exactly once, and read
-	# the same way by the vocabulary and by the decision: a projection behind
-	# the journal is the published window of a writer, and everything else is
-	# state no writer could have left. A new classification that belonged to
-	# neither, or to both, would fail here rather than silently choosing one.
+	# Neither repair committed an event: repair is step 3 of the bounded loop,
+	# never the one state-changing action a tick may take, and each rebuild is
+	# byte-identical to the projection a clean store carries.
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq "$before" ]
+	[ "$clean" = "$(cat "$COCKPIT_CONTROL_ROOT/ledger.json")" ]
+
+	# Every classification the tick can observe is read exactly once, and by one
+	# production function rather than by whichever caller looked. A future
+	# classification belonging to neither side is a refusal, not a default.
 	run python3 -c '
-import dataclasses
 import sys
 
 sys.path.insert(0, sys.argv[1])
 import cockpit_control
 
-divergent = set(cockpit_control.CONTROLLER_PROJECTION_DIVERGENT_REASONS)
-behind = set(cockpit_control.CONTROLLER_PROJECTION_BEHIND_REASONS)
+repairable = set(cockpit_control.CONTROLLER_PROJECTION_REPAIRABLE_REASONS)
+refused = set(cockpit_control.CONTROLLER_PROJECTION_DIVERGENT_REASONS)
 observable = {
     value
     for name, value in vars(cockpit_control).items()
-    if name.startswith("PROJECTION_REASON_") and name != "PROJECTION_REASON_VIEW"
+    if name.startswith("PROJECTION_REASON_")
 }
-if divergent & behind:
-    raise SystemExit("a classification is both a window and a divergence: %r" % (divergent & behind,))
-if divergent | behind | {cockpit_control.PROJECTION_REASON_CURRENT} != observable:
+if repairable & refused:
+    raise SystemExit("a classification is both repairable and refused: %r" % (repairable & refused,))
+if repairable | refused | {cockpit_control.PROJECTION_REASON_CURRENT} != observable:
     raise SystemExit("classification vocabulary drifted: %r" % (sorted(observable),))
 print("projection vocabulary is partitioned")
 
-tick = cockpit_control.ControllerTick(sys.argv[2], as_of="2026-09-04T10:15:00.000000Z")
-evidence = tick._gathered_evidence()
+expected = {cockpit_control.PROJECTION_REASON_CURRENT: cockpit_control.CONTROLLER_LEDGER_CURRENT}
+for reason in repairable:
+    expected[reason] = cockpit_control.CONTROLLER_LEDGER_REPAIRED
+for reason in refused:
+    expected[reason] = cockpit_control.CONTROLLER_LEDGER_REFUSED
 for reason in sorted(observable):
-    probe = dataclasses.replace(evidence, ledger_reason=reason, ledger_revision=1)
-    action = cockpit_control.select_controller_action(probe)
-    refused = action.reason == cockpit_control.CONTROLLER_REASON_LEDGER_DIVERGENT
-    if refused != (reason in divergent):
-        raise SystemExit("%s was read as %r" % (reason, action.reason))
+    plan = cockpit_control.controller_ledger_plan(reason)
+    if plan != expected[reason]:
+        raise SystemExit("%s was planned as %r" % (reason, plan))
+try:
+    cockpit_control.controller_ledger_plan("invented-classification")
+except cockpit_control.ControlStoreError as exc:
+    print("unclassified", exc)
+else:
+    raise SystemExit("BUG: an unclassified projection reason was silently planned")
 print("every classification is read exactly once")
-' "$MODULE_DIR" "$COCKPIT_CONTROL_ROOT"
+' "$MODULE_DIR"
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "projection vocabulary is partitioned"
 	echo "$output" | grep -Fq "every classification is read exactly once"
+	echo "$output" | grep -Fq "unclassified ledger.json classification"
+	cc_absent_output "BUG"
 }
 
 @test "AC1 a busy worker's durable slot outranks a newly implementable item" {
@@ -602,8 +673,9 @@ dispatch command 11111111-1111-1111-1111-111111111111 worker worker-dev"
 	[ "$status" -eq 0 ]
 
 	# Forge the derived projection into claiming the worker holds nothing. Rule 5
-	# is below rules 3 and 4, so the committed events must still win. The forged
-	# projection is refused as divergent rather than obeyed.
+	# is below rules 3 and 4, so the committed events must still win: the forged
+	# projection is discarded and rebuilt from them rather than obeyed, and the
+	# tick then reports the mission that actually exists.
 	python3 -c '
 import json
 import sys
@@ -618,19 +690,18 @@ with open(path, "w") as handle:
 ' "$COCKPIT_CONTROL_ROOT"
 
 	cc_tick --as-of 2026-09-04T10:05:00.000000Z
-	[ "$status" -eq 1 ]
-	echo "$output" | grep -Fq "outcome blocked reason ledger-projection-divergent"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "ledger repair repaired from divergent"
+	echo "$output" | grep -Fq "outcome observed reason mission-in-progress"
 	cc_absent_output "^dispatch command"
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"])')" -eq 1 ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
 
-	# Replaying the journal restores the projection the committed events imply,
-	# and the tick then reports the mission that actually exists.
+	# Replaying again is a no-op: the tick already left the projection equal to
+	# the committed rebuild, so the explicit repair has nothing left to do.
 	run "$CONTROL_BIN" replay-ledger
 	[ "$status" -eq 0 ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"])')" -eq 1 ]
-	cc_tick --as-of 2026-09-04T10:10:00.000000Z
-	[ "$status" -eq 0 ]
-	echo "$output" | grep -Fq "outcome observed reason mission-in-progress"
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
+	echo "$output" | grep -Fq "projection is current"
 }
 
 @test "AC2 the reported precedence ladder is ADR-014 order with the diagnostic rules marked" {
