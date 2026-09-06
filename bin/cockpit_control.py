@@ -8875,6 +8875,12 @@ class ControllerTick:
             dry_run=self.dry_run,
         )
 
+        # Manage escalation records for repeated blocking observations.
+        try:
+            self._manage_escalation_record(action, evidence)
+        except Exception:
+            pass
+
     def _manage_escalation_record(self, action: ControllerAction, evidence: ControllerEvidence) -> None:
         """Create or update an escalation record for repeated blocking observations.
 
