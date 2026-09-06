@@ -225,16 +225,17 @@ export COCKPIT_WAKE_LIFECYCLE_STATE="{lifecycle_state}"
 FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
 # 1. Write to persistent inbox — readable by any future Copilot session
+# 3. Block legacy/malformed wakes that lack mission or owner — fail closed before any side effects
+if [ -z "$COCKPIT_WAKE_OWNER" ] || [ -z "$COCKPIT_WAKE_MISSION" ]; then
+  echo "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'" >&2
+  exit 1
+fi
+
 "$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT" || exit $?
 
 # 2. Desktop notification (if available)
 {notify_line}
 
-# 3. Block legacy/malformed wakes that lack mission or owner
-if [ -z "\"$COCKPIT_WAKE_OWNER\"" ] || [ -z "\"$COCKPIT_WAKE_MISSION\"" ]; then
-  echo "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'" >&2
-  exit 1
-fi
 
 # 3b. Deterministic guard: check persisted wake lifecycle/stop condition and skip if terminal
 "$PYTHON" "$SELF" _guard-fire "{id_}" || exit $?

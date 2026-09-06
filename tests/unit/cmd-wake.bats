@@ -62,7 +62,7 @@ schedule_generated_job() {
 		-s cockpit-a \
 		-w overseer \
 		-m "Generated wake must fail closed" \
-		--label "fail-closed")" || {
+		--label "fail-closed" --mission "M-1" --owner "o1")" || {
 		printf '%s\n' "$schedule_output" >&2
 		return 1
 	}
@@ -405,4 +405,18 @@ assert any(recovered_dir.iterdir())
     [ "$status" -eq 1 ]
     echo "$output" | grep -Fq "blocked: legacy wake missing owner or mission"
     [ ! -e "$BATS_TEST_TMPDIR/overseer.log" ]
+    [ ! -e "$HOME/.config/cockpit-wake/inbox.md" ]
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+state = json.loads(Path(sys.argv[1]).read_text())
+wake = next(item for item in state["awakenings"] if item["id"] == sys.argv[2])
+assert wake["status"] == "pending"
+assert wake["fired_at"] is None
+' "$HOME/.config/cockpit-wake/awakenings.json" "$id"
+    [ "$status" -eq 0 ]
+
 }

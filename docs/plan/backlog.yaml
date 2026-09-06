@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-06T23:00:19+01:00"
+last-updated: "2026-09-06T23:12:46+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -472,7 +472,7 @@ themes:
         stories:
           - id: TH3.E5.US1
             title: "Additive migration and legacy compatibility"
-            status: in-progress
+            status: done
             priority: medium
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US1-additive-migration.md

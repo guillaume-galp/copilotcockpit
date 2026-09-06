@@ -1,5 +1,9 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T23:12:46+01:00 — TH3.E5.US1 DONE: additive migration and doctor legacy guidance were completed, and rework 1/1 fixed the generated wake guard so legacy/malformed wakes block before inbox/tick side effects; focused re-review APPROVED after wake 14/14 and wake-migrate 3/3. Process exception: developer made four pre-completion commits, preserved per no-amend/no-force. — copilotcockpit
+
+- 2026-09-06T23:08:03+01:00 — TH3.E5.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: migration/doctor behavior passed targeted review, but the generated wake job's owner/mission shell guard is incorrectly quoted and allows inbox mutation before `_guard-fire` blocks legacy wakes; focused rework limited to correcting fail-closed guard behavior and targeted wake/migrate tests. — copilotcockpit
+
 - 2026-09-06T23:00:19+01:00 — TH3.E5.US1 START: TH3.E5 moves to in-progress after E3/E4 completion; scope limited to additive VP3 migration preserving legacy queues/traces/wakes/project launchers, doctor legacy capability guidance, and backup/idempotent/future-version-safe schema migration. — copilotcockpit
 
 - 2026-09-06T22:59:57+01:00 — TH3.E4 EPIC DONE: all three wake/evidence stories done; full repository gate `./run-tests.sh all` exited 0 with unit `1..223`, proportionate epic quality review APPROVED, changelog appended, and E4 marked done. — copilotcockpit
