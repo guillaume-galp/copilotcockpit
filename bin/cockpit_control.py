@@ -8021,6 +8021,22 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
     Rules 7 and 8 are unreachable from here: this function cannot see them.
     """
 
+    # If a boundary blocker was detected during evidence gathering,
+    # refuse to dispatch and record an explicit blocked observation so
+    # the operator sees an architecture-boundary event.
+    if getattr(evidence, "boundary_blocker", None) is not None:
+        bb = evidence.boundary_blocker
+        return _controller_observation_action(
+            evidence,
+            CONTROLLER_REASON_ROOT_UNDECLARED,
+            {"architecture_blocker": bb},
+            mission_id=bb.get("mission_id"),
+            queue_item_id=bb.get("queue_item_id"),
+            worker_id=bb.get("worker_id"),
+            evidence_refs=(f"trace:{bb.get("trace_id")}",),
+        )
+
+
     if evidence.queue_root_fault is not None:
         fault = evidence.queue_root_fault
         return _controller_observation_action(
