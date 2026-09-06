@@ -19,7 +19,8 @@ setup() {
 
     run "$CC_BOOTSTRAP" doctor || true
 
-    run "$HOME/.local/bin/cockpit-wake" migrate
+    WAKE_BIN="$BATS_TEST_DIRNAME/../../bin/cockpit-wake"
+    run "$WAKE_BIN" migrate
     [ "$status" -eq 0 ]
     [ -f "$root/control.json" ]
     # wake state unchanged
@@ -30,12 +31,14 @@ setup() {
     root="$BATS_TEST_TMPDIR/control-root"
     export COCKPIT_CONTROL_ROOT="$root"
 
-    run "$HOME/.local/bin/cockpit-wake" migrate
+    WAKE_BIN="$BATS_TEST_DIRNAME/../../bin/cockpit-wake"
+    run "$WAKE_BIN" migrate
     [ "$status" -eq 0 ]
 
     before=$(cc_control_contents "$root")
 
-    run "$HOME/.local/bin/cockpit-wake" migrate
+    WAKE_BIN="$BATS_TEST_DIRNAME/../../bin/cockpit-wake"
+    run "$WAKE_BIN" migrate
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "control root already current"
 
@@ -49,7 +52,8 @@ setup() {
     export COCKPIT_CONTROL_ROOT="$root"
     echo '{"schema_version": 99}' > "$root/control.json"
 
-    run "$HOME/.local/bin/cockpit-wake" migrate
+    WAKE_BIN="$BATS_TEST_DIRNAME/../../bin/cockpit-wake"
+    run "$WAKE_BIN" migrate
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "future schema_version"
 }
