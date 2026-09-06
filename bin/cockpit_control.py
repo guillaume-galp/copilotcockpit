@@ -7752,11 +7752,14 @@ def _controller_observation_action(
     # mission_id in the fields is used to detect this special-case only.
     if recorded is not None and recorded["state_key"] == state_key:
         mission_id = dict(fields).get("mission_id")
-        # Only force-record duplicated observations when the controller is
+        # Force-record duplicated observations when either the controller is
         # seeing a mission-in-progress observation that can legitimately
-        # close a bounded recovery episode.  Other observation kinds (for
-        # example awaiting/escalated/repair) must continue to collapse to
-        # `none` to avoid committing spurious controller-observation events.
+        # close a bounded recovery episode, or when the observation is a
+        # blocking reason. Persisting repeated blocked observations allows
+        # the overseer to count recurrent wakes and escalate to a human in
+        # a bounded, auditable way. Other observation kinds still collapse
+        # to `none` to avoid committing spurious controller-observation
+        # events.
         episode_open = False
         if mission_id is not None and reason == CONTROLLER_REASON_MISSION_IN_PROGRESS:
             try:
@@ -7764,7 +7767,7 @@ def _controller_observation_action(
             except Exception:
                 ep = None
             episode_open = bool(ep and ep[1])
-        if not episode_open:
+        if not episode_open and reason not in CONTROLLER_BLOCKING_REASONS:
             kind = CONTROLLER_ACTION_NONE
 
     return ControllerAction(
