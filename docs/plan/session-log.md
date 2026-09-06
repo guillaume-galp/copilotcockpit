@@ -1,5 +1,7 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T22:59:57+01:00 — TH3.E4 EPIC DONE: all three wake/evidence stories done; full repository gate `./run-tests.sh all` exited 0 with unit `1..223`, proportionate epic quality review APPROVED, changelog appended, and E4 marked done. — copilotcockpit
+
 - 2026-09-06T22:50:34+01:00 — TH3.E4.US3 DONE: troubleshooter attempt 1/3 converted boundary blocking to journal-backed controller observations with explicit mission/queue/command/trace/boundary refs and narrow architecture blocker categories; reviewer APPROVED after evidence-boundary 1/1 plus tick 29/29, command 12/12, mission 19/19, and trace 2/2. Residual risk: future blocker detail formats need explicit mapping. — copilotcockpit
 
 - 2026-09-06T22:41:32+01:00 — TH3.E4.US3 RECOVERY START: moved failed → in-progress for troubleshooter attempt 1/3; bounded decision is to implement AC3 as a committed, validated architecture-boundary/control event or existing journal-backed equivalent, not a best-effort sidecar-only artifact. — copilotcockpit

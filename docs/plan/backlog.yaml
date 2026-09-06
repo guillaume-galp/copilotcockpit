@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-06T22:50:34+01:00"
+last-updated: "2026-09-06T22:59:57+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -439,7 +439,7 @@ themes:
       - id: TH3.E4
         title: "Intent-aware wakes, evidence, and boundaries"
         slug: wakes-evidence-boundaries
-        status: in-progress
+        status: done
         depends_on: [TH3.E1]
         stories:
           - id: TH3.E4.US1

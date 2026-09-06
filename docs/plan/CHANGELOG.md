@@ -384,3 +384,22 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 - `docs/plan/session-log.md`
 
 **Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 (unit category `1..217` plus template, skills, integration, and codex categories). Proportionate epic quality review APPROVED; residual risk is limited to future stories adding new recovery/escalation observation kinds, which should carry explicit tests.
+
+## Epic TH3.E4 — Intent-aware wakes, evidence, and boundaries
+
+**Stories Completed:** TH3.E4.US1 (`9547607`), TH3.E4.US2 (`b07f6df`), TH3.E4.US3 (`9360a4a`). All three stories were reviewer-APPROVED under the reduced assurance envelope.
+
+**Key Changes:**
+- VP3 scheduled wake records now carry mission, queue item, owner, intent, stop condition, cadence, blocker threshold, and lifecycle metadata; generated jobs export that metadata and call managed controller ticks rather than pasting prompts.
+- Wake jobs now guard execution through persisted wake state and short durable leases: malformed/legacy/terminal/human-suspended/fulfilled wakes skip or fail closed, overlapping invocations record `wake-duplicate-skipped`, and expired leases are recovered by evidence-preserving quarantine plus explicit recovery events before reacquisition.
+- Evidence-boundary enforcement now uses committed command/mission boundaries and explicit architecture blocker categories so undeclared repository, image, CI/CD, IAM, or deployment needs block dispatch pending re-scope and emit a journal-backed controller observation with mission, queue, command, trace, and boundary references.
+
+**Files Modified:**
+- `bin/cockpit-wake`
+- `bin/cockpit_control.py`
+- `tests/unit/cmd-wake.bats`
+- `tests/unit/cmd-evidence-boundary.bats`
+- `docs/plan/backlog.yaml`
+- `docs/plan/session-log.md`
+
+**Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 (unit category `1..223` plus template, skills, integration, and codex categories). Proportionate epic quality review APPROVED. Residual risks are accepted as follow-ups: the generated wake script has a redundant inert quoted owner/mission shell check guarded authoritatively by `_guard-fire`, and future blocker detail formats will need explicit boundary-category mapping.
