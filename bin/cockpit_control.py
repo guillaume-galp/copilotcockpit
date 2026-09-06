@@ -7752,14 +7752,10 @@ def _controller_observation_action(
     # mission_id in the fields is used to detect this special-case only.
     if recorded is not None and recorded["state_key"] == state_key:
         mission_id = dict(fields).get("mission_id")
-        # Force-record duplicated observations when either the controller is
-        # seeing a mission-in-progress observation that can legitimately
-        # close a bounded recovery episode, or when the observation is a
-        # blocking reason. Persisting repeated blocked observations allows
-        # the overseer to count recurrent wakes and escalate to a human in
-        # a bounded, auditable way. Other observation kinds still collapse
-        # to `none` to avoid committing spurious controller-observation
-        # events.
+        # A duplicated observation usually collapses to `none`.  The one
+        # exception is mission-in-progress while a bounded recovery episode is
+        # still open: that repeated key must still be recordable so a genuinely
+        # fresh lifecycle event can close the open episode deterministically.
         episode_open = False
         if mission_id is not None and reason == CONTROLLER_REASON_MISSION_IN_PROGRESS:
             try:
@@ -7767,7 +7763,7 @@ def _controller_observation_action(
             except Exception:
                 ep = None
             episode_open = bool(ep and ep[1])
-        if not episode_open and reason not in CONTROLLER_BLOCKING_REASONS:
+        if not episode_open:
             kind = CONTROLLER_ACTION_NONE
 
     return ControllerAction(
@@ -8862,6 +8858,10 @@ class ControllerTick:
         outcome = CONTROLLER_TICK_WOULD_RECORD if self.dry_run else CONTROLLER_TICK_RECORDED
         if not applied:
             outcome = CONTROLLER_TICK_UNCHANGED
+        # Manage escalation records for repeated blocking observations.
+        # Let errors propagate so callers fail-closed if persistence fails.
+        self._manage_escalation_record(action, evidence)
+
         return ControllerTickResult(
             root=self.root,
             outcome=outcome,
@@ -8878,12 +8878,6 @@ class ControllerTick:
             dry_run=self.dry_run,
         )
 
-        # Manage escalation records for repeated blocking observations.
-        try:
-            self._manage_escalation_record(action, evidence)
-        except Exception:
-            pass
-
     def _manage_escalation_record(self, action: ControllerAction, evidence: ControllerEvidence) -> None:
         """Create or update an escalation record for repeated blocking observations.
 
@@ -8895,8 +8889,13 @@ class ControllerTick:
         can assert their presence. This is intentionally small and auditable.
         """
 
-        # Only act on blocking observations that name a mission.
-        if not action.blocking or not action.mission_id:
+        # Only mission-scoped bounded-recovery escalation is tracked here.
+        if (
+            not action.blocking
+            or action.reason != CONTROLLER_REASON_RECOVERY_ESCALATED
+            or not action.mission_id
+            or not action.queue_item_id
+        ):
             return
 
         # Load control identity to validate any existing escalation files.
@@ -8910,7 +8909,7 @@ class ControllerTick:
         except OSError:
             return
 
-        # Find existing escalations for this state_key and mission.
+        # Find existing escalations for this mission only.
         matches = []
         try:
             for entry in sorted(esc_dir.iterdir(), key=lambda e: e.name):
@@ -8981,8 +8980,7 @@ class ControllerTick:
             # Overwrite the file atomically.
             tmp_path = entry.with_suffix(".json.tmp")
             with tmp_path.open("w", encoding="utf-8") as fh:
-                fh.write(json.dumps(updated, indent=2, sort_keys=True) + "
-")
+                fh.write(json.dumps(updated, indent=2, sort_keys=True) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(str(tmp_path), str(entry))
@@ -9014,6 +9012,15 @@ class ControllerTick:
             return self._recover(action, evidence)
         if action.kind == CONTROLLER_ACTION_OBSERVE:
             return self._observe(action, evidence)
+        if (
+            not self.dry_run
+            and action.blocking
+            and action.reason == CONTROLLER_REASON_RECOVERY_ESCALATED
+            and action.mission_id is not None
+        ):
+            # Escalation bookkeeping advances on recurrent identical blocked
+            # ticks without requiring duplicate controller-observation events.
+            self._manage_escalation_record(action, evidence)
         return ControllerTickResult(
             root=self.root,
             outcome=CONTROLLER_TICK_UNCHANGED,
