@@ -44,6 +44,9 @@ from cockpit_control import (
     publish_control_event,
     resolve_control_root,
     validate_control_store,
+    initialize_control_store,
+    CONTROL_METADATA_NAME,
+    CONTROL_SCHEMA_VERSION,
 )
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -711,6 +714,51 @@ def cmd_clean(args):
     print(f"🧹 Removed {before - len(state['awakenings'])} entries (fired/cancelled).")
 
 # ── main ───────────────────────────────────────────────────────────────────────
+def cmd_migrate(args):
+    """Migrate an existing environment into a VP3 control root.
+
+    This operation is intentionally additive: it creates a new control root
+    when absent, backs up readable but invalid metadata, refuses to mutate
+    when an unsupported future schema is present, and is idempotent.
+    """
+    root = args.control_root
+    try:
+        validate_control_store(root)
+    except ControlStoreError as exc:
+        text = str(exc)
+        if "future schema_version" in text:
+            print(f"blocked: {text}")
+            sys.exit(1)
+        meta_path = root / CONTROL_METADATA_NAME
+        if meta_path.exists():
+            # backup existing metadata
+            stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+            bak = root / f"{CONTROL_METADATA_NAME}.bak-{stamp}"
+            try:
+                meta_path.replace(bak)
+                print(f"backed-up: {meta_path} -> {bak}")
+            except OSError:
+                print(f"cannot backup corrupted {meta_path}; aborting")
+                sys.exit(1)
+            print("cockpit-wake: metadata backed up; please run 'cockpit-control repair-store' to continue")
+            sys.exit(1)
+        # If root does not exist, initialize it atomically.
+        if not root.exists():
+            try:
+                initialize_control_store()
+            except Exception as exc_init:
+                print(f"cockpit-wake: initialization failed: {exc_init}")
+                sys.exit(1)
+            print(f"initialized control root: {root}")
+            return
+        # Otherwise refuse to touch an existing populated root with missing metadata.
+        print(f"blocked: {root} exists but {CONTROL_METADATA_NAME} is missing or unreadable")
+        sys.exit(1)
+    else:
+        print(f"control root already current: {root}")
+        return
+
+
 def main():
     p = argparse.ArgumentParser(
         description="cockpit-wake: schedule messages to tmux cockpit panes",
@@ -747,6 +795,7 @@ def main():
     sub.add_parser("clean",  help="Remove fired/cancelled entries")
     sub.add_parser("inbox",       help="Show unread inbox messages from fired awakenings")
     sub.add_parser("inbox-clear", help="Clear the inbox")
+    sub.add_parser("migrate", help="migrate an existing environment into a VP3 control root")
 
     # Internal — called by fire scripts
     pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
@@ -772,11 +821,13 @@ def main():
         "_write-inbox": cmd_write_inbox,
         "_guard-fire":  cmd_guard_fire,
         "_tick-with-lease": cmd_tick_with_lease,
+        "migrate":      cmd_migrate,
     }
     if args.command not in dispatch:
         p.print_help()
         sys.exit(1)
-    if args.command in {
+    # Commands that require a validated control root before running.
+    validated = {
         "schedule",
         "cancel",
         "fire",
@@ -786,12 +837,17 @@ def main():
         "_write-inbox",
         "_guard-fire",
         "_tick-with-lease",
-    }:
+    }
+    if args.command in validated:
         try:
             resolved_root = resolve_control_root()
             validate_control_store(resolved_root.path)
         except ControlStoreError as exc:
             p.exit(1, f"cockpit-wake: {exc}\n")
+        args.control_root = resolved_root.path
+    elif args.command == "migrate":
+        # Migrate only needs the resolved root; it may create it.
+        resolved_root = resolve_control_root()
         args.control_root = resolved_root.path
     dispatch[args.command](args)
 
