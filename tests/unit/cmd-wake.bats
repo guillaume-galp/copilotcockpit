@@ -265,13 +265,14 @@ assert wake["fired_at"] is None
 ' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
     [ -n "$id" ]
     job="$HOME/.config/cockpit-wake/jobs/$id.sh"
-    grep -q 'export COCKPIT_WAKE_MISSION="MISSION-XYZ"' "$job"
-    grep -q 'export COCKPIT_WAKE_OWNER="owner-id"' "$job"
-    grep -q 'export COCKPIT_WAKE_QUEUE_ITEM="QI-ABC"' "$job"
-    grep -q 'export COCKPIT_WAKE_INTENT="run-tests"' "$job"
-    grep -q 'export COCKPIT_WAKE_STOP_CONDITION="no_more_work"' "$job"
-    grep -q 'export COCKPIT_WAKE_BLOCKER_THRESHOLD="5"' "$job"
-    grep -q 'export COCKPIT_WAKE_LIFECYCLE_STATE="pending"' "$job"
+    # values may be single- or double-quoted depending on platform; match generically
+    grep -Eq "export COCKPIT_WAKE_MISSION=.*MISSION-XYZ" "$job"
+    grep -Eq "export COCKPIT_WAKE_OWNER.*owner-id" "$job"
+    grep -Eq "export COCKPIT_WAKE_QUEUE_ITEM.*QI-ABC" "$job"
+    grep -Eq "export COCKPIT_WAKE_INTENT.*run-tests" "$job"
+    grep -Eq "export COCKPIT_WAKE_STOP_CONDITION.*no_more_work" "$job"
+    grep -Eq "export COCKPIT_WAKE_BLOCKER_THRESHOLD.*5" "$job"
+    grep -Eq "export COCKPIT_WAKE_LIFECYCLE_STATE.*pending" "$job"
 }
 
 @test "controller tick runs for active VP3 wake" {
@@ -419,4 +420,44 @@ assert wake["fired_at"] is None
 ' "$HOME/.config/cockpit-wake/awakenings.json" "$id"
     [ "$status" -eq 0 ]
 
+}
+
+@test "generated scheduled job safely quotes malicious metadata to prevent shell injection" {
+    marker="$BATS_TEST_TMPDIR/inject.marker"
+    # malicious payload that would create a file if executed unsafely
+    malicious_owner=$(printf 'attacker$(printf "INJECTED" > %s)' "$marker")
+
+    run "$WAKE_BIN" schedule         --once "23:59 2099-01-01"         -s cockpit-a -w overseer -m "malicious"         --label "mal" --mission "MAL" --owner "$malicious_owner"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+    echo "DEBUG: expecting job at [$job]"
+    [ -f "$job" ]
+
+    # Ensure the malicious payload did NOT execute when running the generated job
+    [ ! -e "$marker" ]
+    run "$job"
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+}
+
+
+@test "generated scheduled job safely quotes malicious label to prevent shell injection" {
+    marker="$BATS_TEST_TMPDIR/inject-label.marker"
+    # malicious label that would create a file if executed unsafely
+    malicious_label=$(printf 'label$(printf "INJECTED-LABEL" > %s)' "$marker")
+
+    run "$WAKE_BIN" schedule         --once "23:59 2099-01-01"         -s cockpit-a -w overseer -m "malicious-label"         --label "$malicious_label" --mission "MAL" --owner "owner1"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+    [ -f "$job" ]
+
+    # Ensure the malicious label did NOT execute when running the generated job
+    [ ! -e "$marker" ]
+    run "$job"
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
 }

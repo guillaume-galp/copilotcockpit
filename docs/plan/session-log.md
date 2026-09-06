@@ -1,5 +1,11 @@
 # Session Log — copilotcockpit
 
+- 2026-09-07T00:58:35+01:00 — TH3.E5 EPIC DONE: final wake-script quoting rework passed targeted wake 16/16, wake-migrate 3/3, integration 8/8, and full `./run-tests.sh all` (unit `1..223` plus template/skills/integration/codex); final epic re-review APPROVED, changelog appended, and E5 marked done. Residual accepted risk: cron path quoting for unusual wake-dir paths is a future robustness cleanup. — copilotcockpit
+
+- 2026-09-07T00:38:29+01:00 — TH3.E5 EPIC RE-REVIEW REQUEST_CHANGES: exported wake metadata was hardened, but reviewer found a remaining label command-injection vector in generated `notify_line`; invoking final focused epic rework to quote notify arguments and add malicious-label regression. — copilotcockpit
+
+- 2026-09-07T00:24:49+01:00 — TH3.E5 EPIC REVIEW REQUEST_CHANGES: integrated review found a reproducible generated-job command-injection risk in `bin/cockpit-wake` because CLI-supplied `COCKPIT_WAKE_*` export values were embedded without robust shell quoting; focused epic rework limited to safe quoting, regression test, and rerunning wake/E5 gates. — copilotcockpit
+
 - 2026-09-07T00:07:36+01:00 — TH3.E5.US3 DONE: added deterministic integration resilience proof wired into `run-tests.sh integration`; reviewer APPROVED after the new restart/stall-recovery/escalation/evidence-clearance/wake-termination scenarios, integration 8/8, full `./run-tests.sh all`, and compileall were green. — copilotcockpit
 
 - 2026-09-07T00:04:09+01:00 — TH3.E5.US3 START RESTORED: developer completed test-only E2E resilience proof but the prior in-progress backlog/log state was absent from the worktree, so backlog is restored to authoritative in-progress before review; changed files are `run-tests.sh` and new `tests/integration/resilience.bats`. — copilotcockpit

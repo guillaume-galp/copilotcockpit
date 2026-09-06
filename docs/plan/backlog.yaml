@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-07T00:07:36+01:00"
+last-updated: "2026-09-07T00:58:35+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -467,7 +467,7 @@ themes:
       - id: TH3.E5
         title: "Compatibility, integration, and resilience validation"
         slug: compatibility-resilience
-        status: in-progress
+        status: done
         depends_on: [TH3.E1, TH3.E2, TH3.E3, TH3.E4]
         stories:
           - id: TH3.E5.US1

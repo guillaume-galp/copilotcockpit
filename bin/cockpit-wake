@@ -190,37 +190,43 @@ def make_fire_script(id_, session, window, message, control_root, label="",
     script  = JOBS_DIR / f"{id_}.sh"
     msg_file = JOBS_DIR / f"{id_}.msg"
     msg_file.write_text(message)          # pre-written message file for controller
-
     notify_bin = subprocess.run(["which", "notify-send"], capture_output=True, text=True).stdout.strip()
-    notify_line = (
-        f'"{notify_bin}" "cockpit-wake ⏰" "{(label or id_)}" 2>/dev/null || true'
-        if notify_bin else "true  # notify-send not available"
-    )
-    escaped_label = (label or id_).replace('"', '\\"')
+    if notify_bin:
+        notify_line = (
+            f"{shlex.quote(notify_bin)} {shlex.quote('cockpit-wake ⏰')} {shlex.quote(label or id_)} 2>/dev/null || true"
+        )
+    else:
+        notify_line = "true  # notify-send not available"
+
+    try:
+        blocker_threshold_int = int(blocker_threshold)
+    except Exception:
+        blocker_threshold_int = 0
+
 
     content = f'''#!/usr/bin/env bash
 # cockpit-wake fire script — {id_}
 # Auto-generated — do not edit manually.
 
-TMUX_BIN="{TMUX_BIN}"
-PYTHON="{PYTHON_BIN}"
-OVERSEER="{OVERSEER_BIN}"
-SELF="{SELF}"
-MSG_FILE="{msg_file}"
+TMUX_BIN={shlex.quote(TMUX_BIN)}
+PYTHON={shlex.quote(PYTHON_BIN)}
+OVERSEER={shlex.quote(OVERSEER_BIN)}
+SELF={shlex.quote(SELF)}
+MSG_FILE={shlex.quote(str(msg_file))}
 export COCKPIT_CONTROL_ROOT={shlex.quote(str(control_root))}
 # exported wake metadata for controller ticks
-export COCKPIT_WAKE_ID="{id_}"
-export COCKPIT_WAKE_LABEL="{escaped_label}"
-export COCKPIT_WAKE_SESSION="{session}"
-export COCKPIT_WAKE_WINDOW="{window}"
-export COCKPIT_WAKE_MISSION="{mission}"
-export COCKPIT_WAKE_QUEUE_ITEM="{queue_item}"
-export COCKPIT_WAKE_OWNER="{owner}"
-export COCKPIT_WAKE_INTENT="{intent}"
-export COCKPIT_WAKE_STOP_CONDITION="{stop_condition}"
-export COCKPIT_WAKE_CADENCE="{cadence}"
-export COCKPIT_WAKE_BLOCKER_THRESHOLD="{blocker_threshold}"
-export COCKPIT_WAKE_LIFECYCLE_STATE="{lifecycle_state}"
+export COCKPIT_WAKE_ID={shlex.quote(id_)}
+export COCKPIT_WAKE_LABEL={shlex.quote(label or id_)}
+export COCKPIT_WAKE_SESSION={shlex.quote(session)}
+export COCKPIT_WAKE_WINDOW={shlex.quote(window)}
+export COCKPIT_WAKE_MISSION={shlex.quote(mission)}
+export COCKPIT_WAKE_QUEUE_ITEM={shlex.quote(queue_item)}
+export COCKPIT_WAKE_OWNER={shlex.quote(owner)}
+export COCKPIT_WAKE_INTENT={shlex.quote(intent)}
+export COCKPIT_WAKE_STOP_CONDITION={shlex.quote(stop_condition)}
+export COCKPIT_WAKE_CADENCE={shlex.quote(cadence)}
+export COCKPIT_WAKE_BLOCKER_THRESHOLD={shlex.quote(str(blocker_threshold_int))}
+export COCKPIT_WAKE_LIFECYCLE_STATE={shlex.quote(lifecycle_state)}
 # message body available at $MSG_FILE
 FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
@@ -231,21 +237,21 @@ if [ -z "$COCKPIT_WAKE_OWNER" ] || [ -z "$COCKPIT_WAKE_MISSION" ]; then
   exit 1
 fi
 
-"$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT" || exit $?
+"$PYTHON" "$SELF" _write-inbox {shlex.quote(id_)} {shlex.quote(label or id_)} "$MSG_FILE" "$FIRED_AT" || exit $?
 
 # 2. Desktop notification (if available)
 {notify_line}
 
 
 # 3b. Deterministic guard: check persisted wake lifecycle/stop condition and skip if terminal
-"$PYTHON" "$SELF" _guard-fire "{id_}" || exit $?
+"$PYTHON" "$SELF" _guard-fire {shlex.quote(id_)} || exit $?
 
 
 # 4. Acquire a bounded wake lease, then invoke one controller tick
-"$PYTHON" "$SELF" _tick-with-lease "{id_}" "{session}" "{window}" || exit $?
+"$PYTHON" "$SELF" _tick-with-lease {shlex.quote(id_)} {shlex.quote(session)} {shlex.quote(window)} || exit $?
 
 # 5. Mark awakening as fired in state
-"$PYTHON" "$SELF" _mark-fired {id_}
+"$PYTHON" "$SELF" _mark-fired {shlex.quote(id_)}
 '''
     script.write_text(content)
     script.chmod(0o755)

@@ -403,3 +403,25 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 - `docs/plan/session-log.md`
 
 **Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 (unit category `1..223` plus template, skills, integration, and codex categories). Proportionate epic quality review APPROVED. Residual risks are accepted as follow-ups: the generated wake script has a redundant inert quoted owner/mission shell check guarded authoritatively by `_guard-fire`, and future blocker detail formats will need explicit boundary-category mapping.
+
+## Epic TH3.E5 — Compatibility, integration, and resilience validation
+
+**Stories Completed:** TH3.E5.US1 (`41b6933`), TH3.E5.US2 (`919e5b2`), TH3.E5.US3 (`33add40`). All three stories were reviewer-APPROVED; the epic gate required two focused security hardening reworks for generated wake-script quoting before final approval.
+
+**Key Changes:**
+- Added additive VP3 migration and doctor legacy guidance: existing wakes/queues/traces/project-owned files are preserved, current stores are idempotent, malformed metadata is backed up, future schema versions refuse mutation, and doctor surfaces control-plane readiness/legacy limitations.
+- Confirmed the control-plane contract and fault-injection coverage across existing repository categories for schemas, lifecycle transitions, command replay, reconciliation precedence, wake stop/lease behavior, migration, interrupted writes, malformed state, lock contention, lost acknowledgements, stale workers, and overlapping wakes.
+- Added deterministic integration resilience BDDs wired into `run-tests.sh integration`: queue-backed mission restart recovery without chat history, stalled-worker replacement or bounded human escalation, governed-evidence queue clearance, clearance refusal without evidence, and recurrent wake termination/suspension.
+- Hardened generated wake job scripts by shell-quoting persisted/user-provided metadata and notification arguments with `shlex.quote`, with malicious owner and label regression tests.
+
+**Files Modified:**
+- `bin/cockpit-wake`
+- `lib/cmd-doctor.sh`
+- `run-tests.sh`
+- `tests/unit/cmd-wake.bats`
+- `tests/unit/cmd-wake-migrate.bats`
+- `tests/integration/resilience.bats`
+- `docs/plan/backlog.yaml`
+- `docs/plan/session-log.md`
+
+**Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 after the final quoting fix (unit category `1..223`, template, skills, integration `1..8`, and codex categories all passed). Final proportionate epic re-review APPROVED. Residual risk: cron path quoting remains documented as a future robustness cleanup for unusual wake-directory paths; generated job metadata and notification injection vectors are covered.
