@@ -1,5 +1,9 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T23:27:20+01:00 — TH3.E5.US2 DONE: coverage inventory found existing/new repository categories cover schemas, lifecycle transitions, command replay, reconciliation precedence, wake stop/lease behavior, migration, interrupted writes, malformed state, lock contention, lost acknowledgements, stale workers, and overlapping wakes; reviewer APPROVED after targeted `1..108`, full `./run-tests.sh all`, category spots, compile, and Go build were green. — copilotcockpit
+
+- 2026-09-06T23:13:02+01:00 — TH3.E5.US2 START: dependencies TH3.E3.US3, TH3.E4.US2, TH3.E4.US3, and TH3.E5.US1 are done; scope limited to integrating existing/new contract and fault-injection tests for schemas, lifecycle, command replay, reconciliation, wake stop/lease behavior, and migration into portable repository test categories. — copilotcockpit
+
 - 2026-09-06T23:12:46+01:00 — TH3.E5.US1 DONE: additive migration and doctor legacy guidance were completed, and rework 1/1 fixed the generated wake guard so legacy/malformed wakes block before inbox/tick side effects; focused re-review APPROVED after wake 14/14 and wake-migrate 3/3. Process exception: developer made four pre-completion commits, preserved per no-amend/no-force. — copilotcockpit
 
 - 2026-09-06T23:08:03+01:00 — TH3.E5.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: migration/doctor behavior passed targeted review, but the generated wake job's owner/mission shell guard is incorrectly quoted and allows inbox mutation before `_guard-fire` blocks legacy wakes; focused rework limited to correcting fail-closed guard behavior and targeted wake/migrate tests. — copilotcockpit
