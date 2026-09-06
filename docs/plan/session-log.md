@@ -1,5 +1,11 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T22:50:34+01:00 — TH3.E4.US3 DONE: troubleshooter attempt 1/3 converted boundary blocking to journal-backed controller observations with explicit mission/queue/command/trace/boundary refs and narrow architecture blocker categories; reviewer APPROVED after evidence-boundary 1/1 plus tick 29/29, command 12/12, mission 19/19, and trace 2/2. Residual risk: future blocker detail formats need explicit mapping. — copilotcockpit
+
+- 2026-09-06T22:41:32+01:00 — TH3.E4.US3 RECOVERY START: moved failed → in-progress for troubleshooter attempt 1/3; bounded decision is to implement AC3 as a committed, validated architecture-boundary/control event or existing journal-backed equivalent, not a best-effort sidecar-only artifact. — copilotcockpit
+
+- 2026-09-06T22:41:16+01:00 — TH3.E4.US3 FAILED (developer partial): developer added boundary-blocker scaffolding but did not produce passing deterministic tests, used a sidecar `esc/` artifact despite AC3 naming an emitted event, and again created unexpected non-final commits; invoking troubleshooter attempt 1/3 to complete explicit AC with targeted tests while preserving history. — copilotcockpit
+
 - 2026-09-06T22:29:25+01:00 — TH3.E4.US3 START: dependencies TH3.E2.US2 and TH3.E3.US1 are done; scope limited to correlated mission evidence tree rendering, declared planning/queue/control/runtime boundaries, and fail-closed undeclared boundary crossings. — copilotcockpit
 
 - 2026-09-06T22:29:10+01:00 — TH3.E4.US2 DONE: durable wake lease wrapper now gates scheduled controller ticks, duplicate losers emit `wake-duplicate-skipped` without dispatch, and stale leases are recovered by evidence-preserving quarantine plus `wake-lease-recovered`; reviewer APPROVED after targeted wake/preflight 33/33 and developer full gate green. — copilotcockpit

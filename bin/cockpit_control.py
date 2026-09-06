@@ -918,6 +918,22 @@ CONTROLLER_RECOVERY_REASONS = (
 # Every reason one tick may decide on, whichever half of the contract records it.
 CONTROLLER_ACTION_REASONS = CONTROLLER_REASONS + CONTROLLER_RECOVERY_REASONS
 
+# Worker lifecycle blockers are free-text categories, so architectural boundary
+# enforcement must map only a narrow explicit category set rather than substring
+# matching. Anything outside this set is not treated as an architecture-boundary
+# signal by the controller tick.
+ARCHITECTURE_BLOCKER_CATEGORY_MAP = {
+    "image": "image",
+    "repo": "repository",
+    "repository": "repository",
+    "deploy": "deployment",
+    "deployment": "deployment",
+    "ci": "cicd",
+    "ci-cd": "cicd",
+    "cicd": "cicd",
+    "iam": "iam",
+}
+
 # The reasons a committed controller record carries *because* it is walking one
 # bounded recovery episode.  A record carrying one of them about a mission is
 # the controller continuing that mission's episode, so it may never be read back
@@ -7998,6 +8014,120 @@ def select_recovery_action(evidence: ControllerEvidence) -> Optional[ControllerA
     return None
 
 
+def _normalized_architecture_blocker_category(value: Any) -> Optional[str]:
+    """Map one blocker category to the closed architecture-boundary vocabulary."""
+
+    if not isinstance(value, str):
+        return None
+    return ARCHITECTURE_BLOCKER_CATEGORY_MAP.get(value.strip().lower())
+
+
+def _typed_reference_parts(reference: Any) -> Optional[Tuple[str, str]]:
+    """Return `<type>, <value>` for one typed reference, else None."""
+
+    if not isinstance(reference, str):
+        return None
+    if reference.split() != [reference]:
+        return None
+    kind, separator, value = reference.partition(":")
+    if not separator or not kind or not value:
+        return None
+    return kind, value
+
+
+def _mission_boundaries(
+    command_slots: Mapping[str, Mapping[str, Any]], mission_id: str
+) -> Tuple[Mapping[str, Any], ...]:
+    """Return every command boundary declaration carried for one mission."""
+
+    found: List[Mapping[str, Any]] = []
+    for slot in command_slots.values():
+        envelope = slot.get("envelope")
+        if not isinstance(envelope, Mapping):
+            continue
+        if envelope.get("mission_id") != mission_id:
+            continue
+        boundaries = envelope.get("boundaries")
+        if isinstance(boundaries, Mapping):
+            found.append(boundaries)
+    return tuple(found)
+
+
+def _is_declared_repository_access(detail: str, boundaries: Mapping[str, Any]) -> bool:
+    """Say whether one repository need is declared by implementation roots."""
+
+    runtime = boundaries.get("runtime_boundaries")
+    if isinstance(runtime, list) and detail in runtime:
+        return True
+    parsed = _typed_reference_parts(detail)
+    repo_path = detail
+    if parsed is not None:
+        kind, value = parsed
+        if kind in ("repo", "repository"):
+            repo_path = value
+    roots = boundaries.get("implementation_roots")
+    if not isinstance(roots, list):
+        return False
+    for declared in roots:
+        if not isinstance(declared, str) or not declared:
+            continue
+        base = declared.rstrip("/")
+        if repo_path == declared or repo_path == base:
+            return True
+        if repo_path.startswith(f"{base}/"):
+            return True
+    return False
+
+
+def _architecture_blocker_is_declared(
+    category: str,
+    detail: Optional[str],
+    declared_boundaries: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Say whether one architecture blocker is already within mission bounds."""
+
+    if not declared_boundaries:
+        return False
+    if not detail:
+        return False
+    expected_types = {
+        "image": ("image",),
+        "repository": ("repo", "repository"),
+        "deployment": ("deploy", "deployment"),
+        "cicd": ("ci", "ci-cd", "cicd"),
+        "iam": ("iam",),
+    }[category]
+    for boundaries in declared_boundaries:
+        runtime = boundaries.get("runtime_boundaries")
+        runtime_refs: Tuple[str, ...] = ()
+        if isinstance(runtime, list):
+            runtime_refs = tuple(ref for ref in runtime if isinstance(ref, str))
+        if category == "repository" and _is_declared_repository_access(detail, boundaries):
+            return True
+        if detail in runtime_refs:
+            return True
+        parsed = _typed_reference_parts(detail)
+        if parsed is None:
+            continue
+        kind, value = parsed
+        if kind not in expected_types:
+            continue
+        if f"{kind}:{value}" in runtime_refs:
+            return True
+    return False
+
+
+def _mission_slot_command_id(state: MissionState, mission_id: str) -> Optional[str]:
+    """Return the command ID of the slot currently carrying this mission."""
+
+    for slot in state.worker_slots.values():
+        if slot.get("mission_id") != mission_id:
+            continue
+        command_id = slot.get("command_id")
+        return command_id if isinstance(command_id, str) and command_id else None
+    return None
+
+
 def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
     """Choose the at most one action ADR-014 precedence allows, and no more.
 
@@ -8026,14 +8156,32 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
     # the operator sees an architecture-boundary event.
     if getattr(evidence, "boundary_blocker", None) is not None:
         bb = evidence.boundary_blocker
+        references: List[str] = []
+        mission_id = bb.get("mission_id")
+        queue_item_id = bb.get("queue_item_id")
+        command_id = bb.get("command_id")
+        trace_id = bb.get("trace_id")
+        blocker = bb.get("blocker") if isinstance(bb.get("blocker"), dict) else {}
+        category = _normalized_architecture_blocker_category(blocker.get("category"))
+        if isinstance(mission_id, str) and mission_id:
+            references.append(f"mission:{mission_id}")
+        if isinstance(queue_item_id, str) and queue_item_id:
+            references.append(f"queue:{queue_item_id}")
+        if isinstance(command_id, str) and command_id:
+            references.append(f"command:{command_id}")
+        if isinstance(trace_id, str) and trace_id:
+            references.append(f"trace:{trace_id}")
+        if category is not None:
+            references.append(f"boundary:{category}")
         return _controller_observation_action(
             evidence,
             CONTROLLER_REASON_ROOT_UNDECLARED,
             {"architecture_blocker": bb},
-            mission_id=bb.get("mission_id"),
-            queue_item_id=bb.get("queue_item_id"),
-            worker_id=bb.get("worker_id"),
-            evidence_refs=(f"trace:{bb.get("trace_id")}",),
+            mission_id=mission_id if isinstance(mission_id, str) else None,
+            queue_item_id=queue_item_id if isinstance(queue_item_id, str) else None,
+            worker_id=bb.get("worker_id") if isinstance(bb.get("worker_id"), str) else None,
+            command_id=command_id if isinstance(command_id, str) else None,
+            evidence_refs=tuple(references),
         )
 
 
@@ -8621,12 +8769,10 @@ class ControllerTick:
             for mission_id in sorted(state.missions)
         )
         commands, _outcomes = fold_commands(history.events)
-        # Detect lifecycle blockers that look like undeclared architectural
-        # boundary crossings (deployment images, repository access, CI/CD,
-        # IAM, or similar). If found, mark the tick's queue-root fault so the
-        # decision function blocks dispatch and carry the blocker details so
-        # the commit phase may publish an explicit architecture-boundary
-        # event for operator attention.
+        # Detect blocked lifecycle records that report architecture-boundary
+        # needs (image, repository, CI/CD, IAM, deployment). A need is blocked
+        # only when it is outside the mission's declared boundaries; declared
+        # repository roots and declared runtime boundaries are allowed.
         boundary_blocker = None
         if fault is None:
             for mission_id, entry in state.missions.items():
@@ -8634,14 +8780,26 @@ class ControllerTick:
                 if lifecycle.get("state") == LIFECYCLE_BLOCKED:
                     blocker = lifecycle.get("blocker")
                     if isinstance(blocker, dict):
-                        cat = (blocker.get("category") or "").lower()
-                        if any(k in cat for k in ("image","repo","repository","deploy","ci","iam","undeclared","boundary")):
+                        category = _normalized_architecture_blocker_category(
+                            blocker.get("category")
+                        )
+                        if category is None:
+                            continue
+                        declared_boundaries = _mission_boundaries(commands, mission_id)
+                        detail = blocker.get("detail")
+                        declared = _architecture_blocker_is_declared(
+                            category,
+                            detail if isinstance(detail, str) else None,
+                            declared_boundaries,
+                        )
+                        if not declared:
                             fault = CONTROLLER_REASON_ROOT_UNDECLARED
                             boundary_blocker = {
                                 "mission_id": mission_id,
                                 "worker_id": lifecycle.get("worker_id"),
                                 "queue_item_id": lifecycle.get("queue_item_id"),
                                 "trace_id": lifecycle.get("trace_id"),
+                                "command_id": _mission_slot_command_id(state, mission_id),
                                 "blocker": dict(blocker),
                             }
                             break
@@ -8664,6 +8822,7 @@ class ControllerTick:
             command_ids=tuple(sorted(commands)),
             ledger_repair=observation.repair,
             repaired_from=observation.repaired_from,
+            boundary_blocker=boundary_blocker,
         )
 
     def _validated_authority(self) -> Dict[str, Any]:
@@ -8907,54 +9066,6 @@ class ControllerTick:
         # Manage escalation records for repeated blocking observations.
         # Let errors propagate so callers fail-closed if persistence fails.
         self._manage_escalation_record(action, evidence)
-
-        # When the tick blocked due to an undeclared architecture boundary
-        # reported by a worker (for example an image or repository need),
-        # persist a minimal first-class escalation file so operators and
-        # automation can detect the exact offending resource.  This keeps the
-        # evidence durable and discoverable without adding a new committed
-        # event type to the journal.
-        try:
-            if (
-                not self.dry_run
-                and action.blocking
-                and action.reason == CONTROLLER_REASON_ROOT_UNDECLARED
-                and getattr(evidence, "boundary_blocker", None) is not None
-            ):
-                esc_dir = self.root / ESCALATIONS_DIR_NAME
-                try:
-                    esc_dir.mkdir(exist_ok=True)
-                except OSError:
-                    esc_dir = None
-                if esc_dir is not None:
-                    from uuid import uuid4
-
-                    now = utc_timestamp()
-                    blockade_id = str(uuid4())
-                    metadata = validate_root_metadata(
-                        _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME),
-                        self.root,
-                    )
-                    record = {
-                        "schema_version": CONTROL_SCHEMA_VERSION,
-                        "record_type": "architecture-boundary",
-                        "blockade_id": blockade_id,
-                        "control_id": metadata["control_id"],
-                        "mission_id": evidence.boundary_blocker.get("mission_id"),
-                        "created_at": now,
-                        "blocker": dict(evidence.boundary_blocker.get("blocker") or {}),
-                        "evidence_refs": [
-                            f"trace:{evidence.boundary_blocker.get('trace_id')}"
-                        ],
-                        "count": 1,
-                    }
-                    _write_json(esc_dir / f"{blockade_id}.json", record)
-                    _fsync_directory(esc_dir)
-        except Exception:
-            # Do not let a best-effort escalation write affect the primary
-            # observed outcome; propagate nothing but avoid hiding the
-            # original behavior if this best-effort fails.
-            pass
 
         return ControllerTickResult(
             root=self.root,
