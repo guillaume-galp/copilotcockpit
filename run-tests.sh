@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "$_rt_self")" && pwd -P)"
 UNIT_DIR="$ROOT/tests/unit"
 TEMPLATE_SCRIPT="$ROOT/tests/template/check-template.sh"
 SKILLS_SCRIPT="$ROOT/tests/skills/lint-skills.sh"
-INTEGRATION_SUITE="$ROOT/tests/integration/smoke.bats"
+INTEGRATION_DIR="$ROOT/tests/integration"
 CODEX_CHECK="$ROOT/tests/codex/check-codex.sh"
 
 usage() {
@@ -107,13 +107,17 @@ run_skills() {
 
 # run_integration — Category 4. Auto-wires when tests/integration/smoke.bats lands.
 run_integration() {
-	if [[ ! -f "$INTEGRATION_SUITE" ]]; then
+	local found=0 f
+	for f in "$INTEGRATION_DIR"/*.bats; do
+		[[ -e "$f" ]] && found=1
+	done
+	if [[ "$found" -eq 0 ]]; then
 		log "== Category 4: integration — SKIPPED (not yet implemented; arrives in TH1-E5-US2) =="
 		return 0
 	fi
 	require_bats || return 1
 	log "== Category 4: integration smoke (bats) =="
-	bats "$INTEGRATION_SUITE"
+	bats "$INTEGRATION_DIR"/*.bats
 }
 
 # run_codex — Category 5. Auto-wires when tests/codex/check-codex.sh lands.

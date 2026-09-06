@@ -1,5 +1,9 @@
 # Session Log — copilotcockpit
 
+- 2026-09-07T00:07:36+01:00 — TH3.E5.US3 DONE: added deterministic integration resilience proof wired into `run-tests.sh integration`; reviewer APPROVED after the new restart/stall-recovery/escalation/evidence-clearance/wake-termination scenarios, integration 8/8, full `./run-tests.sh all`, and compileall were green. — copilotcockpit
+
+- 2026-09-07T00:04:09+01:00 — TH3.E5.US3 START RESTORED: developer completed test-only E2E resilience proof but the prior in-progress backlog/log state was absent from the worktree, so backlog is restored to authoritative in-progress before review; changed files are `run-tests.sh` and new `tests/integration/resilience.bats`. — copilotcockpit
+
 - 2026-09-06T23:27:20+01:00 — TH3.E5.US2 DONE: coverage inventory found existing/new repository categories cover schemas, lifecycle transitions, command replay, reconciliation precedence, wake stop/lease behavior, migration, interrupted writes, malformed state, lock contention, lost acknowledgements, stale workers, and overlapping wakes; reviewer APPROVED after targeted `1..108`, full `./run-tests.sh all`, category spots, compile, and Go build were green. — copilotcockpit
 
 - 2026-09-06T23:13:02+01:00 — TH3.E5.US2 START: dependencies TH3.E3.US3, TH3.E4.US2, TH3.E4.US3, and TH3.E5.US1 are done; scope limited to integrating existing/new contract and fault-injection tests for schemas, lifecycle, command replay, reconciliation, wake stop/lease behavior, and migration into portable repository test categories. — copilotcockpit
