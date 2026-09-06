@@ -230,6 +230,18 @@ main() {
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control.py" "$home_bin/cockpit_control.py")"
 	_row "cockpit_control.py" "$state"
 
+	# --- control-store preflight (AC2) ---------------------------------------
+	_section "control-store"
+	if command -v cockpit-control >/dev/null 2>&1; then
+		# run a read-only preflight and surface any legacy or future-schema notes
+		_report="$(cockpit-control preflight 2>&1 || true)"
+		# print the first summary line and any advisory findings mentioning legacy or future
+		echo "$_report" | sed -n '1p'
+		echo "$_report" | grep -E "legacy|future schema_version|legacy-observed" || true
+	else
+		_row "cockpit-control preflight" "missing (optional)"
+	fi
+
 	# --- Verdict (AC5) -------------------------------------------------------
 	_section "Result"
 	if [[ "$_HARD_MISSING" -ne 0 ]]; then
