@@ -27,7 +27,7 @@ setup() {
     # One escalation file should exist and have status 'raised'.
     files=("$COCKPIT_CONTROL_ROOT/escalations"/*.json)
     [ -f "${files[0]}" ]
-    python3 - <<PY
+    python3 - <<'PY'
 import json,sys
 f=sys.argv[1]
 doc=json.load(open(f))
@@ -37,7 +37,7 @@ PY "${files[0]}" | grep -Fq raised
     # Second tick: escalation advances to 'escalated'.
     cc_tick --as-of 2026-09-04T10:01:00.000000Z
     [ "$status" -eq 0 ]
-    python3 - <<PY
+    python3 - <<'PY'
 import json,sys
 f=sys.argv[1]
 doc=json.load(open(f))
@@ -48,7 +48,7 @@ PY "${files[0]}" | grep -E "escalated|1"
     # Third tick: escalation requests human decision.
     cc_tick --as-of 2026-09-04T10:02:00.000000Z
     [ "$status" -eq 0 ]
-    python3 - <<PY
+    python3 - <<'PY'
 import json,sys
 f=sys.argv[1]
 doc=json.load(open(f))
