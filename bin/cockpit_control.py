@@ -8875,6 +8875,111 @@ class ControllerTick:
             dry_run=self.dry_run,
         )
 
+    def _manage_escalation_record(self, action: ControllerAction, evidence: ControllerEvidence) -> None:
+        """Create or update an escalation record for repeated blocking observations.
+
+        This minimal mechanism tracks consecutive blocked observations that
+        share the same controller state key and mission, and persists an
+        escalation record under ESCALATIONS_DIR_NAME. The schema is the
+        validated minimal one plus free-form fields for evidence, impact,
+        attempted recovery, options, and the pending human decision so tests
+        can assert their presence. This is intentionally small and auditable.
+        """
+
+        # Only act on blocking observations that name a mission.
+        if not action.blocking or not action.mission_id:
+            return
+
+        # Load control identity to validate any existing escalation files.
+        metadata = validate_root_metadata(
+            _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), self.root
+        )
+        control_id = metadata["control_id"]
+        esc_dir = self.root / ESCALATIONS_DIR_NAME
+        try:
+            esc_dir.mkdir(exist_ok=True)
+        except OSError:
+            return
+
+        # Find existing escalations for this state_key and mission.
+        matches = []
+        try:
+            for entry in sorted(esc_dir.iterdir(), key=lambda e: e.name):
+                if entry.name.startswith('.') or not entry.name.endswith('.json'):
+                    continue
+                try:
+                    doc = _load_json(entry, f"{ESCALATIONS_DIR_NAME}/{entry.name}")
+                except ControlStoreError:
+                    continue
+                if doc.get("control_id") != control_id:
+                    continue
+                if doc.get("mission_id") != action.mission_id:
+                    continue
+                if doc.get("state_key") != action.state_key:
+                    continue
+                matches.append((entry, doc))
+        except OSError:
+            matches = []
+
+        # Determine new count and status.
+        count = len(matches)
+        from uuid import uuid4
+        now = utc_timestamp()
+
+        if count == 0:
+            # First escalation record for this blocked situation.
+            escalation_id = str(uuid4())
+            record = {
+                "schema_version": CONTROL_SCHEMA_VERSION,
+                "record_type": "escalation",
+                "escalation_id": escalation_id,
+                "control_id": control_id,
+                "mission_id": action.mission_id,
+                "queue_item_id": action.queue_item_id,
+                "status": "raised",
+                "created_at": now,
+                "state_key": action.state_key,
+                "evidence_refs": list(action.evidence_refs),
+                "impact": {"worker_id": action.worker_id, "queue_item_id": action.queue_item_id},
+                "attempted_recovery": [],
+                "options": ["cancel-mission", "replace-mission"],
+                "pending_decision": "decide mission",
+                "count": 1,
+            }
+            _write_json(esc_dir / f"{escalation_id}.json", record)
+            _fsync_directory(esc_dir)
+        else:
+            # Update the latest matching escalation: increment count and progress
+            # the status: raised -> escalated -> decision-requested.
+            entry, doc = matches[-1]
+            updated = dict(doc)
+            updated_count = (updated.get("count") or 0) + 1
+            updated["count"] = updated_count
+            if updated.get("status") == "raised":
+                updated["status"] = "escalated"
+                updated.setdefault("attempted_recovery", []).append({
+                    "when": now,
+                    "action": "troubleshoot",
+                    "evidence_refs": list(action.evidence_refs),
+                })
+            else:
+                updated["status"] = "decision-requested"
+                updated.setdefault("attempted_recovery", []).append({
+                    "when": now,
+                    "action": "escalation-recorded",
+                    "evidence_refs": list(action.evidence_refs),
+                })
+            # Overwrite the file atomically.
+            tmp_path = entry.with_suffix(".json.tmp")
+            with tmp_path.open("w", encoding="utf-8") as fh:
+                fh.write(json.dumps(updated, indent=2, sort_keys=True) + "
+")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(str(tmp_path), str(entry))
+            _fsync_directory(esc_dir)
+
+
     def _commit(
         self,
         action: ControllerAction,

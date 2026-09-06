@@ -1,5 +1,7 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T20:54:23+01:00 — TH3.E3.US3 START: dependencies satisfied after TH3.E3.US2 commit 675a743; scope limited to queue-linked bounded escalation (queue authority preserved, blocked tick count drives troubleshoot → escalation record → human suspension, and actionable escalation records), with targeted story tests under the reduced assurance envelope. — copilotcockpit
+
 - 2026-09-06T20:54:01+01:00 — TH3.E3.US2 DONE: focused corrective rework plus troubleshooter attempt 1/3 narrowed duplicate observation force-recording to fresh `mission-in-progress` evidence for an open recovery episode, added/retained deterministic repeated-`fresh_until` and conflict-repair regressions, and preserved AC2/AC3; reviewer APPROVED under reduced scope after `cmd-overseer-recovery.bats` 26/26 and `cmd-overseer-tick.bats` 29/29. Residual risk: future observation kinds that should reset recovery episodes will need explicit tests. — copilotcockpit
 
 - 2026-09-06T20:43:40+01:00 — TH3.E3.US2 RECOVERY START: moved failed → in-progress for troubleshooter attempt 1/3, limited to restoring the focused repeated-`fresh_until` fix without the five extra observation commits and re-running targeted recovery/tick suites. — copilotcockpit
