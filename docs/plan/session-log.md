@@ -1,5 +1,7 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T21:50:24+01:00 — TH3.E3 EPIC DONE: all three stories done; full repository gate `./run-tests.sh all` exited 0, proportionate epic quality review APPROVED, changelog appended, and E3 marked done. Known process exception: US3 partial developer created five unexpected pre-completion commits; history was preserved per no-amend/no-force rules and final completion commit is `1a22229`. — copilotcockpit
+
 - 2026-09-06T21:40:48+01:00 — TH3.E3.US3 DONE: troubleshooter attempt 2/3 completed mission-scoped bounded escalation, preserving terminal queue authority and adding deterministic escalation evidence/count progression; reviewer APPROVED after `py_compile`, escalation 1/1, recovery 26/26, and tick 29/29. Non-blocking cleanup: remove committed generated pycache artifact in completion commit. — copilotcockpit
 
 - 2026-09-06T21:28:45+01:00 — TH3.E3.US3 RECOVERY START: moved failed → in-progress for troubleshooter attempt 2/3; scope remains explicit AC1–AC3 and targeted tests only, with no schema relaxation, no debug output, and no generated artifact changes. — copilotcockpit
