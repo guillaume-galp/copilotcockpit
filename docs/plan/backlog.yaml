@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-06T22:29:10+01:00"
+last-updated: "2026-09-06T22:29:25+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -458,7 +458,7 @@ themes:
             depends_on: [TH3.E1.US2, TH3.E4.US1]
           - id: TH3.E4.US3
             title: "Evidence correlation and declared mission boundaries"
-            status: todo
+            status: in-progress
             priority: medium
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E4-wakes-evidence-boundaries/stories/US3-evidence-boundaries.md

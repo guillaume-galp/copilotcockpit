@@ -7492,6 +7492,12 @@ class ControllerEvidence:
     command_ids: Tuple[str, ...]
     ledger_repair: str
     repaired_from: Optional[str]
+    # If a lifecycle blocker indicates an undeclared architectural boundary
+    # crossing (for example an undeclared deployment image or repository),
+    # this field carries a small structured description so the tick may
+    # publish an explicit architecture-boundary event when it records the
+    # blocked observation.  It is `None` in the normal case.
+    boundary_blocker: Optional[Dict[str, Any]]
 
     def __post_init__(self) -> None:
         """Refuse a derived-state classification outside the closed vocabulary."""

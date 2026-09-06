@@ -1,5 +1,7 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T22:29:25+01:00 — TH3.E4.US3 START: dependencies TH3.E2.US2 and TH3.E3.US1 are done; scope limited to correlated mission evidence tree rendering, declared planning/queue/control/runtime boundaries, and fail-closed undeclared boundary crossings. — copilotcockpit
+
 - 2026-09-06T22:29:10+01:00 — TH3.E4.US2 DONE: durable wake lease wrapper now gates scheduled controller ticks, duplicate losers emit `wake-duplicate-skipped` without dispatch, and stale leases are recovered by evidence-preserving quarantine plus `wake-lease-recovered`; reviewer APPROVED after targeted wake/preflight 33/33 and developer full gate green. — copilotcockpit
 
 - 2026-09-06T22:16:40+01:00 — TH3.E4.US2 START: dependencies TH3.E1.US2 and TH3.E4.US1 are done; scope limited to short durable wake leases, duplicate-skip evidence, and explicit stale/abandoned lease recovery before a scheduled controller tick. — copilotcockpit
