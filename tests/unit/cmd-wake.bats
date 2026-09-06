@@ -44,6 +44,9 @@ EOF
 	# fake overseer to observe tick invocations from generated jobs
 	cat >"$BATS_TEST_TMPDIR/bin/cockpit-overseer" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${COCKPIT_OVERSEER_SLEEP_SECONDS:-}" ]; then
+	sleep "${COCKPIT_OVERSEER_SLEEP_SECONDS}"
+fi
 echo "$*" >> "$BATS_TEST_TMPDIR/overseer.log"
 exit 0
 EOF
@@ -103,10 +106,10 @@ assert wake["fired_at"] is None
 id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
 	[ -n "$id" ]
 
-	# the generated job script should invoke the controller tick (not paste the prompt)
+	# the generated job script should invoke the lease-wrapped controller tick
 	job="$HOME/.config/cockpit-wake/jobs/$id.sh"
 	[ -f "$job" ]
-	grep -q "tick -s" "$job"
+	grep -q "_tick-with-lease" "$job"
 }
 
 @test "wake schedule accepts only the active tmux control-root fallback" {
@@ -281,6 +284,114 @@ assert wake["fired_at"] is None
     run "$HOME/.config/cockpit-wake/jobs/$id.sh"
     [ "$status" -eq 0 ]
     grep -q "tick -s" "$BATS_TEST_TMPDIR/overseer.log"
+    [ ! -e "$COCKPIT_CONTROL_ROOT/wake-leases/mission-tick-lease.json" ]
+    run python3 -c '
+import sys
+from pathlib import Path
+
+released = Path(sys.argv[1]) / "wake-leases" / "released"
+assert released.is_dir()
+assert any(released.iterdir())
+' "$COCKPIT_CONTROL_ROOT"
+    [ "$status" -eq 0 ]
+}
+
+@test "overlapping wake losing the lease records wake-duplicate-skipped and exits without dispatch" {
+    run "$WAKE_BIN" schedule --once "23:59 2099-01-01" -s cockpit-a -w overseer -m "Overlapping wake" --label "overlap" --mission "M-2" --owner "o2" --queue-item "qi2"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+    export COCKPIT_OVERSEER_SLEEP_SECONDS=1
+    "$job" >/dev/null 2>&1 &
+    first_pid="$!"
+
+    lease_path="$COCKPIT_CONTROL_ROOT/wake-leases/mission-tick-lease.json"
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -e "$lease_path" ] && break
+        sleep 0.05
+    done
+    [ -e "$lease_path" ]
+
+    run "$job"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -Fq "duplicate lease holder"
+
+    wait "$first_pid"
+    unset COCKPIT_OVERSEER_SLEEP_SECONDS
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+events = Path(sys.argv[1]) / "events"
+records = [json.loads(path.read_text()) for path in sorted(events.glob("*.json"))]
+duplicate = [r for r in records if r["event_type"] == "wake-duplicate-skipped"]
+assert len(duplicate) == 1, len(duplicate)
+' "$COCKPIT_CONTROL_ROOT"
+    [ "$status" -eq 0 ]
+
+    run python3 -c '
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text().splitlines()
+assert len(lines) == 1, len(lines)
+assert lines[0].startswith("tick ")
+' "$BATS_TEST_TMPDIR/overseer.log"
+    [ "$status" -eq 0 ]
+}
+
+@test "expired wake lease is reconciled durably before the next tick acquires a new lease" {
+    run "$WAKE_BIN" schedule --once "23:59 2099-01-01" -s cockpit-a -w overseer -m "Stale lease wake" --label "stale" --mission "M-3" --owner "o3" --queue-item "qi3"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+lease_dir = Path(sys.argv[1]) / "wake-leases"
+lease_dir.mkdir(parents=True, exist_ok=True)
+record = {
+    "schema_version": 1,
+    "lease_id": "dead-process-lease",
+    "wake_id": "abandoned",
+    "pid": 999999,
+    "session": "cockpit-a",
+    "window": "overseer",
+    "acquired_at": "2000-01-01T00:00:00Z",
+    "expires_at": "2000-01-01T00:01:00Z",
+}
+(lease_dir / "mission-tick-lease.json").write_text(json.dumps(record) + "\n")
+' "$COCKPIT_CONTROL_ROOT"
+    [ "$status" -eq 0 ]
+
+    run "$job"
+    [ "$status" -eq 0 ]
+    grep -q "tick -s" "$BATS_TEST_TMPDIR/overseer.log"
+    [ ! -e "$COCKPIT_CONTROL_ROOT/wake-leases/mission-tick-lease.json" ]
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+events = root / "events"
+records = [json.loads(path.read_text()) for path in sorted(events.glob("*.json"))]
+recovered = [r for r in records if r["event_type"] == "wake-lease-recovered"]
+assert len(recovered) == 1, len(recovered)
+assert recovered[0]["payload"]["reason"] == "expired"
+recovered_dir = root / "wake-leases" / "recovered"
+assert recovered_dir.is_dir()
+assert any(recovered_dir.iterdir())
+' "$COCKPIT_CONTROL_ROOT"
+    [ "$status" -eq 0 ]
 }
 
 @test "generated scheduled job blocks legacy wake missing owner or mission" {

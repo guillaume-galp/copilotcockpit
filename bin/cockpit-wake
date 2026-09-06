@@ -34,10 +34,17 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
 
-from cockpit_control import ControlStoreError, resolve_control_root, validate_control_store
+from cockpit_control import (
+    ControlStoreError,
+    publish_control_event,
+    resolve_control_root,
+    validate_control_store,
+)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 WAKE_DIR   = Path.home() / ".config" / "cockpit-wake"
@@ -60,6 +67,12 @@ TMUX_BIN   = _bin("tmux")
 AT_BIN     = _bin("at")
 PYTHON_BIN = _bin("python3")
 OVERSEER_BIN = _bin("cockpit-overseer")
+
+WAKE_LEASE_DIR = "wake-leases"
+WAKE_LEASE_RECOVERED_DIR = "recovered"
+WAKE_LEASE_RELEASED_DIR = "released"
+WAKE_LEASE_FILE = "mission-tick-lease.json"
+WAKE_LEASE_TTL_SECONDS = 120
 
 # ── State ──────────────────────────────────────────────────────────────────────
 def load_state():
@@ -224,8 +237,8 @@ fi
 "$PYTHON" "$SELF" _guard-fire "{id_}" || exit $?
 
 
-# 4. Invoke the controller tick rather than pasting prompts
-"$OVERSEER" tick -s "{session}" -w "{window}" || true
+# 4. Acquire a bounded wake lease, then invoke one controller tick
+"$PYTHON" "$SELF" _tick-with-lease "{id_}" "{session}" "{window}" || exit $?
 
 # 5. Mark awakening as fired in state
 "$PYTHON" "$SELF" _mark-fired {id_}
@@ -246,6 +259,263 @@ def cmd_mark_fired(args):
 def cmd_write_inbox(args):
     msg = Path(args.msg_file).read_text() if Path(args.msg_file).exists() else args.msg_file
     write_inbox(args.id, args.label, msg, args.fired_at)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_timestamp(moment: Optional[datetime] = None) -> str:
+    stamp = (moment or _utc_now()).isoformat(timespec="seconds")
+    return stamp.replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: str, label: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ControlStoreError(f"wake lease {label} must be an RFC3339 timestamp") from None
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_wake_event(root: Path, event_type: str, payload: Dict[str, Any]) -> None:
+    publish_control_event(
+        root,
+        event_type,
+        actor="cockpit-wake",
+        payload=payload,
+        command="cockpit-wake lease",
+    )
+
+
+def _load_lease_record(path: Path) -> Tuple[Dict[str, Any], os.stat_result]:
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        first_identity = path.lstat()
+        raw = path.read_text()
+        second_identity = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ControlStoreError(f"cannot read {label}: {exc}") from None
+    if (
+        first_identity.st_dev != second_identity.st_dev
+        or first_identity.st_ino != second_identity.st_ino
+    ):
+        raise ControlStoreError(f"{label} changed while being read; retry acquisition")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ControlStoreError(f"{label} is malformed JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise ControlStoreError(f"{label} must be a JSON object")
+    return data, second_identity
+
+
+def _lease_paths(root: Path) -> Tuple[Path, Path, Path, Path]:
+    lease_dir = root / WAKE_LEASE_DIR
+    recovered_dir = lease_dir / WAKE_LEASE_RECOVERED_DIR
+    released_dir = lease_dir / WAKE_LEASE_RELEASED_DIR
+    active = lease_dir / WAKE_LEASE_FILE
+    return lease_dir, recovered_dir, released_dir, active
+
+
+def _ensure_lease_dirs(root: Path) -> Tuple[Path, Path, Path, Path]:
+    lease_dir, recovered_dir, released_dir, active = _lease_paths(root)
+    for directory in (lease_dir, recovered_dir, released_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return lease_dir, recovered_dir, released_dir, active
+
+
+def _write_owned_lease(path: Path, record: Dict[str, Any]) -> None:
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _is_expired_lease(record: Dict[str, Any], now: datetime) -> bool:
+    expires = record.get("expires_at")
+    if not isinstance(expires, str):
+        raise ControlStoreError("wake lease expires_at must be a timestamp string")
+    return _parse_utc_timestamp(expires, "expires_at") <= now
+
+
+def _reconcile_expired_lease(
+    root: Path,
+    wake_id: str,
+    reason: str,
+    record: Dict[str, Any],
+    identity: os.stat_result,
+    recovered_dir: Path,
+    active_path: Path,
+) -> None:
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        current = active_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label} before reconciliation: {exc}") from None
+    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
+        return
+
+    recovered_path = recovered_dir / (
+        f"{active_path.stem}.recovered-{int(time.time())}-{uuid4().hex}.json"
+    )
+    try:
+        os.rename(str(active_path), str(recovered_path))
+        _fsync_directory(recovered_dir)
+        _fsync_directory(active_path.parent)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ControlStoreError(f"cannot reconcile expired {label}: {exc}") from None
+
+    _publish_wake_event(
+        root,
+        "wake-lease-recovered",
+        {
+            "wake_id": wake_id,
+            "reason": reason,
+            "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
+            "recovered_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_RECOVERED_DIR / recovered_path.name),
+            "prior_lease": record,
+        },
+    )
+
+
+def _acquire_tick_lease(
+    root: Path, wake_id: str, session: str, window: str
+) -> Tuple[str, Optional[os.stat_result]]:
+    now = _utc_now()
+    _, recovered_dir, _, active = _ensure_lease_dirs(root)
+    lease_id = str(uuid4())
+    record = {
+        "schema_version": 1,
+        "lease_id": lease_id,
+        "wake_id": wake_id,
+        "pid": os.getpid(),
+        "session": session,
+        "window": window,
+        "acquired_at": _utc_timestamp(now),
+        "expires_at": _utc_timestamp(now + timedelta(seconds=WAKE_LEASE_TTL_SECONDS)),
+    }
+
+    for _attempt in range(8):
+        try:
+            _write_owned_lease(active, record)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ControlStoreError(f"cannot create {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}: {exc}") from None
+        else:
+            _fsync_directory(active.parent)
+            return lease_id, active.lstat()
+
+        try:
+            existing, identity = _load_lease_record(active)
+            expired = _is_expired_lease(existing, _utc_now())
+        except FileNotFoundError:
+            continue
+        except ControlStoreError as exc:
+            try:
+                identity = active.lstat()
+            except FileNotFoundError:
+                continue
+            _reconcile_expired_lease(
+                root,
+                wake_id,
+                f"invalid-lease:{exc}",
+                {"error": str(exc)},
+                identity,
+                recovered_dir,
+                active,
+            )
+            continue
+
+        if not expired:
+            _publish_wake_event(
+                root,
+                "wake-duplicate-skipped",
+                {
+                    "wake_id": wake_id,
+                    "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
+                    "held_by": existing,
+                },
+            )
+            return "", None
+
+        _reconcile_expired_lease(
+            root,
+            wake_id,
+            "expired",
+            existing,
+            identity,
+            recovered_dir,
+            active,
+        )
+
+    raise ControlStoreError(
+        f"unable to acquire {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE} after bounded retries"
+    )
+
+
+def _release_tick_lease(root: Path, lease_id: str, identity: os.stat_result) -> None:
+    _, _, released_dir, active = _ensure_lease_dirs(root)
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        current = active.lstat()
+    except FileNotFoundError:
+        raise ControlStoreError(f"cannot release {label}; lease disappeared") from None
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label} during release: {exc}") from None
+    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
+        raise ControlStoreError(f"cannot release {label}; lease owner changed")
+
+    record, _ = _load_lease_record(active)
+    if record.get("lease_id") != lease_id:
+        raise ControlStoreError(f"cannot release {label}; lease id mismatch")
+
+    released = released_dir / f"{active.stem}.released-{int(time.time())}-{uuid4().hex}.json"
+    try:
+        os.rename(str(active), str(released))
+        _fsync_directory(released_dir)
+        _fsync_directory(active.parent)
+    except OSError as exc:
+        raise ControlStoreError(f"cannot release {label}: {exc}") from None
+
+
+def cmd_tick_with_lease(args):
+    state = load_state()
+    wake = get_awakening(state, args.id)
+    if not wake:
+        print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    root = args.control_root
+    lease_id, lease_identity = _acquire_tick_lease(root, args.id, args.session, args.window)
+    if not lease_id:
+        print(f"skipped: wake {args.id} duplicate lease holder", file=sys.stderr)
+        sys.exit(0)
+
+    try:
+        subprocess.run(
+            [OVERSEER_BIN, "tick", "-s", args.session, "-w", args.window],
+            check=False,
+        )
+    finally:
+        _release_tick_lease(root, lease_id, lease_identity)
+    sys.exit(0)
 
 # ── inbox ──────────────────────────────────────────────────────────────────────
 def cmd_guard_fire(args):
@@ -483,6 +753,10 @@ def main():
     pw = sub.add_parser("_write-inbox")
     pw.add_argument("id"); pw.add_argument("label"); pw.add_argument("msg_file"); pw.add_argument("fired_at")
     pg = sub.add_parser("_guard-fire"); pg.add_argument("id")
+    pt = sub.add_parser("_tick-with-lease")
+    pt.add_argument("id")
+    pt.add_argument("session")
+    pt.add_argument("window")
 
     args = p.parse_args()
     dispatch = {
@@ -497,6 +771,7 @@ def main():
         "_mark-fired":  cmd_mark_fired,
         "_write-inbox": cmd_write_inbox,
         "_guard-fire":  cmd_guard_fire,
+        "_tick-with-lease": cmd_tick_with_lease,
     }
     if args.command not in dispatch:
         p.print_help()
@@ -510,6 +785,7 @@ def main():
         "_mark-fired",
         "_write-inbox",
         "_guard-fire",
+        "_tick-with-lease",
     }:
         try:
             resolved_root = resolve_control_root()

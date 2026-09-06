@@ -1,5 +1,9 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T22:29:10+01:00 — TH3.E4.US2 DONE: durable wake lease wrapper now gates scheduled controller ticks, duplicate losers emit `wake-duplicate-skipped` without dispatch, and stale leases are recovered by evidence-preserving quarantine plus `wake-lease-recovered`; reviewer APPROVED after targeted wake/preflight 33/33 and developer full gate green. — copilotcockpit
+
+- 2026-09-06T22:16:40+01:00 — TH3.E4.US2 START: dependencies TH3.E1.US2 and TH3.E4.US1 are done; scope limited to short durable wake leases, duplicate-skip evidence, and explicit stale/abandoned lease recovery before a scheduled controller tick. — copilotcockpit
+
 - 2026-09-06T22:16:28+01:00 — TH3.E4.US1 DONE: rework 1/1 added full `COCKPIT_WAKE_*` metadata export and persisted-state guard for legacy, terminal, human-suspended, and `stop_condition_fulfilled` wakes; focused re-review APPROVED after `cmd-wake.bats` 12/12. Residual risk accepted: redundant generated inline owner/mission check has inert quoting but authoritative `_guard-fire` enforces the AC. — copilotcockpit
 
 - 2026-09-06T22:05:37+01:00 — TH3.E4.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer accepted AC1 persistence and AC2 controller invocation but found AC3 not runnable because generated wake jobs exported only basic wake IDs and neither checked persisted wake lifecycle/stop conditions nor passed enough metadata to the controller; focused rework is limited to metadata export, skip/termination guards, and targeted wake/tick tests. — copilotcockpit
