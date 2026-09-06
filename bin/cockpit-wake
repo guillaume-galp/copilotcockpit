@@ -59,6 +59,7 @@ def _bin(name):
 TMUX_BIN   = _bin("tmux")
 AT_BIN     = _bin("at")
 PYTHON_BIN = _bin("python3")
+OVERSEER_BIN = _bin("cockpit-overseer")
 
 # ── State ──────────────────────────────────────────────────────────────────────
 def load_state():
@@ -157,12 +158,22 @@ def write_inbox(id_, label, message, fired_at):
         f.write(entry)
 
 # ── Fire script ────────────────────────────────────────────────────────────────
-def make_fire_script(id_, session, window, message, control_root, label=""):
-    """Write a standalone bash fire script. Used by both at and cron."""
+# ── Fire script ────────────────────────────────────────────────────────────────
+def make_fire_script(id_, session, window, message, control_root, label="", 
+                     mission="", queue_item="", owner="", intent="",
+                     stop_condition="", cadence="", blocker_threshold=0,
+                     lifecycle_state="pending"):
+    """Write a standalone bash fire script. Used by both at and cron.
+
+    The script writes the message to the inbox and invokes the controller
+    tick (cockpit-overseer tick) with wake metadata exported in the
+    environment. Legacy wakes missing owner or mission are blocked with
+    migration guidance.
+    """
     ensure_wake_dirs()
     script  = JOBS_DIR / f"{id_}.sh"
     msg_file = JOBS_DIR / f"{id_}.msg"
-    msg_file.write_text(message)          # pre-written message file for load-buffer
+    msg_file.write_text(message)          # pre-written message file for controller
 
     notify_bin = subprocess.run(["which", "notify-send"], capture_output=True, text=True).stdout.strip()
     notify_line = (
@@ -171,15 +182,30 @@ def make_fire_script(id_, session, window, message, control_root, label=""):
     )
     escaped_label = (label or id_).replace('"', '\\"')
 
-    content = f"""#!/usr/bin/env bash
+    content = f'''#!/usr/bin/env bash
 # cockpit-wake fire script — {id_}
 # Auto-generated — do not edit manually.
 
 TMUX_BIN="{TMUX_BIN}"
 PYTHON="{PYTHON_BIN}"
+OVERSEER="{OVERSEER_BIN}"
 SELF="{SELF}"
 MSG_FILE="{msg_file}"
 export COCKPIT_CONTROL_ROOT={shlex.quote(str(control_root))}
+# exported wake metadata for controller ticks
+export COCKPIT_WAKE_ID="{id_}"
+export COCKPIT_WAKE_LABEL="{escaped_label}"
+export COCKPIT_WAKE_SESSION="{session}"
+export COCKPIT_WAKE_WINDOW="{window}"
+export COCKPIT_WAKE_MISSION="{mission}"
+export COCKPIT_WAKE_QUEUE_ITEM="{queue_item}"
+export COCKPIT_WAKE_OWNER="{owner}"
+export COCKPIT_WAKE_INTENT="{intent}"
+export COCKPIT_WAKE_STOP_CONDITION="{stop_condition}"
+export COCKPIT_WAKE_CADENCE="{cadence}"
+export COCKPIT_WAKE_BLOCKER_THRESHOLD="{blocker_threshold}"
+export COCKPIT_WAKE_LIFECYCLE_STATE="{lifecycle_state}"
+# message body available at $MSG_FILE
 FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
 # 1. Write to persistent inbox — readable by any future Copilot session
@@ -188,17 +214,22 @@ FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 # 2. Desktop notification (if available)
 {notify_line}
 
-# 3. Deliver via load-buffer + paste-buffer (reliable for long messages in Copilot readline)
-#    Falls back gracefully if the pane is not a Copilot session
-"$TMUX_BIN" load-buffer "$MSG_FILE" 2>/dev/null && \\
-  "$TMUX_BIN" paste-buffer -t "{session}:{window}" 2>/dev/null || true
-sleep 1
-"$TMUX_BIN" send-keys -t "{session}:{window}" Enter 2>/dev/null || \\
-  "$TMUX_BIN" send-keys -t "{session}:{window}" C-m 2>/dev/null || true
+# 3. Block legacy/malformed wakes that lack mission or owner
+if [ -z "\"$COCKPIT_WAKE_OWNER\"" ] || [ -z "\"$COCKPIT_WAKE_MISSION\"" ]; then
+  echo "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'" >&2
+  exit 1
+fi
 
-# 4. Mark awakening as fired in state
+# 3b. Deterministic guard: check persisted wake lifecycle/stop condition and skip if terminal
+"$PYTHON" "$SELF" _guard-fire "{id_}" || exit $?
+
+
+# 4. Invoke the controller tick rather than pasting prompts
+"$OVERSEER" tick -s "{session}" -w "{window}" || true
+
+# 5. Mark awakening as fired in state
 "$PYTHON" "$SELF" _mark-fired {id_}
-"""
+'''
     script.write_text(content)
     script.chmod(0o755)
     return str(script)
@@ -217,6 +248,40 @@ def cmd_write_inbox(args):
     write_inbox(args.id, args.label, msg, args.fired_at)
 
 # ── inbox ──────────────────────────────────────────────────────────────────────
+def cmd_guard_fire(args):
+    """Guard a generated job invocation by consulting the persisted awakenings.
+
+    Exit 0 only when the wake is valid and should run. Exit non-zero to
+    abort the generated job; callers should treat any non-zero as a hard
+    stop that prevents the controller tick from running.
+    """
+    state = load_state()
+    a = get_awakening(state, args.id)
+    if not a:
+        print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fail closed on legacy/malformed wakes that lack owner or mission
+    if not a.get("owner") or not a.get("mission"):
+        print("blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'", file=sys.stderr)
+        sys.exit(1)
+
+    # Terminal statuses or lifecycle states that must prevent future runs
+    status = a.get("status", "pending")
+    lifecycle = a.get("lifecycle_state", "")
+    terminal_lifecycles = {"completed", "cancelled", "superseded", "terminal", "human-suspended"}
+    if status in ("cancelled", "fired") or lifecycle in terminal_lifecycles:
+        print(f"skipped: wake {args.id} has lifecycle/status {lifecycle}/{status}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fulfilled stop condition represented as a persisted flag
+    if a.get("stop_condition_fulfilled"):
+        print(f"skipped: wake {args.id} stop condition already fulfilled", file=sys.stderr)
+        sys.exit(1)
+
+    # Otherwise allow the job to proceed
+    sys.exit(0)
+
 def cmd_inbox(args):
     if not INBOX_FILE.exists() or not INBOX_FILE.read_text().strip():
         print("📭 Inbox is empty — no pending awakenings.")
@@ -242,7 +307,16 @@ def cmd_schedule(args):
         args.m,
         args.control_root,
         label=args.label or "",
+        mission=args.mission or "",
+        queue_item=args.queue_item or "",
+        owner=args.owner or "",
+        intent=args.intent or "",
+        stop_condition=args.stop_condition or "",
+        cadence=(args.cron if args.cron else (args.once if args.once else "")),
+        blocker_threshold=(args.blocker_threshold if args.blocker_threshold is not None else 0),
+        lifecycle_state=(args.lifecycle or "pending"),
     )
+
 
     if once:
         at_timespec, iso_dt = parse_once_timespec(args.once)
@@ -270,6 +344,15 @@ def cmd_schedule(args):
         "status":       "pending",
         "created_at":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "fired_at":     None,
+        # VP3 wake metadata (AC1)
+        "mission":      args.mission or "",
+        "queue_item":   args.queue_item or "",
+        "owner":        args.owner or "",
+        "intent":       args.intent or "",
+        "stop_condition": args.stop_condition or "",
+        "cadence":      cron_expr if not once else iso_dt,
+        "blocker_threshold": args.blocker_threshold if args.blocker_threshold is not None else 0,
+        "lifecycle_state": args.lifecycle or "pending",
     }
     state["awakenings"].append(entry)
     save_state(state)
@@ -377,6 +460,13 @@ def main():
     ps.add_argument("-w", required=True, metavar="WINDOW",  help="tmux window name")
     ps.add_argument("-m", required=True, metavar="MESSAGE", help="Message to send to the pane")
     ps.add_argument("--label", metavar="TEXT", help="Human-readable label")
+    ps.add_argument("--mission", help="mission id")
+    ps.add_argument("--queue-item", help="queue item id")
+    ps.add_argument("--owner", help="owner identity")
+    ps.add_argument("--intent", help="brief intent for the wake")
+    ps.add_argument("--stop-condition", help="stop condition expression")
+    ps.add_argument("--blocker-threshold", type=int, help="blocker threshold")
+    ps.add_argument("--lifecycle", help="lifecycle state")
 
     sub.add_parser("list",   help="List all awakenings")
     pc = sub.add_parser("cancel", help="Cancel a pending awakening")
@@ -392,6 +482,7 @@ def main():
     pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
     pw = sub.add_parser("_write-inbox")
     pw.add_argument("id"); pw.add_argument("label"); pw.add_argument("msg_file"); pw.add_argument("fired_at")
+    pg = sub.add_parser("_guard-fire"); pg.add_argument("id")
 
     args = p.parse_args()
     dispatch = {
@@ -405,6 +496,7 @@ def main():
         "inbox-clear":  cmd_inbox_clear,
         "_mark-fired":  cmd_mark_fired,
         "_write-inbox": cmd_write_inbox,
+        "_guard-fire":  cmd_guard_fire,
     }
     if args.command not in dispatch:
         p.print_help()
@@ -417,6 +509,7 @@ def main():
         "inbox-clear",
         "_mark-fired",
         "_write-inbox",
+        "_guard-fire",
     }:
         try:
             resolved_root = resolve_control_root()

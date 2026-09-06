@@ -41,6 +41,14 @@ EOF
 EOF
 	chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
 
+	# fake overseer to observe tick invocations from generated jobs
+	cat >"$BATS_TEST_TMPDIR/bin/cockpit-overseer" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "$BATS_TEST_TMPDIR/overseer.log"
+exit 0
+EOF
+	chmod +x "$BATS_TEST_TMPDIR/bin/cockpit-overseer"
+
 	"$BATS_TEST_DIRNAME/../../bin/cockpit-control" init >/dev/null
 }
 
@@ -89,18 +97,16 @@ assert wake["fired_at"] is None
 		-s cockpit-a \
 		-w overseer \
 		-m "Wake up and run the loop" \
-		--label "loop"
+		--label "loop" \
+		--mission "MISSION-1" --owner "overseer" --queue-item "QI-1"
 	[ "$status" -eq 0 ]
-	id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
 	[ -n "$id" ]
 
-	run "$WAKE_BIN" fire "$id"
-	[ "$status" -eq 0 ]
-
-	grep -q "load-buffer .*/${id}.msg" "$BATS_TEST_TMPDIR/tmux/calls.log"
-	grep -q "paste-buffer -t cockpit-a:overseer" "$BATS_TEST_TMPDIR/tmux/calls.log"
-	grep -q "send-keys -t cockpit-a:overseer Enter" "$BATS_TEST_TMPDIR/tmux/calls.log"
-	! grep -q 'send-keys -t cockpit-a:overseer "" Enter' "$BATS_TEST_TMPDIR/tmux/calls.log"
+	# the generated job script should invoke the controller tick (not paste the prompt)
+	job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+	[ -f "$job" ]
+	grep -q "tick -s" "$job"
 }
 
 @test "wake schedule accepts only the active tmux control-root fallback" {
@@ -139,7 +145,7 @@ assert wake["fired_at"] is None
 		-m "Wake must remain pending"
 	[ "$status" -eq 0 ]
 	local id
-	id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
 	[ -n "$id" ]
 	printf 'unread wake\n' > "$HOME/.config/cockpit-wake/inbox.md"
 	local before
@@ -247,4 +253,45 @@ assert wake["status"] == "pending"
 assert wake["fired_at"] is None
 ' "$HOME/.config/cockpit-wake/awakenings.json" "$id"
 	[ "$status" -eq 0 ]
+}
+
+@test "generated scheduled job exports full wake metadata" {
+    run "$WAKE_BIN" schedule         --once "23:59 2099-01-01"         -s cockpit-a         -w overseer         -m "Metadata wake"         --label "meta"         --mission "MISSION-XYZ" --owner "owner-id" --queue-item "QI-ABC"         --intent "run-tests" --stop-condition "no_more_work" --blocker-threshold 5 --lifecycle "pending"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s
+' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    job="$HOME/.config/cockpit-wake/jobs/$id.sh"
+    grep -q 'export COCKPIT_WAKE_MISSION="MISSION-XYZ"' "$job"
+    grep -q 'export COCKPIT_WAKE_OWNER="owner-id"' "$job"
+    grep -q 'export COCKPIT_WAKE_QUEUE_ITEM="QI-ABC"' "$job"
+    grep -q 'export COCKPIT_WAKE_INTENT="run-tests"' "$job"
+    grep -q 'export COCKPIT_WAKE_STOP_CONDITION="no_more_work"' "$job"
+    grep -q 'export COCKPIT_WAKE_BLOCKER_THRESHOLD="5"' "$job"
+    grep -q 'export COCKPIT_WAKE_LIFECYCLE_STATE="pending"' "$job"
+}
+
+@test "controller tick runs for active VP3 wake" {
+    run "$WAKE_BIN" schedule         --once "23:59 2099-01-01"         -s cockpit-a         -w overseer         -m "Active wake"         --label "active"         --mission "M-1" --owner "o1" --queue-item "qi1"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s
+' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+    # run the job script — it should invoke the overseer tick
+    run "$HOME/.config/cockpit-wake/jobs/$id.sh"
+    [ "$status" -eq 0 ]
+    grep -q "tick -s" "$BATS_TEST_TMPDIR/overseer.log"
+}
+
+@test "generated scheduled job blocks legacy wake missing owner or mission" {
+    run "$WAKE_BIN" schedule         --once "23:59 2099-01-01"         -s cockpit-a         -w overseer         -m "Legacy wake"         --label "legacy"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s
+' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+
+    run "$HOME/.config/cockpit-wake/jobs/$id.sh"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -Fq "blocked: legacy wake missing owner or mission"
+    [ ! -e "$BATS_TEST_TMPDIR/overseer.log" ]
 }

@@ -1,5 +1,11 @@
 # Session Log — copilotcockpit
 
+- 2026-09-06T22:16:28+01:00 — TH3.E4.US1 DONE: rework 1/1 added full `COCKPIT_WAKE_*` metadata export and persisted-state guard for legacy, terminal, human-suspended, and `stop_condition_fulfilled` wakes; focused re-review APPROVED after `cmd-wake.bats` 12/12. Residual risk accepted: redundant generated inline owner/mission check has inert quoting but authoritative `_guard-fire` enforces the AC. — copilotcockpit
+
+- 2026-09-06T22:05:37+01:00 — TH3.E4.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer accepted AC1 persistence and AC2 controller invocation but found AC3 not runnable because generated wake jobs exported only basic wake IDs and neither checked persisted wake lifecycle/stop conditions nor passed enough metadata to the controller; focused rework is limited to metadata export, skip/termination guards, and targeted wake/tick tests. — copilotcockpit
+
+- 2026-09-06T21:50:47+01:00 — TH3.E4.US1 START: dependencies TH3.E1.US7 and TH3.E3.US1 are done; E4 moves to in-progress. Scope is mission-aware wake records, controller-tick invocation, and documented stop-condition termination/skip behavior with targeted wake/controller tests. — copilotcockpit
+
 - 2026-09-06T21:50:24+01:00 — TH3.E3 EPIC DONE: all three stories done; full repository gate `./run-tests.sh all` exited 0, proportionate epic quality review APPROVED, changelog appended, and E3 marked done. Known process exception: US3 partial developer created five unexpected pre-completion commits; history was preserved per no-amend/no-force rules and final completion commit is `1a22229`. — copilotcockpit
 
 - 2026-09-06T21:40:48+01:00 — TH3.E3.US3 DONE: troubleshooter attempt 2/3 completed mission-scoped bounded escalation, preserving terminal queue authority and adding deterministic escalation evidence/count progression; reviewer APPROVED after `py_compile`, escalation 1/1, recovery 26/26, and tick 29/29. Non-blocking cleanup: remove committed generated pycache artifact in completion commit. — copilotcockpit
