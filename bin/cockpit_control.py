@@ -8908,6 +8908,54 @@ class ControllerTick:
         # Let errors propagate so callers fail-closed if persistence fails.
         self._manage_escalation_record(action, evidence)
 
+        # When the tick blocked due to an undeclared architecture boundary
+        # reported by a worker (for example an image or repository need),
+        # persist a minimal first-class escalation file so operators and
+        # automation can detect the exact offending resource.  This keeps the
+        # evidence durable and discoverable without adding a new committed
+        # event type to the journal.
+        try:
+            if (
+                not self.dry_run
+                and action.blocking
+                and action.reason == CONTROLLER_REASON_ROOT_UNDECLARED
+                and getattr(evidence, "boundary_blocker", None) is not None
+            ):
+                esc_dir = self.root / ESCALATIONS_DIR_NAME
+                try:
+                    esc_dir.mkdir(exist_ok=True)
+                except OSError:
+                    esc_dir = None
+                if esc_dir is not None:
+                    from uuid import uuid4
+
+                    now = utc_timestamp()
+                    blockade_id = str(uuid4())
+                    metadata = validate_root_metadata(
+                        _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME),
+                        self.root,
+                    )
+                    record = {
+                        "schema_version": CONTROL_SCHEMA_VERSION,
+                        "record_type": "architecture-boundary",
+                        "blockade_id": blockade_id,
+                        "control_id": metadata["control_id"],
+                        "mission_id": evidence.boundary_blocker.get("mission_id"),
+                        "created_at": now,
+                        "blocker": dict(evidence.boundary_blocker.get("blocker") or {}),
+                        "evidence_refs": [
+                            f"trace:{evidence.boundary_blocker.get('trace_id')}"
+                        ],
+                        "count": 1,
+                    }
+                    _write_json(esc_dir / f"{blockade_id}.json", record)
+                    _fsync_directory(esc_dir)
+        except Exception:
+            # Do not let a best-effort escalation write affect the primary
+            # observed outcome; propagate nothing but avoid hiding the
+            # original behavior if this best-effort fails.
+            pass
+
         return ControllerTickResult(
             root=self.root,
             outcome=outcome,
