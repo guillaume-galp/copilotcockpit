@@ -8605,6 +8605,30 @@ class ControllerTick:
             for mission_id in sorted(state.missions)
         )
         commands, _outcomes = fold_commands(history.events)
+        # Detect lifecycle blockers that look like undeclared architectural
+        # boundary crossings (deployment images, repository access, CI/CD,
+        # IAM, or similar). If found, mark the tick's queue-root fault so the
+        # decision function blocks dispatch and carry the blocker details so
+        # the commit phase may publish an explicit architecture-boundary
+        # event for operator attention.
+        boundary_blocker = None
+        if fault is None:
+            for mission_id, entry in state.missions.items():
+                lifecycle = entry.get("lifecycle", {})
+                if lifecycle.get("state") == LIFECYCLE_BLOCKED:
+                    blocker = lifecycle.get("blocker")
+                    if isinstance(blocker, dict):
+                        cat = (blocker.get("category") or "").lower()
+                        if any(k in cat for k in ("image","repo","repository","deploy","ci","iam","undeclared","boundary")):
+                            fault = CONTROLLER_REASON_ROOT_UNDECLARED
+                            boundary_blocker = {
+                                "mission_id": mission_id,
+                                "worker_id": lifecycle.get("worker_id"),
+                                "queue_item_id": lifecycle.get("queue_item_id"),
+                                "trace_id": lifecycle.get("trace_id"),
+                                "blocker": dict(blocker),
+                            }
+                            break
         return ControllerEvidence(
             control_root=str(self.root),
             control_id=metadata["control_id"],
