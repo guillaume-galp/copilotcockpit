@@ -525,7 +525,7 @@ themes:
             depends_on: []
           - id: TH4.E1.US2
             title: "Typed contracts and dependency-boundary rules"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E1-foundation-facade-contracts/stories/US2-typed-contracts-dependency-boundaries.md

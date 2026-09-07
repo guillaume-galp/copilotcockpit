@@ -395,3 +395,11 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T02:49:00+01:00 — TH4.E1.US1 DONE: facade contract docs, MANAGED_RUNTIME_MODULES, and focused compatibility tests approved after rework; evidence: compatibility-facade2 4/4 (1 optional global-wrapper skip). Residual risk: global installed-wrapper enforcement is exercised at later install/cold gates before behavior movement. — copilotcockpit
 
+- 2026-09-07T02:52:00+01:00 — TH4.E1.US2 START: dependency TH4.E1.US1 is done; scope introduces typed seam contracts and checkable dependency-boundary rules without moving behavior from the cockpit_control facade. — copilotcockpit
+
+- 2026-09-07T03:05:00+01:00 — TH4.E1.US2 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found missing cycle detection, Python tests not wired into repository gate, debug prints, broad adapter matching, and unmanaged seam intent ambiguity; rework limited to those foundation-check defects. — copilotcockpit
+
+- 2026-09-07T03:18:00+01:00 — TH4.E1.US2 RE-REVIEW REQUEST_CHANGES / REWORK 2/2: seam checks passed conceptually, but reviewer blocked on undeclared pytest dependency and MANAGED_RUNTIME_MODULES listing without installer support; final rework limited to stdlib unittest gate and non-managed pre-extraction helper clarification. — copilotcockpit
+
+- 2026-09-07T03:30:00+01:00 — TH4.E1.US2 DONE: typed pre-extraction seam helper and dependency/cycle checks approved after stdlib unittest gate wiring; evidence: unittest 4/4 and py-tests.bats 1/1. Residual risk: helper remains source-tree only until a later story adds installer management before runtime use. — copilotcockpit
+

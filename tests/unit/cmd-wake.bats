@@ -432,7 +432,6 @@ assert wake["fired_at"] is None
     id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
     [ -n "$id" ]
     job="$HOME/.config/cockpit-wake/jobs/$id.sh"
-    echo "DEBUG: expecting job at [$job]"
     [ -f "$job" ]
 
     # Ensure the malicious payload did NOT execute when running the generated job
