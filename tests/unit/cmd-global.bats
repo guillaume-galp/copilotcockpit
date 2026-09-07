@@ -28,6 +28,7 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit_control.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_root_schema.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_locks.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_journal.py" ]
 
 	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/control-root"
 	run "$HOME/.local/bin/cockpit-overseer" start

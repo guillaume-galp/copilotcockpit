@@ -413,3 +413,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T04:50:00+01:00 — TH4.E2.US2 DONE: lock owner/acquire/release/guarded-repair seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lock/fault/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T04:56:00+01:00 — TH4.E2.US3 START: dependency TH4.E2.US2 done; scope extracts immutable journal event naming/validation/sequence/pending/publication behavior behind the facade with ADR-019 fault coverage preserved. — copilotcockpit
+
+- 2026-09-07T05:25:00+01:00 — TH4.E2.US3 DONE: immutable journal naming/sequence/pending/publication seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after journal/interruption/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

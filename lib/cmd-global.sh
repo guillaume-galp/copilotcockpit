@@ -16,6 +16,7 @@
 #   * bin/cockpit_control.py -> ~/.local/bin/cockpit_control.py
 #   * bin/cockpit_control_root_schema.py -> ~/.local/bin/cockpit_control_root_schema.py
 #   * bin/cockpit_control_locks.py -> ~/.local/bin/cockpit_control_locks.py
+#   * bin/cockpit_control_journal.py -> ~/.local/bin/cockpit_control_journal.py
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -68,6 +69,7 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit_control.py
   ~/.local/bin/cockpit_control_root_schema.py
   ~/.local/bin/cockpit_control_locks.py
+  ~/.local/bin/cockpit_control_journal.py
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -360,6 +362,7 @@ main() {
 	local ccp_src="$CC_ROOT/bin/cockpit_control.py"
 	local ccrs_src="$CC_ROOT/bin/cockpit_control_root_schema.py"
 	local ccls_src="$CC_ROOT/bin/cockpit_control_locks.py"
+	local ccj_src="$CC_ROOT/bin/cockpit_control_journal.py"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
@@ -372,6 +375,7 @@ main() {
 	local ccp_dst="$home_bin/cockpit_control.py"
 	local ccrs_dst="$home_bin/cockpit_control_root_schema.py"
 	local ccls_dst="$home_bin/cockpit_control_locks.py"
+	local ccj_dst="$home_bin/cockpit_control_journal.py"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -422,6 +426,10 @@ main() {
 	fi
 	if [[ ! -f "$ccls_src" ]]; then
 		log_error "required source missing: $ccls_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccj_src" ]]; then
+		log_error "required source missing: $ccj_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -475,6 +483,7 @@ main() {
 	cc_place "$ccp_src" "$ccp_dst" || return 1
 	cc_place "$ccrs_src" "$ccrs_dst" || return 1
 	cc_place "$ccls_src" "$ccls_dst" || return 1
+	cc_place "$ccj_src" "$ccj_dst" || return 1
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
 	case ":$PATH:" in

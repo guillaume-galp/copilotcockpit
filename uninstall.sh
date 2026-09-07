@@ -14,6 +14,7 @@
 #   * ~/.local/bin/cockpit_control.py
 #   * ~/.local/bin/cockpit_control_root_schema.py
 #   * ~/.local/bin/cockpit_control_locks.py
+#   * ~/.local/bin/cockpit_control_journal.py
 #
 # It never removes unrelated skills, backup files, parent skills directories, or
 # repository-scoped Codex overlays under a checkout.
@@ -44,6 +45,7 @@ Remove copilotcockpit's managed user-scoped install:
   ~/.local/bin/cockpit_control.py
   ~/.local/bin/cockpit_control_root_schema.py
   ~/.local/bin/cockpit_control_locks.py
+  ~/.local/bin/cockpit_control_journal.py
 
 Options:
   --dry-run             Describe removals; change nothing.
@@ -143,6 +145,7 @@ if [[ "$cc_target_bin" -ne 0 ]]; then
 	cc_remove_file "$HOME/.local/bin/cockpit_control.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_root_schema.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_locks.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_journal.py"
 fi
 
 cc_log "uninstall complete"

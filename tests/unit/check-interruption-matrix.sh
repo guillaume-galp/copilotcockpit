@@ -27,7 +27,7 @@ ROOT="$(cd "$UNIT_DIR/../.." && pwd -P)"
 
 REGISTRY="$UNIT_DIR/control-interruption-matrix.tsv"
 SUITE_DIR="$UNIT_DIR"
-MODULE="$ROOT/bin/cockpit_control.py"
+MODULES="$ROOT/bin/cockpit_control.py $ROOT/bin/cockpit_control_locks.py $ROOT/bin/cockpit_control_journal.py"
 ARCHITECTURE="$ROOT/docs/architecture/overseer-control-plane.md"
 ENTRIES_ONLY=0
 
@@ -39,7 +39,7 @@ Usage: tests/unit/check-interruption-matrix.sh [options]
 
   --registry FILE      declared coverage registry (default: tests/unit/control-interruption-matrix.tsv)
   --suite-dir DIR      directory holding the named bats suites (default: tests/unit)
-  --module FILE        control-store module that must declare each boundary
+  --module FILE        add one module that may declare fault-hook boundaries
   --architecture FILE  architecture document whose section 8.4 is authoritative
   --entries-only       check registry entries only; skip section 8.4 completeness
   -h, --help           show this help
@@ -57,7 +57,7 @@ while [ "$#" -gt 0 ]; do
 		shift 2
 		;;
 	--module)
-		MODULE="$2"
+		MODULES="$MODULES $2"
 		shift 2
 		;;
 	--architecture)
@@ -86,9 +86,15 @@ fail() {
 	printf '%s: rejected: %s\n' "$PREFIX" "$*" >&2
 }
 
-for required in "$REGISTRY" "$MODULE" "$ARCHITECTURE"; do
+for required in "$REGISTRY" "$ARCHITECTURE"; do
 	if [ ! -f "$required" ]; then
 		printf '%s: missing required input: %s\n' "$PREFIX" "$required" >&2
+		exit 2
+	fi
+done
+for module in $MODULES; do
+	if [ ! -f "$module" ]; then
+		printf '%s: missing required module: %s\n' "$PREFIX" "$module" >&2
 		exit 2
 	fi
 done
@@ -251,11 +257,25 @@ while IFS="$(printf '\t')" read -r kind key suite test_name coordination; do
 		fail "$label never references its declared boundary \"$coordination\""
 	fi
 
-	if ! grep -Eq '_lock_transition_fault|_event_publication_fault|_ledger_projection_fault' "$MODULE"; then
-		fail "$MODULE declares no fault hooks at all"
+	hooks_declared=0
+	for module in $MODULES; do
+		if grep -Eq '_lock_transition_fault|_event_publication_fault|_ledger_projection_fault' "$module"; then
+			hooks_declared=1
+			break
+		fi
+	done
+	if [ "$hooks_declared" -eq 0 ]; then
+		fail "no configured module declares fault hooks"
 	fi
-	if ! grep -Fq "_fault(\"$coordination\"" "$MODULE"; then
-		fail "$label targets boundary \"$coordination\", which $(basename "$MODULE") never invokes"
+	boundary_declared=0
+	for module in $MODULES; do
+		if grep -Fq "_fault(\"$coordination\"" "$module"; then
+			boundary_declared=1
+			break
+		fi
+	done
+	if [ "$boundary_declared" -eq 0 ]; then
+		fail "$label targets boundary \"$coordination\", which no configured module invokes"
 	fi
 
 	has_process=1

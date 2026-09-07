@@ -553,7 +553,7 @@ themes:
             depends_on: [TH4.E2.US1]
           - id: TH4.E2.US3
             title: "Immutable event journal extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US3-immutable-journal-publication.md
