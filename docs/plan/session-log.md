@@ -409,3 +409,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T04:12:00+01:00 — TH4.E2.US1 DONE: control-root/schema/compatibility seam extracted with facade re-exports and managed-module install/doctor/uninstall/cold-install coverage; reviewer APPROVED after focused distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T04:18:00+01:00 — TH4.E2.US2 START: dependency TH4.E2.US1 done; scope extracts portable lock owner/acquire/release/guarded-repair/quarantine behavior behind the facade with ADR-018 fault coverage preserved. — copilotcockpit
+
+- 2026-09-07T04:50:00+01:00 — TH4.E2.US2 DONE: lock owner/acquire/release/guarded-repair seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lock/fault/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

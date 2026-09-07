@@ -36,7 +36,8 @@ Managed artifact scaffolding
 - At foundation time the MANAGED_RUNTIME_MODULES file started with the
   compatibility facade `cockpit_control`. As extraction stories land, each new
   runtime module is added there before behavior moves, for example
-  `cockpit_control_root_schema` for control root and schema compatibility.
+  `cockpit_control_root_schema` for control root and schema compatibility and
+  `cockpit_control_locks` for lock owner acquisition/release/guarded repair.
 
 Compatibility checks
 - Tests that validate installed wrapper behavior must run from an isolated

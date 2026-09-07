@@ -55,9 +55,10 @@ PY
     echo "$output" | grep -q "validate"
 }
 
-@test "MANAGED_RUNTIME_MODULES declares facade and extracted control-root module" {
+@test "MANAGED_RUNTIME_MODULES declares facade and extracted runtime modules" {
     run cat "$BATS_TEST_DIRNAME/../../MANAGED_RUNTIME_MODULES"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "cockpit_control"
     echo "$output" | grep -q "cockpit_control_root_schema"
+    echo "$output" | grep -q "cockpit_control_locks"
 }

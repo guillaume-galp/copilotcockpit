@@ -546,7 +546,7 @@ themes:
             depends_on: [TH4.E1.US2]
           - id: TH4.E2.US2
             title: "Lock ownership, acquire/release, and repair extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US2-lock-ownership-protocol.md

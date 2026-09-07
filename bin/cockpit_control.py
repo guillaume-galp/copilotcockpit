@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4, uuid5
 
+import cockpit_control_locks as control_locks
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -73,26 +74,26 @@ REQUIRED_STORE_DIRECTORIES = (
     ESCALATIONS_DIR_NAME,
     LOCKS_DIR_NAME,
 )
-CONTROL_GUARD_NAME = "control.guard"
-CONTROL_LOCK_NAME = "control.lock"
-LOCK_OWNER_NAME = "owner.json"
-LOCK_CANDIDATE_PREFIX = f".{CONTROL_LOCK_NAME}.candidate-"
-LOCK_RELEASED_PREFIX = f"{CONTROL_LOCK_NAME}.released-"
-LOCK_REPAIRED_PREFIX = f"{CONTROL_LOCK_NAME}.repaired-"
-DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
-DEFAULT_LOCK_POLL_SECONDS = 0.05
+CONTROL_GUARD_NAME = control_locks.CONTROL_GUARD_NAME
+CONTROL_LOCK_NAME = control_locks.CONTROL_LOCK_NAME
+LOCK_OWNER_NAME = control_locks.LOCK_OWNER_NAME
+LOCK_CANDIDATE_PREFIX = control_locks.LOCK_CANDIDATE_PREFIX
+LOCK_RELEASED_PREFIX = control_locks.LOCK_RELEASED_PREFIX
+LOCK_REPAIRED_PREFIX = control_locks.LOCK_REPAIRED_PREFIX
+DEFAULT_LOCK_TIMEOUT_SECONDS = control_locks.DEFAULT_LOCK_TIMEOUT_SECONDS
+DEFAULT_LOCK_POLL_SECONDS = control_locks.DEFAULT_LOCK_POLL_SECONDS
 
 # Owner-fate classification.  Only LOCK_OWNER_DEAD is positive proof that the
 # publisher of a lock can no longer be running; everything else is refused by
 # automatic repair.
-LOCK_OWNER_DEAD = "dead"
-LOCK_OWNER_ALIVE = "alive"
-LOCK_OWNER_UNPROVEN = "unproven"
+LOCK_OWNER_DEAD = control_locks.LOCK_OWNER_DEAD
+LOCK_OWNER_ALIVE = control_locks.LOCK_OWNER_ALIVE
+LOCK_OWNER_UNPROVEN = control_locks.LOCK_OWNER_UNPROVEN
 
 # Guarded stale-lock repair outcomes.
-LOCK_REPAIR_ABSENT = "absent"
-LOCK_REPAIR_QUARANTINED = "quarantined"
-LOCK_REPAIR_WOULD_QUARANTINE = "would-quarantine"
+LOCK_REPAIR_ABSENT = control_locks.LOCK_REPAIR_ABSENT
+LOCK_REPAIR_QUARANTINED = control_locks.LOCK_REPAIR_QUARANTINED
+LOCK_REPAIR_WOULD_QUARANTINE = control_locks.LOCK_REPAIR_WOULD_QUARANTINE
 
 # Immutable event-publication outcomes.
 EVENT_COMMITTED = "committed"
@@ -4246,6 +4247,26 @@ def repair_stale_control_lock(
         poll_seconds=poll_seconds,
         dry_run=dry_run,
     ).run()
+
+
+control_locks.ControlStoreError = ControlStoreError
+control_locks._lock_transition_fault = (
+    lambda boundary, transition: _lock_transition_fault(boundary, transition)
+)
+_configured_lock_timeout = control_locks._configured_lock_timeout
+_validate_lock_owner = control_locks._validate_lock_owner
+_new_lock_owner = control_locks._new_lock_owner
+_prove_lock_owner_death = control_locks._prove_lock_owner_death
+_open_exact_directory = control_locks._open_exact_directory
+_read_lock_owner_from_directory = control_locks._read_lock_owner_from_directory
+_validate_owned_directory = control_locks._validate_owned_directory
+_cleanup_owned_directory = control_locks._cleanup_owned_directory
+ControlTransitionGuard = control_locks.ControlTransitionGuard
+_quarantine_owned_lock_while_guarded = control_locks._quarantine_owned_lock_while_guarded
+PortableControlLock = control_locks.PortableControlLock
+LockRepairResult = control_locks.LockRepairResult
+ControlLockRepair = control_locks.ControlLockRepair
+repair_stale_control_lock = control_locks.repair_stale_control_lock
 
 
 def _derived_ledger_id(control_id: str) -> str:
