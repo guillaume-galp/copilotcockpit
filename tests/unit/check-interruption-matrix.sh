@@ -27,7 +27,7 @@ ROOT="$(cd "$UNIT_DIR/../.." && pwd -P)"
 
 REGISTRY="$UNIT_DIR/control-interruption-matrix.tsv"
 SUITE_DIR="$UNIT_DIR"
-MODULES="$ROOT/bin/cockpit_control.py $ROOT/bin/cockpit_control_locks.py $ROOT/bin/cockpit_control_journal.py"
+MODULES="$ROOT/bin/cockpit_control.py $ROOT/bin/cockpit_control_locks.py $ROOT/bin/cockpit_control_journal.py $ROOT/bin/cockpit_control_projection.py"
 ARCHITECTURE="$ROOT/docs/architecture/overseer-control-plane.md"
 ENTRIES_ONLY=0
 

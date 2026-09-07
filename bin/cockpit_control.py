@@ -37,6 +37,7 @@ from uuid import UUID, uuid4, uuid5
 
 import cockpit_control_locks as control_locks
 import cockpit_control_journal as control_journal
+import cockpit_control_projection as control_projection
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -5748,6 +5749,92 @@ def _event_publication_fault(boundary: str, publication: "ControlEventPublicatio
     """No-op named publication hook used by deterministic protocol tests."""
 
     del boundary, publication
+
+
+control_projection.ControlStoreError = ControlStoreError
+control_projection.CONTROL_SCHEMA_VERSION = CONTROL_SCHEMA_VERSION
+control_projection.CONTROL_METADATA_NAME = CONTROL_METADATA_NAME
+control_projection.LEDGER_NAME = LEDGER_NAME
+control_projection.EVENTS_NAME = EVENTS_NAME
+control_projection.LEDGER_TEMPORARY_NAME = LEDGER_TEMPORARY_NAME
+control_projection.EVENTS_VIEW_TEMPORARY_NAME = EVENTS_VIEW_TEMPORARY_NAME
+control_projection.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_projection.DEFAULT_LEDGER_COMMAND = DEFAULT_LEDGER_COMMAND
+control_projection.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_projection.PROJECTION_CURRENT = PROJECTION_CURRENT
+control_projection.PROJECTION_REBUILT = PROJECTION_REBUILT
+control_projection.PROJECTION_WOULD_REBUILD = PROJECTION_WOULD_REBUILD
+control_projection.PROJECTION_REASON_CURRENT = PROJECTION_REASON_CURRENT
+control_projection.PROJECTION_REASON_MISSING = PROJECTION_REASON_MISSING
+control_projection.PROJECTION_REASON_CORRUPT = PROJECTION_REASON_CORRUPT
+control_projection.PROJECTION_REASON_AHEAD = PROJECTION_REASON_AHEAD
+control_projection.PROJECTION_REASON_STALE = PROJECTION_REASON_STALE
+control_projection.PROJECTION_REASON_DIVERGENT = PROJECTION_REASON_DIVERGENT
+control_projection.PROJECTION_REASON_VIEW = PROJECTION_REASON_VIEW
+control_projection.LEDGER_PROJECTION_FIELDS = LEDGER_PROJECTION_FIELDS
+control_projection.LEDGER_WORKER_MISSIONS_FIELD = LEDGER_WORKER_MISSIONS_FIELD
+control_projection.LEDGER_COMMANDS_FIELD = LEDGER_COMMANDS_FIELD
+control_projection.LEDGER_MISSION_DIALOGS_FIELD = LEDGER_MISSION_DIALOGS_FIELD
+control_projection.LEDGER_MISSION_CANCELLATIONS_FIELD = LEDGER_MISSION_CANCELLATIONS_FIELD
+control_projection.LEDGER_MISSION_RECOVERIES_FIELD = LEDGER_MISSION_RECOVERIES_FIELD
+control_projection.LEDGER_MISSION_SLOTS_FIELD = LEDGER_MISSION_SLOTS_FIELD
+control_projection.LEDGER_CONTROLLER_FIELD = LEDGER_CONTROLLER_FIELD
+control_projection._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_projection._require_directory = (
+    lambda *args, **kwargs: _require_directory(*args, **kwargs)
+)
+control_projection._configured_lock_timeout = (
+    lambda *args, **kwargs: _configured_lock_timeout(*args, **kwargs)
+)
+control_projection._validated_seconds = (
+    lambda *args, **kwargs: _validated_seconds(*args, **kwargs)
+)
+control_projection._same_filesystem_identity = (
+    lambda *args, **kwargs: _same_filesystem_identity(*args, **kwargs)
+)
+control_projection._fsync_directory = (
+    lambda *args, **kwargs: _fsync_directory(*args, **kwargs)
+)
+control_projection._serialized_record = (
+    lambda *args, **kwargs: _serialized_record(*args, **kwargs)
+)
+control_projection._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_projection._require_timestamp = (
+    lambda *args, **kwargs: _require_timestamp(*args, **kwargs)
+)
+control_projection._validate_canonical_roots = (
+    lambda *args, **kwargs: _validate_canonical_roots(*args, **kwargs)
+)
+control_projection.validate_ledger = lambda *args, **kwargs: validate_ledger(*args, **kwargs)
+control_projection._event_ledger_declarations = (
+    lambda *args, **kwargs: _event_ledger_declarations(*args, **kwargs)
+)
+control_projection._derived_ledger_id = lambda *args, **kwargs: _derived_ledger_id(*args, **kwargs)
+control_projection.fold_mission_state = (
+    lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+)
+control_projection.fold_commands = lambda *args, **kwargs: fold_commands(*args, **kwargs)
+control_projection.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_projection.PortableControlLock = (
+    lambda *args, **kwargs: PortableControlLock(*args, **kwargs)
+)
+control_projection._ledger_projection_fault = (
+    lambda boundary, projection: _ledger_projection_fault(boundary, projection)
+)
+
+build_ledger_projection = control_projection.build_ledger_projection
+build_events_view = control_projection.build_events_view
+_write_projection_temporary = control_projection._write_projection_temporary
+_replace_projection = control_projection._replace_projection
+_classify_published_ledger = control_projection._classify_published_ledger
+_published_view_matches = control_projection._published_view_matches
+LedgerProjectionResult = control_projection.LedgerProjectionResult
+ControlLedgerProjection = control_projection.ControlLedgerProjection
+replay_control_ledger = control_projection.replay_control_ledger
 
 
 control_journal.ControlStoreError = ControlStoreError

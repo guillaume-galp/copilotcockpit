@@ -62,4 +62,5 @@ PY
     echo "$output" | grep -q "cockpit_control_root_schema"
     echo "$output" | grep -q "cockpit_control_locks"
     echo "$output" | grep -q "cockpit_control_journal"
+    echo "$output" | grep -q "cockpit_control_projection"
 }

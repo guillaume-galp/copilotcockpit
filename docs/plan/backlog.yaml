@@ -560,7 +560,7 @@ themes:
             depends_on: [TH4.E2.US2]
           - id: TH4.E2.US4
             title: "Projection and replay extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US4-projection-replay.md

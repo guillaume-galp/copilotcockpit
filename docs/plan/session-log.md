@@ -417,3 +417,9 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T05:25:00+01:00 — TH4.E2.US3 DONE: immutable journal naming/sequence/pending/publication seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after journal/interruption/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T05:31:00+01:00 — TH4.E2.US4 START: dependency TH4.E2.US3 done; scope extracts ledger projection/replay/derived-view repair behind the facade while preserving authority-vs-derived fail-closed contracts. — copilotcockpit
+
+- 2026-09-07T06:05:00+01:00 — TH4.E2.US4 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer approved projection extraction logic but found the committed Python gate omitted journal/projection seam tests; rework limited to wiring all seam unittest modules through py-tests.bats. — copilotcockpit
+
+- 2026-09-07T06:18:00+01:00 — TH4.E2.US4 DONE: projection/replay/derived-view seam extracted with facade compatibility and managed distribution coverage; rework wired all seam unittests into bats gate, reviewer APPROVED, and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
