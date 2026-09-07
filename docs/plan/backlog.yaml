@@ -506,19 +506,19 @@ themes:
     slug: control-plane-modularity-ontology
     vision: VP4-control-plane-modularity-ontology
     title: "Control-plane modularity and ontology adoption"
-    status: todo
+    status: in-progress
     locked: false
     readme: docs/themes/TH4-control-plane-modularity-ontology/README.md
     epics:
       - id: TH4.E1
         title: "Foundation facade and typed contracts"
         slug: foundation-facade-contracts
-        status: todo
+        status: in-progress
         depends_on: []
         stories:
           - id: TH4.E1.US1
             title: "Compatibility facade and public import contract"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E1-foundation-facade-contracts/stories/US1-compatibility-facade-public-contract.md

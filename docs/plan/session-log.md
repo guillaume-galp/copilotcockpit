@@ -389,3 +389,9 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 - Set `locked: true` on theme TH1 (freezes VP1, theme dir, story files, ADRs).
 - Promoted all 8 ADRs (ADR-001..008) from `proposed` -> `accepted`.
 - Next manual step (per copilotcockpit-dev runbook): tag `v0.1.0` on `main` to trigger release.yml.
+- 2026-09-07T02:30:33+01:00 — TH4.E1.US1 START: fresh main-based feature branch created because no develop branch is present/applicable; scope pins cockpit_control facade/import/wrapper/managed-artifact contracts before any behavior movement. — copilotcockpit
+
+- 2026-09-07T02:42:00+01:00 — TH4.E1.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: focused facade review found the new wrapper-help contract test failing on line wrapping and needing robust isolated-wrapper execution capture; rework limited to test correction and rerun focused unit evidence. — copilotcockpit
+
+- 2026-09-07T02:49:00+01:00 — TH4.E1.US1 DONE: facade contract docs, MANAGED_RUNTIME_MODULES, and focused compatibility tests approved after rework; evidence: compatibility-facade2 4/4 (1 optional global-wrapper skip). Residual risk: global installed-wrapper enforcement is exercised at later install/cold gates before behavior movement. — copilotcockpit
+

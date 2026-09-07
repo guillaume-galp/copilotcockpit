@@ -1,0 +1,6 @@
+# Managed runtime modules required in every install/update/release surface.
+# One module name per line. This file is the canonical declaration of what the
+# installed distribution must provide before any behavior is moved out of the
+# cockpit_control facade.
+
+cockpit_control
