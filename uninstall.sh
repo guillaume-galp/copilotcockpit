@@ -12,6 +12,19 @@
 #   * ~/.local/bin/cockpit-queue
 #   * ~/.local/bin/cockpit-control
 #   * ~/.local/bin/cockpit_control.py
+#   * ~/.local/bin/cockpit_control_root_schema.py
+#   * ~/.local/bin/cockpit_control_locks.py
+#   * ~/.local/bin/cockpit_control_journal.py
+#   * ~/.local/bin/cockpit_control_projection.py
+#   * ~/.local/bin/cockpit_control_lifecycle.py
+#   * ~/.local/bin/cockpit_control_commands.py
+#   * ~/.local/bin/cockpit_control_mission_control.py
+#   * ~/.local/bin/cockpit_control_controller.py
+#   * ~/.local/bin/cockpit_control_wake.py
+#   * ~/.local/bin/cockpit_control_queue_adapter.py
+#   * ~/.local/bin/cockpit_control_tmux_adapter.py
+#   * ~/.local/bin/cockpit_control_rendering.py
+#   * ~/.local/bin/cockpit_control_cli.py
 #
 # It never removes unrelated skills, backup files, parent skills directories, or
 # repository-scoped Codex overlays under a checkout.
@@ -40,6 +53,19 @@ Remove copilotcockpit's managed user-scoped install:
   ~/.local/bin/cockpit-queue
   ~/.local/bin/cockpit-control
   ~/.local/bin/cockpit_control.py
+  ~/.local/bin/cockpit_control_root_schema.py
+  ~/.local/bin/cockpit_control_locks.py
+  ~/.local/bin/cockpit_control_journal.py
+  ~/.local/bin/cockpit_control_projection.py
+  ~/.local/bin/cockpit_control_lifecycle.py
+  ~/.local/bin/cockpit_control_commands.py
+  ~/.local/bin/cockpit_control_mission_control.py
+  ~/.local/bin/cockpit_control_controller.py
+  ~/.local/bin/cockpit_control_wake.py
+  ~/.local/bin/cockpit_control_queue_adapter.py
+  ~/.local/bin/cockpit_control_tmux_adapter.py
+  ~/.local/bin/cockpit_control_rendering.py
+  ~/.local/bin/cockpit_control_cli.py
 
 Options:
   --dry-run             Describe removals; change nothing.
@@ -137,6 +163,19 @@ if [[ "$cc_target_bin" -ne 0 ]]; then
 	cc_remove_file "$HOME/.local/bin/cockpit-queue"
 	cc_remove_file "$HOME/.local/bin/cockpit-control"
 	cc_remove_file "$HOME/.local/bin/cockpit_control.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_root_schema.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_locks.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_journal.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_projection.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_lifecycle.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_commands.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_mission_control.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_controller.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_wake.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_queue_adapter.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_tmux_adapter.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_rendering.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_control_cli.py"
 fi
 
 cc_log "uninstall complete"

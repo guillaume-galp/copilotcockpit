@@ -174,6 +174,32 @@ id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1
 	[ ! -e "$BATS_TEST_TMPDIR/tmux/calls.log" ]
 }
 
+@test "wake schedule list cancel preserves visible behavior and state transitions" {
+	run "$WAKE_BIN" schedule \
+		--once "23:59 2099-01-01" \
+		-s cockpit-a \
+		-w overseer \
+		-m "Wake visible list/cancel"
+	[ "$status" -eq 0 ]
+	local id
+	id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+	[ -n "$id" ]
+
+	run "$WAKE_BIN" list
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "$id"
+	echo "$output" | grep -Fq "⏳ pending"
+
+	run "$WAKE_BIN" cancel "$id"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "Cancelled: $id"
+
+	run "$WAKE_BIN" list
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "$id"
+	echo "$output" | grep -Fq "❌ cancelled"
+}
+
 @test "generated scheduled job rejects a missing control store before tmux mutation" {
 	local id
 	id="$(schedule_generated_job)"
@@ -422,6 +448,68 @@ assert wake["fired_at"] is None
 
 }
 
+@test "generated scheduled job guard skips human-suspended wake lifecycle" {
+    run "$WAKE_BIN" schedule \
+        --once "23:59 2099-01-01" \
+        -s cockpit-a \
+        -w overseer \
+        -m "Suspended wake" \
+        --label "suspend" --mission "M-8" --owner "o8"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+for wake in state["awakenings"]:
+    if wake["id"] == sys.argv[2]:
+        wake["lifecycle_state"] = "human-suspended"
+path.write_text(json.dumps(state, indent=2) + "\n")
+' "$HOME/.config/cockpit-wake/awakenings.json" "$id"
+    [ "$status" -eq 0 ]
+
+    run "$HOME/.config/cockpit-wake/jobs/$id.sh"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -Fq "skipped: wake $id has lifecycle/status human-suspended/pending"
+    [ ! -e "$BATS_TEST_TMPDIR/overseer.log" ]
+}
+
+@test "generated scheduled job guard skips fulfilled stop condition" {
+    run "$WAKE_BIN" schedule \
+        --once "23:59 2099-01-01" \
+        -s cockpit-a \
+        -w overseer \
+        -m "Stop wake" \
+        --label "stop" --mission "M-9" --owner "o9"
+    [ "$status" -eq 0 ]
+    id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
+    [ -n "$id" ]
+
+    run python3 -c '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+state = json.loads(path.read_text())
+for wake in state["awakenings"]:
+    if wake["id"] == sys.argv[2]:
+        wake["stop_condition_fulfilled"] = True
+path.write_text(json.dumps(state, indent=2) + "\n")
+' "$HOME/.config/cockpit-wake/awakenings.json" "$id"
+    [ "$status" -eq 0 ]
+
+    run "$HOME/.config/cockpit-wake/jobs/$id.sh"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -Fq "skipped: wake $id stop condition already fulfilled"
+    [ ! -e "$BATS_TEST_TMPDIR/overseer.log" ]
+}
+
 @test "generated scheduled job safely quotes malicious metadata to prevent shell injection" {
     marker="$BATS_TEST_TMPDIR/inject.marker"
     # malicious payload that would create a file if executed unsafely
@@ -432,7 +520,6 @@ assert wake["fired_at"] is None
     id="$(printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1)"
     [ -n "$id" ]
     job="$HOME/.config/cockpit-wake/jobs/$id.sh"
-    echo "DEBUG: expecting job at [$job]"
     [ -f "$job" ]
 
     # Ensure the malicious payload did NOT execute when running the generated job

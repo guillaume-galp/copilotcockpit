@@ -425,3 +425,55 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 - `docs/plan/session-log.md`
 
 **Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 after the final quoting fix (unit category `1..223`, template, skills, integration `1..8`, and codex categories all passed). Final proportionate epic re-review APPROVED. Residual risk: cron path quoting remains documented as a future robustness cleanup for unusual wake-directory paths; generated job metadata and notification injection vectors are covered.
+
+## Epic TH4.E1 — Foundation facade and typed contracts
+
+**Stories Completed:** TH4.E1.US1, TH4.E1.US2 (reviewer-approved).
+
+**Key Changes:**
+- Pinned `cockpit_control` as the compatibility facade with focused import and wrapper characterization tests.
+- Documented the stdlib-only source/installed module layout, exact managed runtime module declaration, rollback rule, and ADR-020 pre-extraction gate.
+- Added source-tree typed seam contracts plus dependency-direction and import-cycle checks wired into the unit gate via stdlib `unittest` under bats.
+
+**Files Modified:** `MANAGED_RUNTIME_MODULES`, `docs/architecture/facade-compatibility.md`, `bin/cockpit_control_seams.py`, `tests/unit/compatibility-facade2.bats`, `tests/unit/py-tests.bats`, `tests/unit/test_typed_contracts.py`, `tests/unit/cmd-wake.bats`.
+
+**Evidence:** Full `./run-tests.sh all` exited 0 with unit `1..233`; epic quality review APPROVED. Residual risk: `cockpit_control_seams` remains source-tree-only until a later story adds installer management before runtime use.
+
+## Epic TH4.E2 — Control-store domain extraction
+
+**Stories Completed:** TH4.E2.US1, TH4.E2.US2, TH4.E2.US3, TH4.E2.US4 (reviewer-approved).
+
+**Key Changes:**
+- Extracted control-root/schema/compatibility, portable lock ownership/guarded repair, immutable journal publication, and projection/replay into facade-backed modules.
+- Registered extracted runtime modules in `MANAGED_RUNTIME_MODULES` before behavior moved and updated global install/link, doctor drift, uninstall, release/cold-install, and smoke assertions.
+- Preserved ADR-018/019 fail-closed and durability contracts with focused seam tests, interruption matrix coverage, and full repository gates.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_root_schema.py`, `bin/cockpit_control_locks.py`, `bin/cockpit_control_journal.py`, `bin/cockpit_control_projection.py`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, control-store seam tests, managed-distribution tests.
+
+**Evidence:** Developer epic integration and final full `./run-tests.sh all` exited 0 with unit `1..233`; integration smoke `1..8`; epic re-review APPROVED after exact managed module smoke coverage was corrected. Residual risk: duplicated facade code remains temporarily for rollback/compatibility until later cleanup.
+
+## Epic TH4.E3 — Runtime orchestration domain extraction
+
+**Stories Completed:** TH4.E3.US1, TH4.E3.US2, TH4.E3.US3, TH4.E3.US4, TH4.E3.US5 (reviewer-approved).
+
+**Key Changes:**
+- Extracted worker lifecycle/freshness, command envelopes/acknowledgements, mission-control dialogs, controller reconciliation, and wake scheduling into managed facade-backed modules.
+- Preserved command, mission, controller, wake, and lifecycle schemas/output/exit/dry-run contracts while keeping `cockpit_control`, `cockpit-wake`, and overseer entry points stable.
+- Extended seam unittest, wake/controller/recovery, managed-distribution, and integration smoke coverage; added ignore rules for generated Python caches.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_lifecycle.py`, `bin/cockpit_control_commands.py`, `bin/cockpit_control_mission_control.py`, `bin/cockpit_control_controller.py`, `bin/cockpit_control_wake.py`, `bin/cockpit-wake`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, seam/wake/controller/distribution tests.
+
+**Evidence:** Developer epic integration `./run-tests.sh all` passed with unit `1..236`, template, skills, integration `1..8`, and codex checks; epic quality review APPROVED. Residual risk: real host tmux/cron integration remains covered by existing local smoke contracts, not external-system campaigns.
+
+## Epic TH4.E4 — CLI thinning and conformance cleanup
+
+**Stories Completed:** TH4.E4.US1, TH4.E4.US2, TH4.E4.US3 (reviewer-approved).
+
+**Key Changes:**
+- Added thin CLI, rendering, queue, and tmux adapter seams behind stable `cockpit_control.main()` and preserved facade aliases for public imports.
+- Documented conservative facade cleanup policy and final rollback/no-migration posture.
+- Added final TH4 conformance gate proving dependency direction, no circular imports, managed-module coverage, vocabulary/legacy alias documentation, CLI contracts, and resilience invariants.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_cli.py`, `bin/cockpit_control_rendering.py`, `bin/cockpit_control_queue_adapter.py`, `bin/cockpit_control_tmux_adapter.py`, `MANAGED_RUNTIME_MODULES`, `docs/architecture/facade-compatibility.md`, TH4 E4 conformance docs, conformance/adapter/import/distribution tests.
+
+**Evidence:** Epic `./run-tests.sh all` exited 0 with unit `1..238` plus template, skills, integration, and codex checks; epic quality review APPROVED. Residual risk: hardcoded conformance module list must stay synchronized with future managed modules.

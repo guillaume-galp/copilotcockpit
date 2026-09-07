@@ -46,6 +46,19 @@ setup() {
 	echo "$output" | grep -q "cockpit-trace"
 	echo "$output" | grep -q "cockpit-queue"
 	echo "$output" | grep -q "cockpit-control"
+	echo "$output" | grep -q "cockpit_control_root_schema.py"
+	echo "$output" | grep -q "cockpit_control_locks.py"
+	echo "$output" | grep -q "cockpit_control_journal.py"
+	echo "$output" | grep -q "cockpit_control_projection.py"
+	echo "$output" | grep -q "cockpit_control_lifecycle.py"
+	echo "$output" | grep -q "cockpit_control_commands.py"
+	echo "$output" | grep -q "cockpit_control_mission_control.py"
+	echo "$output" | grep -q "cockpit_control_controller.py"
+	echo "$output" | grep -q "cockpit_control_wake.py"
+	echo "$output" | grep -q "cockpit_control_queue_adapter.py"
+	echo "$output" | grep -q "cockpit_control_tmux_adapter.py"
+	echo "$output" | grep -q "cockpit_control_rendering.py"
+	echo "$output" | grep -q "cockpit_control_cli.py"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
@@ -83,6 +96,19 @@ setup() {
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-protocol"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-queue"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit-control"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_root_schema.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_locks.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_journal.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_projection.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_lifecycle.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_commands.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_mission_control.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_controller.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_wake.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_queue_adapter.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_tmux_adapter.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_rendering.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_cli.py"
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.agents" ]
 	[ ! -e "$HOME/.local" ]

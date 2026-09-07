@@ -34,11 +34,11 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
-from uuid import uuid4
 
+import cockpit_control_wake as control_wake
 from cockpit_control import (
     ControlStoreError,
     publish_control_event,
@@ -71,11 +71,19 @@ AT_BIN     = _bin("at")
 PYTHON_BIN = _bin("python3")
 OVERSEER_BIN = _bin("cockpit-overseer")
 
-WAKE_LEASE_DIR = "wake-leases"
-WAKE_LEASE_RECOVERED_DIR = "recovered"
-WAKE_LEASE_RELEASED_DIR = "released"
-WAKE_LEASE_FILE = "mission-tick-lease.json"
-WAKE_LEASE_TTL_SECONDS = 120
+control_wake.bind_facade(
+    {
+        "ControlStoreError": ControlStoreError,
+        "publish_control_event": publish_control_event,
+        "CONTROL_SCHEMA_VERSION": CONTROL_SCHEMA_VERSION,
+    }
+)
+
+WAKE_LEASE_DIR = control_wake.WAKE_LEASE_DIR
+WAKE_LEASE_RECOVERED_DIR = control_wake.WAKE_LEASE_RECOVERED_DIR
+WAKE_LEASE_RELEASED_DIR = control_wake.WAKE_LEASE_RELEASED_DIR
+WAKE_LEASE_FILE = control_wake.WAKE_LEASE_FILE
+WAKE_LEASE_TTL_SECONDS = control_wake.WAKE_LEASE_TTL_SECONDS
 
 # ── State ──────────────────────────────────────────────────────────────────────
 def load_state():
@@ -99,42 +107,27 @@ def gen_id():
     return f"wake-{int(time.time())}"
 
 # ── Crontab helpers ────────────────────────────────────────────────────────────
-CRON_TAG = "# cockpit-wake:"
+CRON_TAG = control_wake.CRON_TAG
 
 def read_crontab():
-    r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    return r.stdout.splitlines() if r.returncode == 0 else []
+    return control_wake.read_crontab()
 
 def write_crontab(lines):
-    content = "\n".join(lines) + "\n" if lines else ""
-    subprocess.run(["crontab", "-"], input=content, text=True, check=True)
+    control_wake.write_crontab(lines)
 
 def add_cron_line(cron_expr, job_script, id_):
-    lines = read_crontab()
-    lines.append(f"{cron_expr} {job_script}  {CRON_TAG}{id_}")
-    write_crontab(lines)
+    control_wake.add_cron_line(cron_expr, job_script, id_)
 
 def remove_cron_line(id_):
-    lines = read_crontab()
-    new_lines = [l for l in lines if f"{CRON_TAG}{id_}" not in l]
-    write_crontab(new_lines)
+    control_wake.remove_cron_line(id_)
 
 # ── at helpers ─────────────────────────────────────────────────────────────────
 def schedule_at(timespec, job_script):
     """Submit job_script to `at` at timespec. Returns the at job number."""
-    r = subprocess.run(
-        [AT_BIN, timespec],
-        input=job_script,
-        capture_output=True, text=True
-    )
-    # `at` writes "job N at <datetime>" to stderr
-    for line in r.stderr.splitlines():
-        if line.startswith("job "):
-            return line.split()[1]
-    return None
+    return control_wake.schedule_at(AT_BIN, timespec, job_script)
 
 def remove_at_job(job_number):
-    subprocess.run(["atrm", str(job_number)], capture_output=True)
+    control_wake.remove_at_job(job_number)
 
 # ── Time parsing ───────────────────────────────────────────────────────────────
 def parse_once_timespec(once_str):
@@ -272,92 +265,43 @@ def cmd_write_inbox(args):
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return control_wake._utc_now()
 
 
 def _utc_timestamp(moment: Optional[datetime] = None) -> str:
-    stamp = (moment or _utc_now()).isoformat(timespec="seconds")
-    return stamp.replace("+00:00", "Z")
+    return control_wake._utc_timestamp(moment)
 
 
 def _parse_utc_timestamp(value: str, label: str) -> datetime:
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        raise ControlStoreError(f"wake lease {label} must be an RFC3339 timestamp") from None
+    return control_wake._parse_utc_timestamp(value, label)
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    control_wake._fsync_directory(path)
 
 
 def _publish_wake_event(root: Path, event_type: str, payload: Dict[str, Any]) -> None:
-    publish_control_event(
-        root,
-        event_type,
-        actor="cockpit-wake",
-        payload=payload,
-        command="cockpit-wake lease",
-    )
+    control_wake._publish_wake_event(root, event_type, payload)
 
 
 def _load_lease_record(path: Path) -> Tuple[Dict[str, Any], os.stat_result]:
-    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
-    try:
-        first_identity = path.lstat()
-        raw = path.read_text()
-        second_identity = path.lstat()
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise ControlStoreError(f"cannot read {label}: {exc}") from None
-    if (
-        first_identity.st_dev != second_identity.st_dev
-        or first_identity.st_ino != second_identity.st_ino
-    ):
-        raise ControlStoreError(f"{label} changed while being read; retry acquisition")
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ControlStoreError(f"{label} is malformed JSON: {exc}") from None
-    if not isinstance(data, dict):
-        raise ControlStoreError(f"{label} must be a JSON object")
-    return data, second_identity
+    return control_wake._load_lease_record(path)
 
 
 def _lease_paths(root: Path) -> Tuple[Path, Path, Path, Path]:
-    lease_dir = root / WAKE_LEASE_DIR
-    recovered_dir = lease_dir / WAKE_LEASE_RECOVERED_DIR
-    released_dir = lease_dir / WAKE_LEASE_RELEASED_DIR
-    active = lease_dir / WAKE_LEASE_FILE
-    return lease_dir, recovered_dir, released_dir, active
+    return control_wake.lease_paths(root)
 
 
 def _ensure_lease_dirs(root: Path) -> Tuple[Path, Path, Path, Path]:
-    lease_dir, recovered_dir, released_dir, active = _lease_paths(root)
-    for directory in (lease_dir, recovered_dir, released_dir):
-        directory.mkdir(parents=True, exist_ok=True)
-    return lease_dir, recovered_dir, released_dir, active
+    return control_wake._ensure_lease_dirs(root)
 
 
 def _write_owned_lease(path: Path, record: Dict[str, Any]) -> None:
-    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(record, handle, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
+    control_wake._write_owned_lease(path, record)
 
 
 def _is_expired_lease(record: Dict[str, Any], now: datetime) -> bool:
-    expires = record.get("expires_at")
-    if not isinstance(expires, str):
-        raise ControlStoreError("wake lease expires_at must be a timestamp string")
-    return _parse_utc_timestamp(expires, "expires_at") <= now
+    return control_wake._is_expired_lease(record, now)
 
 
 def _reconcile_expired_lease(
@@ -369,140 +313,25 @@ def _reconcile_expired_lease(
     recovered_dir: Path,
     active_path: Path,
 ) -> None:
-    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
-    try:
-        current = active_path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise ControlStoreError(f"cannot inspect {label} before reconciliation: {exc}") from None
-    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
-        return
-
-    recovered_path = recovered_dir / (
-        f"{active_path.stem}.recovered-{int(time.time())}-{uuid4().hex}.json"
-    )
-    try:
-        os.rename(str(active_path), str(recovered_path))
-        _fsync_directory(recovered_dir)
-        _fsync_directory(active_path.parent)
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise ControlStoreError(f"cannot reconcile expired {label}: {exc}") from None
-
-    _publish_wake_event(
+    control_wake._reconcile_expired_lease(
         root,
-        "wake-lease-recovered",
-        {
-            "wake_id": wake_id,
-            "reason": reason,
-            "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
-            "recovered_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_RECOVERED_DIR / recovered_path.name),
-            "prior_lease": record,
-        },
+        wake_id,
+        reason,
+        record,
+        identity,
+        recovered_dir,
+        active_path,
     )
 
 
 def _acquire_tick_lease(
     root: Path, wake_id: str, session: str, window: str
 ) -> Tuple[str, Optional[os.stat_result]]:
-    now = _utc_now()
-    _, recovered_dir, _, active = _ensure_lease_dirs(root)
-    lease_id = str(uuid4())
-    record = {
-        "schema_version": 1,
-        "lease_id": lease_id,
-        "wake_id": wake_id,
-        "pid": os.getpid(),
-        "session": session,
-        "window": window,
-        "acquired_at": _utc_timestamp(now),
-        "expires_at": _utc_timestamp(now + timedelta(seconds=WAKE_LEASE_TTL_SECONDS)),
-    }
-
-    for _attempt in range(8):
-        try:
-            _write_owned_lease(active, record)
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise ControlStoreError(f"cannot create {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}: {exc}") from None
-        else:
-            _fsync_directory(active.parent)
-            return lease_id, active.lstat()
-
-        try:
-            existing, identity = _load_lease_record(active)
-            expired = _is_expired_lease(existing, _utc_now())
-        except FileNotFoundError:
-            continue
-        except ControlStoreError as exc:
-            try:
-                identity = active.lstat()
-            except FileNotFoundError:
-                continue
-            _reconcile_expired_lease(
-                root,
-                wake_id,
-                f"invalid-lease:{exc}",
-                {"error": str(exc)},
-                identity,
-                recovered_dir,
-                active,
-            )
-            continue
-
-        if not expired:
-            _publish_wake_event(
-                root,
-                "wake-duplicate-skipped",
-                {
-                    "wake_id": wake_id,
-                    "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
-                    "held_by": existing,
-                },
-            )
-            return "", None
-
-        _reconcile_expired_lease(
-            root,
-            wake_id,
-            "expired",
-            existing,
-            identity,
-            recovered_dir,
-            active,
-        )
-
-    raise ControlStoreError(
-        f"unable to acquire {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE} after bounded retries"
-    )
+    return control_wake.acquire_tick_lease(root, wake_id, session, window)
 
 
 def _release_tick_lease(root: Path, lease_id: str, identity: os.stat_result) -> None:
-    _, _, released_dir, active = _ensure_lease_dirs(root)
-    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
-    try:
-        current = active.lstat()
-    except FileNotFoundError:
-        raise ControlStoreError(f"cannot release {label}; lease disappeared") from None
-    except OSError as exc:
-        raise ControlStoreError(f"cannot inspect {label} during release: {exc}") from None
-    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
-        raise ControlStoreError(f"cannot release {label}; lease owner changed")
-
-    record, _ = _load_lease_record(active)
-    if record.get("lease_id") != lease_id:
-        raise ControlStoreError(f"cannot release {label}; lease id mismatch")
-
-    released = released_dir / f"{active.stem}.released-{int(time.time())}-{uuid4().hex}.json"
-    try:
-        os.rename(str(active), str(released))
-        _fsync_directory(released_dir)
-        _fsync_directory(active.parent)
-    except OSError as exc:
-        raise ControlStoreError(f"cannot release {label}: {exc}") from None
+    control_wake.release_tick_lease(root, lease_id, identity)
 
 
 def cmd_tick_with_lease(args):
@@ -519,10 +348,7 @@ def cmd_tick_with_lease(args):
         sys.exit(0)
 
     try:
-        subprocess.run(
-            [OVERSEER_BIN, "tick", "-s", args.session, "-w", args.window],
-            check=False,
-        )
+        control_wake.run_wake_controller_tick(OVERSEER_BIN, args.session, args.window)
     finally:
         _release_tick_lease(root, lease_id, lease_identity)
     sys.exit(0)
@@ -541,22 +367,9 @@ def cmd_guard_fire(args):
         print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
         sys.exit(1)
 
-    # Fail closed on legacy/malformed wakes that lack owner or mission
-    if not a.get("owner") or not a.get("mission"):
-        print("blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'", file=sys.stderr)
-        sys.exit(1)
-
-    # Terminal statuses or lifecycle states that must prevent future runs
-    status = a.get("status", "pending")
-    lifecycle = a.get("lifecycle_state", "")
-    terminal_lifecycles = {"completed", "cancelled", "superseded", "terminal", "human-suspended"}
-    if status in ("cancelled", "fired") or lifecycle in terminal_lifecycles:
-        print(f"skipped: wake {args.id} has lifecycle/status {lifecycle}/{status}", file=sys.stderr)
-        sys.exit(1)
-
-    # Fulfilled stop condition represented as a persisted flag
-    if a.get("stop_condition_fulfilled"):
-        print(f"skipped: wake {args.id} stop condition already fulfilled", file=sys.stderr)
+    allowed, message = control_wake.guard_wake_fire(a, args.id, STATE_FILE)
+    if not allowed:
+        print(message, file=sys.stderr)
         sys.exit(1)
 
     # Otherwise allow the job to proceed
@@ -611,29 +424,26 @@ def cmd_schedule(args):
         iso_dt        = None
         at_job_id     = None
 
-    entry = {
-        "id":           id_,
-        "label":        args.label or "",
-        "type":         "once" if once else "cron",
-        "cron_expr":    cron_expr,
-        "scheduled_at": iso_dt,
-        "at_job_id":    at_job_id,
-        "session":      args.s,
-        "window":       args.w,
-        "message":      args.m,
-        "status":       "pending",
-        "created_at":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "fired_at":     None,
-        # VP3 wake metadata (AC1)
-        "mission":      args.mission or "",
-        "queue_item":   args.queue_item or "",
-        "owner":        args.owner or "",
-        "intent":       args.intent or "",
-        "stop_condition": args.stop_condition or "",
-        "cadence":      cron_expr if not once else iso_dt,
-        "blocker_threshold": args.blocker_threshold if args.blocker_threshold is not None else 0,
-        "lifecycle_state": args.lifecycle or "pending",
-    }
+    wake_intent = control_wake.build_wake_intent(
+        id_,
+        args.s,
+        args.w,
+        args.m,
+        label=args.label or "",
+        wake_type="once" if once else "cron",
+        cron_expr=cron_expr,
+        scheduled_at=iso_dt,
+        at_job_id=at_job_id,
+        mission=args.mission or "",
+        queue_item=args.queue_item or "",
+        owner=args.owner or "",
+        intent=args.intent or "",
+        stop_condition=args.stop_condition or "",
+        cadence=cron_expr if not once else (iso_dt or ""),
+        blocker_threshold=args.blocker_threshold if args.blocker_threshold is not None else 0,
+        lifecycle_state=args.lifecycle or "pending",
+    )
+    entry = control_wake.wake_intent_to_dict(wake_intent)
     state["awakenings"].append(entry)
     save_state(state)
 

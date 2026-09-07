@@ -35,10 +35,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4, uuid5
 
-CONTROL_SCHEMA_VERSION = 1
-CONTROL_METADATA_NAME = "control.json"
-LEDGER_NAME = "ledger.json"
-EVENTS_NAME = "events.jsonl"
+import cockpit_control_locks as control_locks
+import cockpit_control_journal as control_journal
+import cockpit_control_projection as control_projection
+import cockpit_control_lifecycle as control_lifecycle
+import cockpit_control_commands as control_commands
+import cockpit_control_mission_control as control_mission_control
+import cockpit_control_controller as control_controller
+import cockpit_control_wake as control_wake
+import cockpit_control_root_schema as control_root_schema
+import cockpit_control_cli as control_cli
+import cockpit_control_rendering as control_rendering
+import cockpit_control_queue_adapter as control_queue_adapter
+import cockpit_control_tmux_adapter as control_tmux_adapter
+
+CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
+CONTROL_METADATA_NAME = control_root_schema.CONTROL_METADATA_NAME
+LEDGER_NAME = control_root_schema.LEDGER_NAME
+EVENTS_NAME = control_root_schema.EVENTS_NAME
 # Derived projections are replaced through one reusable temporary path each, so
 # an interruption can only leave a named non-authoritative file behind.
 LEDGER_TEMPORARY_NAME = f"{LEDGER_NAME}.tmp"
@@ -71,26 +85,26 @@ REQUIRED_STORE_DIRECTORIES = (
     ESCALATIONS_DIR_NAME,
     LOCKS_DIR_NAME,
 )
-CONTROL_GUARD_NAME = "control.guard"
-CONTROL_LOCK_NAME = "control.lock"
-LOCK_OWNER_NAME = "owner.json"
-LOCK_CANDIDATE_PREFIX = f".{CONTROL_LOCK_NAME}.candidate-"
-LOCK_RELEASED_PREFIX = f"{CONTROL_LOCK_NAME}.released-"
-LOCK_REPAIRED_PREFIX = f"{CONTROL_LOCK_NAME}.repaired-"
-DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
-DEFAULT_LOCK_POLL_SECONDS = 0.05
+CONTROL_GUARD_NAME = control_locks.CONTROL_GUARD_NAME
+CONTROL_LOCK_NAME = control_locks.CONTROL_LOCK_NAME
+LOCK_OWNER_NAME = control_locks.LOCK_OWNER_NAME
+LOCK_CANDIDATE_PREFIX = control_locks.LOCK_CANDIDATE_PREFIX
+LOCK_RELEASED_PREFIX = control_locks.LOCK_RELEASED_PREFIX
+LOCK_REPAIRED_PREFIX = control_locks.LOCK_REPAIRED_PREFIX
+DEFAULT_LOCK_TIMEOUT_SECONDS = control_locks.DEFAULT_LOCK_TIMEOUT_SECONDS
+DEFAULT_LOCK_POLL_SECONDS = control_locks.DEFAULT_LOCK_POLL_SECONDS
 
 # Owner-fate classification.  Only LOCK_OWNER_DEAD is positive proof that the
 # publisher of a lock can no longer be running; everything else is refused by
 # automatic repair.
-LOCK_OWNER_DEAD = "dead"
-LOCK_OWNER_ALIVE = "alive"
-LOCK_OWNER_UNPROVEN = "unproven"
+LOCK_OWNER_DEAD = control_locks.LOCK_OWNER_DEAD
+LOCK_OWNER_ALIVE = control_locks.LOCK_OWNER_ALIVE
+LOCK_OWNER_UNPROVEN = control_locks.LOCK_OWNER_UNPROVEN
 
 # Guarded stale-lock repair outcomes.
-LOCK_REPAIR_ABSENT = "absent"
-LOCK_REPAIR_QUARANTINED = "quarantined"
-LOCK_REPAIR_WOULD_QUARANTINE = "would-quarantine"
+LOCK_REPAIR_ABSENT = control_locks.LOCK_REPAIR_ABSENT
+LOCK_REPAIR_QUARANTINED = control_locks.LOCK_REPAIR_QUARANTINED
+LOCK_REPAIR_WOULD_QUARANTINE = control_locks.LOCK_REPAIR_WOULD_QUARANTINE
 
 # Immutable event-publication outcomes.
 EVENT_COMMITTED = "committed"
@@ -1317,12 +1331,7 @@ class ControlStoreError(RuntimeError):
     """Raised when a control-store configuration is unsafe to use."""
 
 
-@dataclass(frozen=True)
-class ResolvedControlRoot:
-    """The configured root and the sole source from which it was resolved."""
-
-    path: Path
-    source: str
+ResolvedControlRoot = control_root_schema.ResolvedControlRoot
 
 
 @dataclass(frozen=True)
@@ -1343,8 +1352,8 @@ def utc_timestamp() -> str:
 # The shell variable each refusal about a root must name.  A diagnostic that
 # names the wrong variable sends an operator to repair a setting that is already
 # correct, so the boundary being checked is passed in rather than assumed.
-CONTROL_ROOT_VARIABLE = "COCKPIT_CONTROL_ROOT"
-QUEUE_ROOT_VARIABLE = "COCKPIT_QUEUE_ROOT"
+CONTROL_ROOT_VARIABLE = control_root_schema.CONTROL_ROOT_VARIABLE
+QUEUE_ROOT_VARIABLE = control_root_schema.QUEUE_ROOT_VARIABLE
 
 
 def _require_absolute_root(
@@ -1352,49 +1361,16 @@ def _require_absolute_root(
     source: str,
     variable: str = CONTROL_ROOT_VARIABLE,
 ) -> Path:
-    if not isinstance(value, str) or not value:
-        raise ControlStoreError(f"{source} {variable} is empty")
-    if "\x00" in value:
-        raise ControlStoreError(f"{source} {variable} contains a NUL byte")
-
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        raise ControlStoreError(
-            f"{source} {variable} must be an absolute path; refusing to infer it from cwd"
-        )
-
-    # Lexical normalization makes the effective root explicit without resolving
-    # symlinks to an unexpected location.  It also keeps a tmux-exported root
-    # stable when the shell is launched from another working directory.
-    normalized = Path(os.path.normpath(value))
-    if not normalized.is_absolute():
-        raise ControlStoreError(f"{source} {variable} is malformed")
-    return normalized
+    try:
+        return control_root_schema.require_absolute_root(value, source, variable)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _tmux_control_root() -> Optional[str]:
     """Read the exact root from the active tmux server, if there is one."""
 
-    if not os.environ.get("TMUX"):
-        return None
-    try:
-        result = subprocess.run(
-            ["tmux", "show-environment", "COCKPIT_CONTROL_ROOT"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError:
-        return None
-
-    if result.returncode != 0:
-        return None
-    output = result.stdout.rstrip("\r\n")
-    prefix = "COCKPIT_CONTROL_ROOT="
-    if not output.startswith(prefix):
-        return None
-    return output[len(prefix) :]
+    return control_root_schema.tmux_control_root()
 
 
 def resolve_control_root(environ: Optional[Mapping[str, str]] = None) -> ResolvedControlRoot:
@@ -1405,23 +1381,10 @@ def resolve_control_root(environ: Optional[Mapping[str, str]] = None) -> Resolve
     the current working directory.
     """
 
-    environment = os.environ if environ is None else environ
-    if "COCKPIT_CONTROL_ROOT" in environment:
-        return ResolvedControlRoot(
-            _require_absolute_root(environment["COCKPIT_CONTROL_ROOT"], "shell"),
-            "shell",
-        )
-
-    # The fallback intentionally consults tmux only after the shell variable is
-    # absent.  Use the process environment (rather than `environment`) because
-    # tmux invocation needs the active client socket.
-    tmux_value = _tmux_control_root()
-    if tmux_value is not None:
-        return ResolvedControlRoot(_require_absolute_root(tmux_value, "tmux session"), "tmux")
-
-    raise ControlStoreError(
-        "COCKPIT_CONTROL_ROOT is required; set an absolute root in the shell or active tmux session"
-    )
+    try:
+        return control_root_schema.resolve_control_root(environ=environ)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _require_object(record: Any, label: str) -> Dict[str, Any]:
@@ -1431,15 +1394,10 @@ def _require_object(record: Any, label: str) -> Dict[str, Any]:
 
 
 def _require_schema_version(record: Mapping[str, Any], label: str) -> None:
-    version = record.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise ControlStoreError(f"{label} requires integer schema_version")
-    if version > CONTROL_SCHEMA_VERSION:
-        raise ControlStoreError(
-            f"{label} uses unsupported future schema_version {version}; upgrade cockpit tools before mutation"
-        )
-    if version != CONTROL_SCHEMA_VERSION:
-        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+    try:
+        control_root_schema.require_schema_version(record, label)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _require_string(record: Mapping[str, Any], field: str, label: str) -> str:
@@ -4302,6 +4260,26 @@ def repair_stale_control_lock(
     ).run()
 
 
+control_locks.ControlStoreError = ControlStoreError
+control_locks._lock_transition_fault = (
+    lambda boundary, transition: _lock_transition_fault(boundary, transition)
+)
+_configured_lock_timeout = control_locks._configured_lock_timeout
+_validate_lock_owner = control_locks._validate_lock_owner
+_new_lock_owner = control_locks._new_lock_owner
+_prove_lock_owner_death = control_locks._prove_lock_owner_death
+_open_exact_directory = control_locks._open_exact_directory
+_read_lock_owner_from_directory = control_locks._read_lock_owner_from_directory
+_validate_owned_directory = control_locks._validate_owned_directory
+_cleanup_owned_directory = control_locks._cleanup_owned_directory
+ControlTransitionGuard = control_locks.ControlTransitionGuard
+_quarantine_owned_lock_while_guarded = control_locks._quarantine_owned_lock_while_guarded
+PortableControlLock = control_locks.PortableControlLock
+LockRepairResult = control_locks.LockRepairResult
+ControlLockRepair = control_locks.ControlLockRepair
+repair_stale_control_lock = control_locks.repair_stale_control_lock
+
+
 def _derived_ledger_id(control_id: str) -> str:
     """Derive the ledger identity from the control root, never from the ledger.
 
@@ -5782,559 +5760,231 @@ def _event_publication_fault(boundary: str, publication: "ControlEventPublicatio
     del boundary, publication
 
 
-@dataclass(frozen=True)
-class EventPublicationResult:
-    """Outcome of one immutable event-publication attempt."""
+control_projection.ControlStoreError = ControlStoreError
+control_projection.CONTROL_SCHEMA_VERSION = CONTROL_SCHEMA_VERSION
+control_projection.CONTROL_METADATA_NAME = CONTROL_METADATA_NAME
+control_projection.LEDGER_NAME = LEDGER_NAME
+control_projection.EVENTS_NAME = EVENTS_NAME
+control_projection.LEDGER_TEMPORARY_NAME = LEDGER_TEMPORARY_NAME
+control_projection.EVENTS_VIEW_TEMPORARY_NAME = EVENTS_VIEW_TEMPORARY_NAME
+control_projection.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_projection.DEFAULT_LEDGER_COMMAND = DEFAULT_LEDGER_COMMAND
+control_projection.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_projection.PROJECTION_CURRENT = PROJECTION_CURRENT
+control_projection.PROJECTION_REBUILT = PROJECTION_REBUILT
+control_projection.PROJECTION_WOULD_REBUILD = PROJECTION_WOULD_REBUILD
+control_projection.PROJECTION_REASON_CURRENT = PROJECTION_REASON_CURRENT
+control_projection.PROJECTION_REASON_MISSING = PROJECTION_REASON_MISSING
+control_projection.PROJECTION_REASON_CORRUPT = PROJECTION_REASON_CORRUPT
+control_projection.PROJECTION_REASON_AHEAD = PROJECTION_REASON_AHEAD
+control_projection.PROJECTION_REASON_STALE = PROJECTION_REASON_STALE
+control_projection.PROJECTION_REASON_DIVERGENT = PROJECTION_REASON_DIVERGENT
+control_projection.PROJECTION_REASON_VIEW = PROJECTION_REASON_VIEW
+control_projection.LEDGER_PROJECTION_FIELDS = LEDGER_PROJECTION_FIELDS
+control_projection.LEDGER_WORKER_MISSIONS_FIELD = LEDGER_WORKER_MISSIONS_FIELD
+control_projection.LEDGER_COMMANDS_FIELD = LEDGER_COMMANDS_FIELD
+control_projection.LEDGER_MISSION_DIALOGS_FIELD = LEDGER_MISSION_DIALOGS_FIELD
+control_projection.LEDGER_MISSION_CANCELLATIONS_FIELD = LEDGER_MISSION_CANCELLATIONS_FIELD
+control_projection.LEDGER_MISSION_RECOVERIES_FIELD = LEDGER_MISSION_RECOVERIES_FIELD
+control_projection.LEDGER_MISSION_SLOTS_FIELD = LEDGER_MISSION_SLOTS_FIELD
+control_projection.LEDGER_CONTROLLER_FIELD = LEDGER_CONTROLLER_FIELD
+control_projection._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_projection._require_directory = (
+    lambda *args, **kwargs: _require_directory(*args, **kwargs)
+)
+control_projection._configured_lock_timeout = (
+    lambda *args, **kwargs: _configured_lock_timeout(*args, **kwargs)
+)
+control_projection._validated_seconds = (
+    lambda *args, **kwargs: _validated_seconds(*args, **kwargs)
+)
+control_projection._same_filesystem_identity = (
+    lambda *args, **kwargs: _same_filesystem_identity(*args, **kwargs)
+)
+control_projection._fsync_directory = (
+    lambda *args, **kwargs: _fsync_directory(*args, **kwargs)
+)
+control_projection._serialized_record = (
+    lambda *args, **kwargs: _serialized_record(*args, **kwargs)
+)
+control_projection._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_projection._require_timestamp = (
+    lambda *args, **kwargs: _require_timestamp(*args, **kwargs)
+)
+control_projection._validate_canonical_roots = (
+    lambda *args, **kwargs: _validate_canonical_roots(*args, **kwargs)
+)
+control_projection.validate_ledger = lambda *args, **kwargs: validate_ledger(*args, **kwargs)
+control_projection._event_ledger_declarations = (
+    lambda *args, **kwargs: _event_ledger_declarations(*args, **kwargs)
+)
+control_projection._derived_ledger_id = lambda *args, **kwargs: _derived_ledger_id(*args, **kwargs)
+control_projection.fold_mission_state = (
+    lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+)
+control_projection.fold_commands = lambda *args, **kwargs: fold_commands(*args, **kwargs)
+control_projection.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_projection.PortableControlLock = (
+    lambda *args, **kwargs: PortableControlLock(*args, **kwargs)
+)
+control_projection._ledger_projection_fault = (
+    lambda boundary, projection: _ledger_projection_fault(boundary, projection)
+)
 
-    root: Path
-    outcome: str
-    revision: int
-    event_id: str
-    path: Path
-    record: Dict[str, Any]
-    pending_debris: Tuple[Path, ...]
-    projection: Optional[LedgerProjectionResult] = None
-
-    @property
-    def committed(self) -> bool:
-        return self.outcome == EVENT_COMMITTED
-
-
-class ControlEventPublication:
-    """Publish one immutable event whose only commit step is an atomic rename.
-
-    While holding `control.lock` the publisher reads the latest contiguous
-    committed revision, writes and flushes one complete private candidate under
-    `pending/`, validates its exact serialized bytes, and then renames that
-    verified file into `events/`.  Nothing before the rename is authority and
-    nothing after it is rewritten, so interruption can only leave a diagnosable
-    pending candidate or one complete committed event.
-
-    Once the event is committed, the same held lock is used to rebuild the
-    derived ledger projection from committed events and replace it atomically.
-    The projection never changes event authority: the rename already committed
-    the event, and an interruption before or during the replacement leaves a
-    projection that the next replay rebuilds exactly once.
-    """
-
-    def __init__(
-        self,
-        root: Path,
-        event_type: str,
-        actor: str = DEFAULT_EVENT_ACTOR,
-        payload: Optional[Mapping[str, Any]] = None,
-        command: str = DEFAULT_EVENT_COMMAND,
-        timeout_seconds: Optional[float] = None,
-        poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
-        dry_run: bool = False,
-    ) -> None:
-        self.root = _require_absolute_root(str(root), "configured")
-        self.events_path = self.root / EVENTS_DIR_NAME
-        self.pending_path = self.root / PENDING_DIR_NAME
-        self.event_type = _require_string({"event_type": event_type}, "event_type", "event")
-        self.actor = _require_string({"actor": actor}, "actor", "event")
-        self.payload = self._validated_payload(payload)
-        self.command = command.strip() if isinstance(command, str) else ""
-        if not self.command:
-            raise ControlStoreError("event publication requires a non-empty command")
-        self.timeout_seconds = _configured_lock_timeout(timeout_seconds)
-        self.poll_seconds = _validated_seconds(
-            poll_seconds,
-            "control lock poll interval",
-            allow_zero=False,
-        )
-        self.dry_run = bool(dry_run)
-        self.lock: Optional[PortableControlLock] = None
-        self.record: Optional[Dict[str, Any]] = None
-        self.revision: Optional[int] = None
-        self.candidate_path: Optional[Path] = None
-        self.committed_path: Optional[Path] = None
-        self.pending_debris: Tuple[Path, ...] = ()
-        self.projection: Optional[LedgerProjectionResult] = None
-
-    @staticmethod
-    def _validated_payload(value: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-        """Require structured metadata rather than free-form or unserializable data."""
-
-        if value is None:
-            return {}
-        if not isinstance(value, dict):
-            raise ControlStoreError("event payload must be a JSON object of structured metadata")
-        payload = dict(value)
-        for key in payload:
-            if not isinstance(key, str):
-                raise ControlStoreError("event payload requires string field names")
-        _serialized_record(payload)
-        return payload
-
-    def _build_record(self, control_id: str, revision: int) -> Dict[str, Any]:
-        record = {
-            "schema_version": CONTROL_SCHEMA_VERSION,
-            "record_type": "event",
-            "event_id": str(uuid4()),
-            "control_id": control_id,
-            "timestamp": utc_timestamp(),
-            "revision": revision,
-            "event_type": self.event_type,
-            "actor": self.actor,
-            "payload": self.payload,
-        }
-        validate_event(record, control_id, "event")
-        return record
-
-    def _validate_private_candidate(
-        self,
-        control_id: str,
-        candidate_path: Path,
-        record: Mapping[str, Any],
-        revision: int,
-    ) -> os.stat_result:
-        """Prove the flushed candidate holds exactly the bytes that were intended."""
-
-        label = f"{PENDING_DIR_NAME}/{candidate_path.name}"
-        _require_regular_file(candidate_path, label)
-        try:
-            identity = candidate_path.lstat()
-            written = candidate_path.read_bytes()
-        except OSError as exc:
-            raise ControlStoreError(f"cannot verify {label}; candidate retained: {exc}") from None
-
-        if written != _serialized_record(record).encode("utf-8"):
-            raise ControlStoreError(
-                f"{label} is not the exact event that was serialized; candidate retained"
-            )
-        stored = validate_event(_load_json(candidate_path, label), control_id, label)
-        named_revision, named_event_id = _parse_event_filename(candidate_path.name, label)
-        if (
-            stored != dict(record)
-            or named_revision != revision
-            or named_revision != stored["revision"]
-            or named_event_id != stored["event_id"]
-        ):
-            raise ControlStoreError(
-                f"{label} does not agree with its allocated revision {revision}; candidate retained"
-            )
-        return identity
-
-    def _commit_by_rename(
-        self,
-        candidate_path: Path,
-        committed_path: Path,
-        candidate_identity: os.stat_result,
-    ) -> None:
-        """Perform the single atomic rename that turns a candidate into authority."""
-
-        label = f"{EVENTS_DIR_NAME}/{committed_path.name}"
-        try:
-            committed_path.lstat()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            raise ControlStoreError(f"cannot inspect {label}; candidate retained: {exc}") from None
-        else:
-            raise ControlStoreError(
-                f"refusing to replace already committed {label}; candidate retained"
-            )
-
-        try:
-            os.rename(str(candidate_path), str(committed_path))
-        except OSError as exc:
-            raise ControlStoreError(f"cannot commit {label}; candidate retained: {exc}") from None
-        self.candidate_path = None
-
-        try:
-            committed_identity = committed_path.lstat()
-        except OSError as exc:
-            raise ControlStoreError(f"{label} is committed but cannot be verified: {exc}") from None
-        if not _same_filesystem_identity(committed_identity, candidate_identity):
-            raise ControlStoreError(
-                f"{label} changed filesystem identity during commit; committed evidence retained"
-            )
-        _fsync_directory(self.events_path)
-        _fsync_directory(self.pending_path)
-
-    def _confirm_committed_tip(
-        self,
-        control_id: str,
-        committed_path: Path,
-        record: Mapping[str, Any],
-        revision: int,
-    ) -> None:
-        """Re-read committed authority so the new tip is proven, not assumed."""
-
-        history = read_committed_events(self.root, control_id)
-        tip = history.events[-1] if history.events else None
-        if (
-            tip is None
-            or history.latest_revision != revision
-            or tip.event_id != record["event_id"]
-            or tip.record != dict(record)
-            or tip.path != committed_path
-        ):
-            raise ControlStoreError(
-                f"{EVENTS_DIR_NAME}/{committed_path.name} did not become the committed tip "
-                f"at revision {revision}"
-            )
-
-    def _result(
-        self,
-        outcome: str,
-        record: Mapping[str, Any],
-        revision: int,
-        committed_path: Path,
-    ) -> EventPublicationResult:
-        return EventPublicationResult(
-            root=self.root,
-            outcome=outcome,
-            revision=revision,
-            event_id=record["event_id"],
-            path=committed_path,
-            record=dict(record),
-            pending_debris=self.pending_debris,
-            projection=self.projection,
-        )
-
-    def run(self) -> EventPublicationResult:
-        """Publish at most one immutable event and report exactly what happened."""
-
-        _require_directory(self.root, "COCKPIT_CONTROL_ROOT")
-        _require_directory(self.events_path, EVENTS_DIR_NAME)
-        _require_directory(self.pending_path, PENDING_DIR_NAME)
-
-        with PortableControlLock(
-            self.root,
-            self.command,
-            timeout_seconds=self.timeout_seconds,
-            poll_seconds=self.poll_seconds,
-        ) as lock:
-            self.lock = lock
-            metadata, history = inspect_control_events(self.root)
-            control_id = metadata["control_id"]
-            self.pending_debris = history.pending
-            revision = history.latest_revision + 1
-            record = self._build_record(control_id, revision)
-            filename = _event_filename(revision, record["event_id"])
-            candidate_path = self.pending_path / filename
-            committed_path = self.events_path / filename
-            self.revision = revision
-            self.record = record
-            self.candidate_path = candidate_path
-            self.committed_path = committed_path
-            # Refuse an event whose derived contribution could never be
-            # projected, before any private candidate exists to clean up.
-            build_ledger_projection(
-                metadata,
-                history.events
-                + (
-                    CommittedEvent(
-                        path=committed_path,
-                        revision=revision,
-                        event_id=record["event_id"],
-                        record=record,
-                    ),
-                ),
-            )
-            _event_publication_fault("revision-allocated", self)
-
-            if self.dry_run:
-                self.candidate_path = None
-                return self._result(EVENT_WOULD_COMMIT, record, revision, committed_path)
-
-            _write_json(candidate_path, record)
-            _fsync_directory(self.pending_path)
-            # Interruption here leaves a private candidate that no reader treats
-            # as authority; it is retained as diagnosable evidence.
-            _event_publication_fault("candidate-written", self)
-            candidate_identity = self._validate_private_candidate(
-                control_id, candidate_path, record, revision
-            )
-            _event_publication_fault("candidate-validated", self)
-            self._commit_by_rename(candidate_path, committed_path, candidate_identity)
-            self._confirm_committed_tip(control_id, committed_path, record, revision)
-            # The rename is the whole commit.  Interruption at this boundary
-            # leaves a committed event and an unadvanced projection, which the
-            # next replay repairs exactly once without committing anything.
-            _event_publication_fault("event-committed", self)
-            self.projection = self._project_committed_events(lock, committed_path, revision)
-            return self._result(EVENT_COMMITTED, record, revision, committed_path)
-
-    def _project_committed_events(
-        self,
-        lock: PortableControlLock,
-        committed_path: Path,
-        revision: int,
-    ) -> LedgerProjectionResult:
-        """Advance the derived ledger under the lock that committed the event."""
-
-        try:
-            return ControlLedgerProjection(
-                self.root,
-                command=self.command,
-                timeout_seconds=self.timeout_seconds,
-                poll_seconds=self.poll_seconds,
-                held_lock=lock,
-            ).run()
-        except ControlStoreError as exc:
-            raise ControlStoreError(
-                f"{EVENTS_DIR_NAME}/{committed_path.name} is committed at revision {revision}; "
-                f"only the derived ledger projection failed and must be replayed: {exc}"
-            ) from None
+build_ledger_projection = control_projection.build_ledger_projection
+build_events_view = control_projection.build_events_view
+_write_projection_temporary = control_projection._write_projection_temporary
+_replace_projection = control_projection._replace_projection
+_classify_published_ledger = control_projection._classify_published_ledger
+_published_view_matches = control_projection._published_view_matches
+LedgerProjectionResult = control_projection.LedgerProjectionResult
+ControlLedgerProjection = control_projection.ControlLedgerProjection
+replay_control_ledger = control_projection.replay_control_ledger
 
 
-def publish_control_event(
-    root: Path,
-    event_type: str,
-    actor: str = DEFAULT_EVENT_ACTOR,
-    payload: Optional[Mapping[str, Any]] = None,
-    command: str = DEFAULT_EVENT_COMMAND,
-    timeout_seconds: Optional[float] = None,
-    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
-    dry_run: bool = False,
-) -> EventPublicationResult:
-    """Commit one immutable event under the held control lock."""
+control_journal.ControlStoreError = ControlStoreError
+control_journal.CONTROL_SCHEMA_VERSION = CONTROL_SCHEMA_VERSION
+control_journal.CONTROL_METADATA_NAME = CONTROL_METADATA_NAME
+control_journal.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_journal.PENDING_DIR_NAME = PENDING_DIR_NAME
+control_journal.EVENT_FILENAME_SUFFIX = EVENT_FILENAME_SUFFIX
+control_journal.EVENT_REVISION_DIGITS = EVENT_REVISION_DIGITS
+control_journal.DEFAULT_EVENT_ACTOR = DEFAULT_EVENT_ACTOR
+control_journal.DEFAULT_EVENT_COMMAND = DEFAULT_EVENT_COMMAND
+control_journal.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_journal.EVENT_COMMITTED = EVENT_COMMITTED
+control_journal.EVENT_WOULD_COMMIT = EVENT_WOULD_COMMIT
+control_journal._require_absolute_root = lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+control_journal._require_directory = lambda *args, **kwargs: _require_directory(*args, **kwargs)
+control_journal._require_regular_file = lambda *args, **kwargs: _require_regular_file(*args, **kwargs)
+control_journal._load_json = lambda *args, **kwargs: _load_json(*args, **kwargs)
+control_journal._serialized_record = lambda *args, **kwargs: _serialized_record(*args, **kwargs)
+control_journal._write_json = lambda *args, **kwargs: _write_json(*args, **kwargs)
+control_journal._fsync_directory = lambda *args, **kwargs: _fsync_directory(*args, **kwargs)
+control_journal._same_filesystem_identity = (
+    lambda *args, **kwargs: _same_filesystem_identity(*args, **kwargs)
+)
+control_journal._configured_lock_timeout = (
+    lambda *args, **kwargs: _configured_lock_timeout(*args, **kwargs)
+)
+control_journal._validated_seconds = lambda *args, **kwargs: _validated_seconds(*args, **kwargs)
+control_journal._require_string = lambda *args, **kwargs: _require_string(*args, **kwargs)
+control_journal.validate_root_metadata = (
+    lambda *args, **kwargs: validate_root_metadata(*args, **kwargs)
+)
+control_journal.validate_event = lambda *args, **kwargs: validate_event(*args, **kwargs)
+control_journal.build_ledger_projection = (
+    lambda *args, **kwargs: build_ledger_projection(*args, **kwargs)
+)
+control_journal.ControlLedgerProjection = lambda *args, **kwargs: ControlLedgerProjection(*args, **kwargs)
+control_journal.PortableControlLock = lambda *args, **kwargs: PortableControlLock(*args, **kwargs)
+control_journal.utc_timestamp = lambda: utc_timestamp()
+control_journal._event_publication_fault = (
+    lambda boundary, publication: _event_publication_fault(boundary, publication)
+)
 
-    return ControlEventPublication(
-        root,
-        event_type,
-        actor=actor,
-        payload=payload,
-        command=command,
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        dry_run=dry_run,
-    ).run()
+CommittedEvent = control_journal.CommittedEvent
+EventHistory = control_journal.EventHistory
+_event_filename = control_journal._event_filename
+_parse_event_filename = control_journal._parse_event_filename
+_read_pending_debris = control_journal._read_pending_debris
+read_committed_sequence = control_journal.read_committed_sequence
+read_committed_events = control_journal.read_committed_events
+inspect_control_events = control_journal.inspect_control_events
+EventPublicationResult = control_journal.EventPublicationResult
+ControlEventPublication = control_journal.ControlEventPublication
+publish_control_event = control_journal.publish_control_event
 
 
 # --- versioned worker lifecycle recording and freshness observation ----------
 
+control_lifecycle.ControlStoreError = ControlStoreError
+control_lifecycle.WORKER_LIFECYCLE_SCHEMA_VERSION = WORKER_LIFECYCLE_SCHEMA_VERSION
+control_lifecycle.WORKER_LIFECYCLE_RECORD_TYPE = WORKER_LIFECYCLE_RECORD_TYPE
+control_lifecycle.WORKER_LIFECYCLE_PAYLOAD_FIELD = WORKER_LIFECYCLE_PAYLOAD_FIELD
+control_lifecycle.WORKER_LIFECYCLE_EVENT_PREFIX = WORKER_LIFECYCLE_EVENT_PREFIX
+control_lifecycle.LIFECYCLE_PENDING_DISPATCH = LIFECYCLE_PENDING_DISPATCH
+control_lifecycle.LIFECYCLE_ACCEPTED = LIFECYCLE_ACCEPTED
+control_lifecycle.LIFECYCLE_RUNNING = LIFECYCLE_RUNNING
+control_lifecycle.LIFECYCLE_BLOCKED = LIFECYCLE_BLOCKED
+control_lifecycle.LIFECYCLE_COMPLETED = LIFECYCLE_COMPLETED
+control_lifecycle.LIFECYCLE_FAILED = LIFECYCLE_FAILED
+control_lifecycle.LIFECYCLE_CANCELLED = LIFECYCLE_CANCELLED
+control_lifecycle.LIFECYCLE_REPLACED = LIFECYCLE_REPLACED
+control_lifecycle.WORKER_LIFECYCLE_STATES = WORKER_LIFECYCLE_STATES
+control_lifecycle.WORKER_LIFECYCLE_ACTIVE_STATES = WORKER_LIFECYCLE_ACTIVE_STATES
+control_lifecycle.WORKER_LIFECYCLE_TERMINAL_STATES = WORKER_LIFECYCLE_TERMINAL_STATES
+control_lifecycle.WORKER_LIFECYCLE_REASON_REQUIRED = WORKER_LIFECYCLE_REASON_REQUIRED
+control_lifecycle.WORKER_LIFECYCLE_TRANSITIONS = WORKER_LIFECYCLE_TRANSITIONS
+control_lifecycle.WORKER_LIFECYCLE_FIELDS = WORKER_LIFECYCLE_FIELDS
+control_lifecycle.WORKER_LIFECYCLE_BLOCKER_FIELDS = WORKER_LIFECYCLE_BLOCKER_FIELDS
+control_lifecycle.LIFECYCLE_APPLIED = LIFECYCLE_APPLIED
+control_lifecycle.LIFECYCLE_RETAINED_TERMINAL = LIFECYCLE_RETAINED_TERMINAL
+control_lifecycle.LIFECYCLE_RETAINED_STALE_SEQUENCE = LIFECYCLE_RETAINED_STALE_SEQUENCE
+control_lifecycle.LIFECYCLE_RETAINED_INVALID_TRANSITION = LIFECYCLE_RETAINED_INVALID_TRANSITION
+control_lifecycle.LIFECYCLE_RETAINED_UNMATCHED = LIFECYCLE_RETAINED_UNMATCHED
+control_lifecycle.LIFECYCLE_OBSERVATION_FRESH = LIFECYCLE_OBSERVATION_FRESH
+control_lifecycle.LIFECYCLE_OBSERVATION_STALE = LIFECYCLE_OBSERVATION_STALE
+control_lifecycle.LIFECYCLE_OBSERVATION_TERMINAL = LIFECYCLE_OBSERVATION_TERMINAL
+control_lifecycle.LIFECYCLE_STALE_REASON = LIFECYCLE_STALE_REASON
+control_lifecycle.LIFECYCLE_STALE_RECOVERY = LIFECYCLE_STALE_RECOVERY
+control_lifecycle.DEFAULT_LIFECYCLE_COMMAND = DEFAULT_LIFECYCLE_COMMAND
+control_lifecycle.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_lifecycle.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_lifecycle._require_typed_references = (
+    lambda *args, **kwargs: _require_typed_references(*args, **kwargs)
+)
+control_lifecycle._require_object = lambda *args, **kwargs: _require_object(*args, **kwargs)
+control_lifecycle._require_record_type = (
+    lambda *args, **kwargs: _require_record_type(*args, **kwargs)
+)
+control_lifecycle._require_string = lambda *args, **kwargs: _require_string(*args, **kwargs)
+control_lifecycle._require_identifier = (
+    lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+)
+control_lifecycle._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_lifecycle._require_optional_uuid = (
+    lambda *args, **kwargs: _require_optional_uuid(*args, **kwargs)
+)
+control_lifecycle._require_positive_integer = (
+    lambda *args, **kwargs: _require_positive_integer(*args, **kwargs)
+)
+control_lifecycle._require_optional_string = (
+    lambda *args, **kwargs: _require_optional_string(*args, **kwargs)
+)
+control_lifecycle._parsed_timestamp = (
+    lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+)
+control_lifecycle._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_lifecycle.publish_control_event = (
+    lambda *args, **kwargs: publish_control_event(*args, **kwargs)
+)
+control_lifecycle.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_lifecycle.fold_mission_state = (
+    lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+)
+control_lifecycle.utc_timestamp = lambda: utc_timestamp()
+control_lifecycle.CommittedEvent = CommittedEvent
+control_lifecycle.EventPublicationResult = EventPublicationResult
 
-@dataclass(frozen=True)
-class LifecycleRecordResult:
-    """Outcome of committing one versioned worker lifecycle event."""
-
-    root: Path
-    publication: EventPublicationResult
-    lifecycle: Dict[str, Any]
-    applied: bool
-    outcome: str
-    materialized: Optional[Dict[str, Any]]
-
-    @property
-    def committed(self) -> bool:
-        return self.publication.committed
-
-    @property
-    def retained_for_audit(self) -> bool:
-        """Report a durably committed event that did not move materialized state."""
-
-        return not self.applied
-
-
-@dataclass(frozen=True)
-class WorkerLifecycleObservation:
-    """One freshness observation of a materialized worker mission slot.
-
-    An observation is not a mission state.  `stale` says only that the control
-    plane can no longer see a fresh heartbeat, names a recoverable reason, and
-    records that a bounded recovery action is owed.  It never claims `failed`.
-    """
-
-    mission_id: str
-    worker_id: str
-    queue_item_id: str
-    trace_id: str
-    state: str
-    sequence: int
-    terminal: bool
-    observation: str
-    reason: Optional[str]
-    recoverable: bool
-    recovery: Optional[str]
-    heartbeat_at: Optional[str]
-    fresh_until: Optional[str]
-    revision: int
-    event_id: str
-    as_of: str
-
-    @property
-    def stale(self) -> bool:
-        return self.observation == LIFECYCLE_OBSERVATION_STALE
-
-
-def build_worker_lifecycle(
-    state: str,
-    worker_id: str,
-    mission_id: str,
-    queue_item_id: str,
-    trace_id: str,
-    sequence: Any,
-    parent_trace_id: Optional[str] = None,
-    reason: Optional[str] = None,
-    blocker: Optional[Mapping[str, Any]] = None,
-    heartbeat_at: Optional[str] = None,
-    fresh_until: Optional[str] = None,
-    evidence_refs: Sequence[str] = (),
-    superseded_by_mission_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Assemble one complete lifecycle record and validate it before use."""
-
-    record = {
-        "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
-        "record_type": WORKER_LIFECYCLE_RECORD_TYPE,
-        "state": state,
-        "worker_id": worker_id,
-        "mission_id": mission_id,
-        "queue_item_id": queue_item_id,
-        "trace_id": trace_id,
-        "parent_trace_id": parent_trace_id,
-        "sequence": sequence,
-        "reason": reason,
-        "blocker": None if blocker is None else dict(blocker),
-        "heartbeat_at": heartbeat_at,
-        "fresh_until": fresh_until,
-        "evidence_refs": list(evidence_refs),
-        "superseded_by_mission_id": superseded_by_mission_id,
-    }
-    return validate_worker_lifecycle(record, "worker lifecycle")
-
-
-def record_worker_lifecycle(
-    root: Path,
-    lifecycle: Mapping[str, Any],
-    actor: Optional[str] = None,
-    command: str = DEFAULT_LIFECYCLE_COMMAND,
-    timeout_seconds: Optional[float] = None,
-    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
-    dry_run: bool = False,
-) -> LifecycleRecordResult:
-    """Commit one lifecycle event and report whether it moved materialized state.
-
-    Publication and materialization are deliberately separate answers.  A late,
-    duplicate, superseded, or uncorrelated record is still committed as durable
-    audit evidence through the ordinary immutable-event protocol; the fold then
-    reports that it changed nothing.  Only a malformed record is refused, and it
-    is refused before any private candidate exists.
-    """
-
-    validated = validate_worker_lifecycle(dict(lifecycle), "worker lifecycle")
-    publication = publish_control_event(
-        root,
-        f"{WORKER_LIFECYCLE_EVENT_PREFIX}{validated['state']}",
-        actor=actor or validated["worker_id"],
-        payload={WORKER_LIFECYCLE_PAYLOAD_FIELD: validated},
-        command=command,
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        dry_run=dry_run,
-    )
-
-    # Committed authority answers this, not the in-memory guess made under the
-    # lock: the fold is re-derived from the committed sequence that now exists.
-    try:
-        _metadata, history = inspect_control_events(publication.root)
-    except ControlStoreError as exc:
-        if not publication.committed:
-            raise
-        raise ControlStoreError(
-            f"{EVENTS_DIR_NAME}/{publication.path.name} is committed at revision "
-            f"{publication.revision}; only its materialization could not be reported: {exc}"
-        ) from None
-    events = history.events
-    if not publication.committed:
-        events = events + (
-            CommittedEvent(
-                path=publication.path,
-                revision=history.latest_revision + 1,
-                event_id=publication.event_id,
-                record=publication.record,
-            ),
-        )
-    slots, outcomes = fold_worker_missions(events)
-    applied, outcome = outcomes.get(publication.event_id, (False, LIFECYCLE_RETAINED_UNMATCHED))
-    return LifecycleRecordResult(
-        root=publication.root,
-        publication=publication,
-        lifecycle=dict(validated),
-        applied=applied,
-        outcome=outcome,
-        materialized=slots.get(validated["mission_id"]),
-    )
-
-
-def _observed_slot(slot: Mapping[str, Any], now: datetime, as_of: str) -> WorkerLifecycleObservation:
-    """Classify one materialized slot as fresh, stale, or terminal."""
-
-    lifecycle = slot["lifecycle"]
-    state = lifecycle["state"]
-    terminal = state in WORKER_LIFECYCLE_TERMINAL_STATES
-    observation = LIFECYCLE_OBSERVATION_TERMINAL
-    reason: Optional[str] = None
-    recovery: Optional[str] = None
-    recoverable = False
-    if not terminal:
-        expiry = _parsed_timestamp(lifecycle["fresh_until"], "fresh_until", "worker lifecycle")
-        if now > expiry:
-            observation = LIFECYCLE_OBSERVATION_STALE
-            reason = LIFECYCLE_STALE_REASON
-            recovery = LIFECYCLE_STALE_RECOVERY
-            recoverable = True
-        else:
-            observation = LIFECYCLE_OBSERVATION_FRESH
-    return WorkerLifecycleObservation(
-        mission_id=lifecycle["mission_id"],
-        worker_id=lifecycle["worker_id"],
-        queue_item_id=lifecycle["queue_item_id"],
-        trace_id=lifecycle["trace_id"],
-        state=state,
-        sequence=lifecycle["sequence"],
-        terminal=terminal,
-        observation=observation,
-        reason=reason,
-        recoverable=recoverable,
-        recovery=recovery,
-        heartbeat_at=lifecycle["heartbeat_at"],
-        fresh_until=lifecycle["fresh_until"],
-        revision=slot["revision"],
-        event_id=slot["event_id"],
-        as_of=as_of,
-    )
-
-
-def observe_worker_lifecycle(
-    root: Path,
-    as_of: Optional[str] = None,
-    mission_id: Optional[str] = None,
-    worker_id: Optional[str] = None,
-) -> Tuple[WorkerLifecycleObservation, ...]:
-    """Report freshness for every materialized mission without changing a byte.
-
-    The observation is derived from committed events rather than the published
-    projection, so a stale or interrupted `ledger.json` can never make a worker
-    look fresh.  A worker whose `fresh_until` has passed is reported `stale`
-    with a recoverable reason; its mission state is left exactly as the last
-    lifecycle event declared it.
-    """
-
-    root = _require_absolute_root(str(root), "configured")
-    moment = as_of if as_of is not None else utc_timestamp()
-    now = _parsed_timestamp(moment, "as_of", "lifecycle status")
-    if mission_id is not None:
-        mission_id = _require_uuid({"mission_id": mission_id}, "mission_id", "lifecycle status")
-    if worker_id is not None:
-        worker_id = _require_string({"worker_id": worker_id}, "worker_id", "lifecycle status")
-
-    _metadata, history = inspect_control_events(root)
-    slots, _outcomes = fold_worker_missions(history.events)
-    observations: List[WorkerLifecycleObservation] = []
-    for key in sorted(slots):
-        lifecycle = slots[key]["lifecycle"]
-        if mission_id is not None and lifecycle["mission_id"] != mission_id:
-            continue
-        if worker_id is not None and lifecycle["worker_id"] != worker_id:
-            continue
-        observations.append(_observed_slot(slots[key], now, moment))
-    return tuple(observations)
-
+validate_worker_lifecycle = control_lifecycle.validate_worker_lifecycle
+event_worker_lifecycle = control_lifecycle.event_worker_lifecycle
+apply_worker_lifecycle = control_lifecycle.apply_worker_lifecycle
+fold_worker_missions = control_lifecycle.fold_worker_missions
+LifecycleRecordResult = control_lifecycle.LifecycleRecordResult
+WorkerLifecycleObservation = control_lifecycle.WorkerLifecycleObservation
+build_worker_lifecycle = control_lifecycle.build_worker_lifecycle
+record_worker_lifecycle = control_lifecycle.record_worker_lifecycle
+_observed_slot = control_lifecycle._observed_slot
+observe_worker_lifecycle = control_lifecycle.observe_worker_lifecycle
 
 # --- versioned command envelopes, acknowledgements, and idempotent delivery --
 
@@ -6701,6 +6351,113 @@ def observe_commands(
             continue
         observed.append(slots[key])
     return tuple(observed)
+
+
+# --- versioned command envelopes, acknowledgements, and idempotent delivery --
+
+control_commands.ControlStoreError = ControlStoreError
+control_commands.COMMAND_SCHEMA_VERSION = COMMAND_SCHEMA_VERSION
+control_commands.COMMAND_ENVELOPE_RECORD_TYPE = COMMAND_ENVELOPE_RECORD_TYPE
+control_commands.COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE = COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE
+control_commands.COMMAND_ENVELOPE_PAYLOAD_FIELD = COMMAND_ENVELOPE_PAYLOAD_FIELD
+control_commands.COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD = COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD
+control_commands.COMMAND_REGISTERED_EVENT_TYPE = COMMAND_REGISTERED_EVENT_TYPE
+control_commands.COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX = COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX
+control_commands.COMMAND_DIGEST_ALGORITHM = COMMAND_DIGEST_ALGORITHM
+control_commands.COMMAND_DIGEST_PREFIX = COMMAND_DIGEST_PREFIX
+control_commands.COMMAND_DIGEST_HEX_DIGITS = COMMAND_DIGEST_HEX_DIGITS
+control_commands.COMMAND_DIGEST_HEX_ALPHABET = COMMAND_DIGEST_HEX_ALPHABET
+control_commands.COMMAND_TARGET_WORKER = COMMAND_TARGET_WORKER
+control_commands.COMMAND_TARGET_QUEUE = COMMAND_TARGET_QUEUE
+control_commands.COMMAND_TARGET_KINDS = COMMAND_TARGET_KINDS
+control_commands.COMMAND_TARGET_FIELDS = COMMAND_TARGET_FIELDS
+control_commands.COMMAND_BOUNDARY_FIELDS = COMMAND_BOUNDARY_FIELDS
+control_commands.COMMAND_ENVELOPE_FIELDS = COMMAND_ENVELOPE_FIELDS
+control_commands.COMMAND_ENVELOPE_IDENTITY_FIELDS = COMMAND_ENVELOPE_IDENTITY_FIELDS
+control_commands.COMMAND_ACKNOWLEDGEMENT_FIELDS = COMMAND_ACKNOWLEDGEMENT_FIELDS
+control_commands.COMMAND_ACCEPTED = COMMAND_ACCEPTED
+control_commands.COMMAND_APPLIED = COMMAND_APPLIED
+control_commands.COMMAND_REJECTED = COMMAND_REJECTED
+control_commands.COMMAND_DUPLICATE = COMMAND_DUPLICATE
+control_commands.COMMAND_ACKNOWLEDGEMENT_OUTCOMES = COMMAND_ACKNOWLEDGEMENT_OUTCOMES
+control_commands.COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED = COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED
+control_commands.COMMAND_STATUS_REGISTERED = COMMAND_STATUS_REGISTERED
+control_commands.COMMAND_ACKNOWLEDGEMENT_TRANSITIONS = COMMAND_ACKNOWLEDGEMENT_TRANSITIONS
+control_commands.COMMAND_CONFLICT_DIGEST = COMMAND_CONFLICT_DIGEST
+control_commands.COMMAND_CONFLICT_ENVELOPE = COMMAND_CONFLICT_ENVELOPE
+control_commands.COMMAND_CONFLICT_DELIVERY = COMMAND_CONFLICT_DELIVERY
+control_commands.COMMAND_CONFLICT_ACKNOWLEDGEMENT = COMMAND_CONFLICT_ACKNOWLEDGEMENT
+control_commands.COMMAND_FOLD_REGISTERED = COMMAND_FOLD_REGISTERED
+control_commands.COMMAND_FOLD_ACKNOWLEDGED = COMMAND_FOLD_ACKNOWLEDGED
+control_commands.COMMAND_FOLD_CONFLICT_RECORDED = COMMAND_FOLD_CONFLICT_RECORDED
+control_commands.COMMAND_FOLD_RETAINED_DUPLICATE = COMMAND_FOLD_RETAINED_DUPLICATE
+control_commands.COMMAND_FOLD_RETAINED_UNKNOWN = COMMAND_FOLD_RETAINED_UNKNOWN
+control_commands.COMMAND_FOLD_RETAINED_DIGEST = COMMAND_FOLD_RETAINED_DIGEST
+control_commands.COMMAND_FOLD_RETAINED_ORDER = COMMAND_FOLD_RETAINED_ORDER
+control_commands.COMMAND_DUPLICATE_REASON = COMMAND_DUPLICATE_REASON
+control_commands.DEFAULT_EVENT_ACTOR = DEFAULT_EVENT_ACTOR
+control_commands.DEFAULT_COMMAND_REGISTER_COMMAND = DEFAULT_COMMAND_REGISTER_COMMAND
+control_commands.DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND = DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND
+control_commands.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_commands.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_commands._require_object = lambda *args, **kwargs: _require_object(*args, **kwargs)
+control_commands._require_record_type = lambda *args, **kwargs: _require_record_type(*args, **kwargs)
+control_commands._require_string = lambda *args, **kwargs: _require_string(*args, **kwargs)
+control_commands._require_identifier = lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+control_commands._require_optional_identifier = (
+    lambda *args, **kwargs: _require_optional_identifier(*args, **kwargs)
+)
+control_commands._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_commands._require_optional_uuid = (
+    lambda *args, **kwargs: _require_optional_uuid(*args, **kwargs)
+)
+control_commands._require_timestamp = lambda *args, **kwargs: _require_timestamp(*args, **kwargs)
+control_commands._require_optional_string = (
+    lambda *args, **kwargs: _require_optional_string(*args, **kwargs)
+)
+control_commands._require_typed_references = (
+    lambda *args, **kwargs: _require_typed_references(*args, **kwargs)
+)
+control_commands._require_root_path = lambda *args, **kwargs: _require_root_path(*args, **kwargs)
+control_commands._parsed_timestamp = lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+control_commands._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_commands.publish_control_event = (
+    lambda *args, **kwargs: publish_control_event(*args, **kwargs)
+)
+control_commands.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_commands.utc_timestamp = lambda: utc_timestamp()
+control_commands.CommittedEvent = CommittedEvent
+control_commands.EventPublicationResult = EventPublicationResult
+
+canonical_command_payload = control_commands.canonical_command_payload
+command_payload_digest = control_commands.command_payload_digest
+_require_digest = control_commands._require_digest
+_require_command_target = control_commands._require_command_target
+_require_boundary_root = control_commands._require_boundary_root
+_require_command_boundaries = control_commands._require_command_boundaries
+_require_command_schema_version = control_commands._require_command_schema_version
+validate_command_envelope = control_commands.validate_command_envelope
+validate_command_acknowledgement = control_commands.validate_command_acknowledgement
+event_command_envelope = control_commands.event_command_envelope
+event_command_acknowledgement = control_commands.event_command_acknowledgement
+CommandRecordResult = control_commands.CommandRecordResult
+_command_conflict_reason = control_commands._command_conflict_reason
+_command_conflict_entry = control_commands._command_conflict_entry
+apply_command_envelope = control_commands.apply_command_envelope
+apply_command_acknowledgement = control_commands.apply_command_acknowledgement
+fold_commands = control_commands.fold_commands
+build_command_envelope = control_commands.build_command_envelope
+build_command_acknowledgement = control_commands.build_command_acknowledgement
+read_command_slots = control_commands.read_command_slots
+_committed_events_after_publication = control_commands._committed_events_after_publication
+_folded_commands_after_publication = control_commands._folded_commands_after_publication
+register_command = control_commands.register_command
+acknowledge_command = control_commands.acknowledge_command
+observe_commands = control_commands.observe_commands
 
 
 # --- managed mission dialogs, cancellation, and replacement -------------------
@@ -7293,6 +7050,88 @@ def observe_mission_control(
             key: entry["lifecycle"]["state"] for key, entry in state.missions.items()
         },
     )
+
+
+# --- managed mission dialogs, cancellation, replacement, and recovery ---------
+
+control_mission_control.ControlStoreError = ControlStoreError
+control_mission_control.MISSION_CONTROL_SCHEMA_VERSION = MISSION_CONTROL_SCHEMA_VERSION
+control_mission_control.MISSION_DIALOG_RECORD_TYPE = MISSION_DIALOG_RECORD_TYPE
+control_mission_control.MISSION_CANCELLATION_RECORD_TYPE = MISSION_CANCELLATION_RECORD_TYPE
+control_mission_control.MISSION_REPLACEMENT_RECORD_TYPE = MISSION_REPLACEMENT_RECORD_TYPE
+control_mission_control.MISSION_RECOVERY_RECORD_TYPE = MISSION_RECOVERY_RECORD_TYPE
+control_mission_control.MISSION_DIALOG_PAYLOAD_FIELD = MISSION_DIALOG_PAYLOAD_FIELD
+control_mission_control.MISSION_CANCELLATION_PAYLOAD_FIELD = MISSION_CANCELLATION_PAYLOAD_FIELD
+control_mission_control.MISSION_REPLACEMENT_PAYLOAD_FIELD = MISSION_REPLACEMENT_PAYLOAD_FIELD
+control_mission_control.MISSION_RECOVERY_PAYLOAD_FIELD = MISSION_RECOVERY_PAYLOAD_FIELD
+control_mission_control.MISSION_DIALOG_PENDING = MISSION_DIALOG_PENDING
+control_mission_control.MISSION_DIALOG_OBSERVATION_ANSWERABLE = (
+    MISSION_DIALOG_OBSERVATION_ANSWERABLE
+)
+control_mission_control.MISSION_DIALOG_OBSERVATION_ORPHANED = MISSION_DIALOG_OBSERVATION_ORPHANED
+control_mission_control.MISSION_DIALOG_OBSERVATION_SETTLED = MISSION_DIALOG_OBSERVATION_SETTLED
+control_mission_control.MISSION_DIALOG_QUESTION = MISSION_DIALOG_QUESTION
+control_mission_control.MISSION_DIALOG_ACCESS_PROMPT = MISSION_DIALOG_ACCESS_PROMPT
+control_mission_control.MISSION_DIALOG_PROMPT_KINDS = MISSION_DIALOG_PROMPT_KINDS
+control_mission_control.MISSION_DIALOG_ANSWERS = MISSION_DIALOG_ANSWERS
+control_mission_control.MISSION_FOLD_RETAINED_DUPLICATE = MISSION_FOLD_RETAINED_DUPLICATE
+control_mission_control.CANCELLATION_AWAITING = CANCELLATION_AWAITING
+control_mission_control.CANCELLATION_ACKNOWLEDGED = CANCELLATION_ACKNOWLEDGED
+control_mission_control.CANCELLATION_TIMED_OUT = CANCELLATION_TIMED_OUT
+control_mission_control.CANCELLATION_TIMEOUT_REASON = CANCELLATION_TIMEOUT_REASON
+control_mission_control.CANCELLATION_TIMEOUT_RECOVERY = CANCELLATION_TIMEOUT_RECOVERY
+control_mission_control.COMMAND_DUPLICATE = COMMAND_DUPLICATE
+control_mission_control.DEFAULT_EVENT_ACTOR = DEFAULT_EVENT_ACTOR
+control_mission_control.DEFAULT_COMMAND_REGISTER_COMMAND = DEFAULT_COMMAND_REGISTER_COMMAND
+control_mission_control.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_mission_control.WORKER_LIFECYCLE_ACTIVE_STATES = WORKER_LIFECYCLE_ACTIVE_STATES
+control_mission_control.validate_mission_dialog = (
+    lambda *args, **kwargs: validate_mission_dialog(*args, **kwargs)
+)
+control_mission_control.validate_mission_cancellation = (
+    lambda *args, **kwargs: validate_mission_cancellation(*args, **kwargs)
+)
+control_mission_control.validate_mission_replacement = (
+    lambda *args, **kwargs: validate_mission_replacement(*args, **kwargs)
+)
+control_mission_control.validate_mission_recovery = (
+    lambda *args, **kwargs: validate_mission_recovery(*args, **kwargs)
+)
+control_mission_control.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_mission_control.fold_mission_state = lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+control_mission_control.register_command = lambda *args, **kwargs: register_command(*args, **kwargs)
+control_mission_control.fold_commands = lambda *args, **kwargs: fold_commands(*args, **kwargs)
+control_mission_control._committed_events_after_publication = (
+    lambda *args, **kwargs: _committed_events_after_publication(*args, **kwargs)
+)
+control_mission_control._parsed_timestamp = (
+    lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+)
+control_mission_control._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_mission_control._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_mission_control._require_identifier = (
+    lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+)
+control_mission_control.utc_timestamp = lambda: utc_timestamp()
+
+MissionControlResult = control_mission_control.MissionControlResult
+CancellationObservation = control_mission_control.CancellationObservation
+MissionControlReport = control_mission_control.MissionControlReport
+build_mission_dialog = control_mission_control.build_mission_dialog
+build_mission_cancellation = control_mission_control.build_mission_cancellation
+build_mission_replacement = control_mission_control.build_mission_replacement
+build_mission_recovery = control_mission_control.build_mission_recovery
+read_mission_state = control_mission_control.read_mission_state
+require_active_mission = control_mission_control.require_active_mission
+require_pending_prompt = control_mission_control.require_pending_prompt
+register_mission_command = control_mission_control.register_mission_command
+_cancellation_acknowledgement = control_mission_control._cancellation_acknowledgement
+observe_cancellation = control_mission_control.observe_cancellation
+observe_mission_control = control_mission_control.observe_mission_control
 
 
 # --- deterministic controller reconciliation (ADR-014, sections 6 and 11) ----
@@ -9955,18 +9794,17 @@ class ControlPreflight:
                 "rewrites authoritative root metadata",
             )
             return
-        declared = record.get("schema_version") if isinstance(record, dict) else None
-        if (
-            not isinstance(declared, bool)
-            and isinstance(declared, int)
-            and declared > CONTROL_SCHEMA_VERSION
-        ):
+        declared = control_root_schema.declared_future_schema_version(record)
+        if declared is not None:
             self._add(
                 dimension,
                 PREFLIGHT_BLOCKED,
                 FINDING_AUTHORITATIVE,
-                f"{CONTROL_METADATA_NAME} declares future schema_version {declared}; this "
-                f"build supports schema_version {CONTROL_SCHEMA_VERSION} and refuses mutation",
+                control_root_schema.metadata_future_schema_diagnostic(
+                    declared,
+                    metadata_name=CONTROL_METADATA_NAME,
+                    supported_version=CONTROL_SCHEMA_VERSION,
+                ),
                 REPAIR_ACTION_UPGRADE,
             )
             return
@@ -11966,6 +11804,92 @@ def _report_mission_status(report: MissionControlReport) -> int:
     return 0
 
 
+# --- managed queue/tmux/rendering adapter seams ------------------------------
+
+control_queue_adapter.bind_facade(globals())
+QueueItemObservation = control_queue_adapter.QueueItemObservation
+QueueObservation = control_queue_adapter.QueueObservation
+_queue_item_observation = control_queue_adapter._queue_item_observation
+_queue_paused = control_queue_adapter._queue_paused
+observe_queue = control_queue_adapter.observe_queue
+
+control_tmux_adapter.bind_facade(globals())
+_session_identity = control_tmux_adapter.session_identity
+
+control_rendering.bind_facade(globals())
+_print_error = control_rendering._print_error
+_report_lock_repair = control_rendering._report_lock_repair
+_report_preflight = control_rendering._report_preflight
+_report_store_repair = control_rendering._report_store_repair
+_report_pending_debris = control_rendering._report_pending_debris
+_report_projection_debris = control_rendering._report_projection_debris
+_report_ledger_projection = control_rendering._report_ledger_projection
+_report_event_publication = control_rendering._report_event_publication
+_report_event_history = control_rendering._report_event_history
+_report_lifecycle_record = control_rendering._report_lifecycle_record
+_report_lifecycle_status = control_rendering._report_lifecycle_status
+_report_command_record = control_rendering._report_command_record
+_report_command_status = control_rendering._report_command_status
+_report_mission_control = control_rendering._report_mission_control
+_report_mission_status = control_rendering._report_mission_status
+
+
+# --- managed controller reconciliation seam ----------------------------------
+
+control_controller.bind_facade(globals())
+control_controller.ControlStoreError = ControlStoreError
+
+ControllerDiagnostic = control_controller.ControllerDiagnostic
+ControllerEvidence = control_controller.ControllerEvidence
+ControllerAction = control_controller.ControllerAction
+ControllerRecoveryStep = control_controller.ControllerRecoveryStep
+ControllerTickResult = control_controller.ControllerTickResult
+ControllerJournalObservation = control_controller.ControllerJournalObservation
+ControllerTick = control_controller.ControllerTick
+controller_state_key = control_controller.controller_state_key
+controller_ledger_plan = control_controller.controller_ledger_plan
+_controller_derived_uuid = control_controller._controller_derived_uuid
+_controller_observation_action = control_controller._controller_observation_action
+controller_recovery_ladder = control_controller.controller_recovery_ladder
+select_recovery_step = control_controller.select_recovery_step
+select_recovery_action = control_controller.select_recovery_action
+_mission_boundaries = control_controller._mission_boundaries
+_mission_slot_command_id = control_controller._mission_slot_command_id
+select_controller_action = control_controller.select_controller_action
+build_controller_dispatch = control_controller.build_controller_dispatch
+build_controller_observation = control_controller.build_controller_observation
+_controller_dispatched_pairs = control_controller._controller_dispatched_pairs
+_correlation_counts = control_controller._correlation_counts
+controller_tick = control_controller.controller_tick
+_precedence_verdicts = control_controller._precedence_verdicts
+controller_precedence_lines = control_controller.controller_precedence_lines
+controller_tick_lines = control_controller.controller_tick_lines
+_contested_duplicate = control_controller._contested_duplicate
+worker_lifecycle_cancellation_route = control_controller.worker_lifecycle_cancellation_route
+controller_duplicate_repair_route = control_controller.controller_duplicate_repair_route
+controller_blocking_repair = control_controller.controller_blocking_repair
+report_controller_tick = control_controller.report_controller_tick
+
+# --- managed wake lease/scheduling seam --------------------------------------
+
+control_wake.bind_facade(globals())
+control_wake.ControlStoreError = ControlStoreError
+
+WakeIntent = control_wake.WakeIntent
+WAKE_LEASE_DIR = control_wake.WAKE_LEASE_DIR
+WAKE_LEASE_RECOVERED_DIR = control_wake.WAKE_LEASE_RECOVERED_DIR
+WAKE_LEASE_RELEASED_DIR = control_wake.WAKE_LEASE_RELEASED_DIR
+WAKE_LEASE_FILE = control_wake.WAKE_LEASE_FILE
+WAKE_LEASE_TTL_SECONDS = control_wake.WAKE_LEASE_TTL_SECONDS
+WAKE_CRON_TAG = control_wake.CRON_TAG
+build_wake_intent = control_wake.build_wake_intent
+wake_intent_to_dict = control_wake.wake_intent_to_dict
+guard_wake_fire = control_wake.guard_wake_fire
+acquire_tick_lease = control_wake.acquire_tick_lease
+release_tick_lease = control_wake.release_tick_lease
+run_wake_controller_tick = control_wake.run_wake_controller_tick
+
+
 def _parsed_command_payload(value: str) -> Dict[str, Any]:
     """Parse the structured payload a command digest is computed over."""
 
@@ -12408,7 +12332,7 @@ def _add_command_boundary_arguments(parser: Any) -> None:
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
     """Run the small control-store CLI used by humans and controller commands."""
 
     import argparse
@@ -13144,6 +13068,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except ControlStoreError as exc:
         return _print_error(exc)
+
+
+control_cli.bind_facade(globals())
+main = control_cli.main
 
 
 if __name__ == "__main__":

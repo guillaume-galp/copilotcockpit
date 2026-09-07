@@ -389,3 +389,91 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 - Set `locked: true` on theme TH1 (freezes VP1, theme dir, story files, ADRs).
 - Promoted all 8 ADRs (ADR-001..008) from `proposed` -> `accepted`.
 - Next manual step (per copilotcockpit-dev runbook): tag `v0.1.0` on `main` to trigger release.yml.
+- 2026-09-07T02:30:33+01:00 — TH4.E1.US1 START: fresh main-based feature branch created because no develop branch is present/applicable; scope pins cockpit_control facade/import/wrapper/managed-artifact contracts before any behavior movement. — copilotcockpit
+
+- 2026-09-07T02:42:00+01:00 — TH4.E1.US1 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: focused facade review found the new wrapper-help contract test failing on line wrapping and needing robust isolated-wrapper execution capture; rework limited to test correction and rerun focused unit evidence. — copilotcockpit
+
+- 2026-09-07T02:49:00+01:00 — TH4.E1.US1 DONE: facade contract docs, MANAGED_RUNTIME_MODULES, and focused compatibility tests approved after rework; evidence: compatibility-facade2 4/4 (1 optional global-wrapper skip). Residual risk: global installed-wrapper enforcement is exercised at later install/cold gates before behavior movement. — copilotcockpit
+
+- 2026-09-07T02:52:00+01:00 — TH4.E1.US2 START: dependency TH4.E1.US1 is done; scope introduces typed seam contracts and checkable dependency-boundary rules without moving behavior from the cockpit_control facade. — copilotcockpit
+
+- 2026-09-07T03:05:00+01:00 — TH4.E1.US2 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found missing cycle detection, Python tests not wired into repository gate, debug prints, broad adapter matching, and unmanaged seam intent ambiguity; rework limited to those foundation-check defects. — copilotcockpit
+
+- 2026-09-07T03:18:00+01:00 — TH4.E1.US2 RE-REVIEW REQUEST_CHANGES / REWORK 2/2: seam checks passed conceptually, but reviewer blocked on undeclared pytest dependency and MANAGED_RUNTIME_MODULES listing without installer support; final rework limited to stdlib unittest gate and non-managed pre-extraction helper clarification. — copilotcockpit
+
+- 2026-09-07T03:30:00+01:00 — TH4.E1.US2 DONE: typed pre-extraction seam helper and dependency/cycle checks approved after stdlib unittest gate wiring; evidence: unittest 4/4 and py-tests.bats 1/1. Residual risk: helper remains source-tree only until a later story adds installer management before runtime use. — copilotcockpit
+
+- 2026-09-07T03:46:00+01:00 — TH4.E1 EPIC DONE: both foundation stories done; full `./run-tests.sh all` exit 0 (unit 1..233 plus template/skills/integration/codex), changelog appended, and epic quality review APPROVED. Next action: start TH4.E2 control-store extraction. — copilotcockpit
+
+- 2026-09-07T03:50:00+01:00 — TH4.E2.US1 START: E1 foundation is done; scope extracts control-root/schema/compatibility helpers behind the stable facade, preserving root precedence, preflight diagnostics, fail-closed and dry-run contracts. — copilotcockpit
+
+- 2026-09-07T04:12:00+01:00 — TH4.E2.US1 DONE: control-root/schema/compatibility seam extracted with facade re-exports and managed-module install/doctor/uninstall/cold-install coverage; reviewer APPROVED after focused distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T04:18:00+01:00 — TH4.E2.US2 START: dependency TH4.E2.US1 done; scope extracts portable lock owner/acquire/release/guarded-repair/quarantine behavior behind the facade with ADR-018 fault coverage preserved. — copilotcockpit
+
+- 2026-09-07T04:50:00+01:00 — TH4.E2.US2 DONE: lock owner/acquire/release/guarded-repair seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lock/fault/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T04:56:00+01:00 — TH4.E2.US3 START: dependency TH4.E2.US2 done; scope extracts immutable journal event naming/validation/sequence/pending/publication behavior behind the facade with ADR-019 fault coverage preserved. — copilotcockpit
+
+- 2026-09-07T05:25:00+01:00 — TH4.E2.US3 DONE: immutable journal naming/sequence/pending/publication seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after journal/interruption/distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T05:31:00+01:00 — TH4.E2.US4 START: dependency TH4.E2.US3 done; scope extracts ledger projection/replay/derived-view repair behind the facade while preserving authority-vs-derived fail-closed contracts. — copilotcockpit
+
+- 2026-09-07T06:05:00+01:00 — TH4.E2.US4 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer approved projection extraction logic but found the committed Python gate omitted journal/projection seam tests; rework limited to wiring all seam unittest modules through py-tests.bats. — copilotcockpit
+
+- 2026-09-07T06:18:00+01:00 — TH4.E2.US4 DONE: projection/replay/derived-view seam extracted with facade compatibility and managed distribution coverage; rework wired all seam unittests into bats gate, reviewer APPROVED, and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T06:48:00+01:00 — TH4.E2 EPIC REVIEW REQUEST_CHANGES: reviewer found integration smoke omitted `cockpit_control_journal.py` from exact managed module dry-run assertions; rework limited to smoke coverage and rerun integration/full gate as needed. — copilotcockpit
+
+- 2026-09-07T07:02:00+01:00 — TH4.E2 EPIC DONE: root/schema, lock, journal, and projection seams done; reworked smoke exact-module coverage passed; full `./run-tests.sh all` exit 0 and epic re-review APPROVED. Next action: start TH4.E3 runtime orchestration extraction. — copilotcockpit
+
+- 2026-09-07T07:07:00+01:00 — TH4.E3.US1 START: dependency TH4.E2 done; scope extracts worker lifecycle/freshness/stale-observation folding behind the facade with lifecycle CLI and fail-closed contracts preserved. — copilotcockpit
+
+- 2026-09-07T07:42:00+01:00 — TH4.E3.US1 DONE: worker lifecycle/freshness/stale-observation seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lifecycle/facade/install smoke tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T07:48:00+01:00 — TH4.E3.US2 START: dependency TH4.E3.US1 done; scope extracts command envelopes, payload digests, acknowledgements, idempotency/conflict folding behind the facade. — copilotcockpit
+
+- 2026-09-07T08:22:00+01:00 — TH4.E3.US2 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found command seam tests omitted from committed py-tests.bats unit gate; rework limited to stdlib unittest wrapper wiring and focused rerun. — copilotcockpit
+
+- 2026-09-07T08:36:00+01:00 — TH4.E3.US2 DONE: command envelope/digest/acknowledgement/idempotency seam extracted with facade compatibility and managed distribution coverage; rework wired command seam unittests into bats gate, reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T08:42:00+01:00 — TH4.E3.US3 START: dependency TH4.E3.US2 done; scope extracts mission dialog/question/reply/access-prompt/cancel/replace/recovery transitions behind the facade. — copilotcockpit
+
+- 2026-09-07T09:12:00+01:00 — TH4.E3.US3 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found mission-control seam tests omitted from py-tests.bats; rework limited to stdlib unittest wrapper wiring and pycache cleanup. — copilotcockpit
+
+- 2026-09-07T09:25:00+01:00 — TH4.E3.US3 RE-REVIEW CLEANUP: mission seam gate wiring was correct, but review found untracked backup/pycache debris; removed debris and added repo ignore rules before final review. — copilotcockpit
+
+- 2026-09-07T09:33:00+01:00 — TH4.E3.US3 DONE: mission-control question/reply/access-prompt/cancel/replace/recovery seam extracted with facade compatibility and managed distribution coverage; cleanup added ignore rules, final reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T09:40:00+01:00 — TH4.E3.US4 START: dependency TH4.E3.US3 done; scope extracts controller evidence/reconciliation/one-action/bounded-recovery decision inputs behind the facade without changing adapters or outputs. — copilotcockpit
+
+- 2026-09-07T10:20:00+01:00 — TH4.E3.US4 DONE: controller evidence/reconciliation/one-action/recovery seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after controller/recovery/escalation/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T10:36:00+01:00 — TH4.E3.US5 START: dependency TH4.E3.US4 done; scope extracts wake intent/lease/scheduling guard integration behind the facade while preserving duplicate-skip and stop-condition contracts. — copilotcockpit
+
+- 2026-09-07T11:18:00+01:00 — TH4.E3.US5 DONE: wake intent/lease/scheduling guard seam extracted with facade and `cockpit-wake` compatibility plus managed distribution coverage; reviewer APPROVED after wake/controller/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T11:40:00+01:00 — TH4.E3 EPIC DONE: lifecycle, command, mission-control, controller, and wake seams done; developer integration `./run-tests.sh all` passed (unit 1..236 plus template/skills/integration/codex) and epic review APPROVED. Next action: start TH4.E4 CLI/conformance cleanup. — copilotcockpit
+
+- 2026-09-07T11:45:00+01:00 — TH4.E4.US1 START: dependency TH4.E3 done; scope thins CLI/rendering/tmux/queue adapter glue behind stable `main()` while preserving public outputs and fail-closed diagnostics. — copilotcockpit
+
+- 2026-09-07T12:25:00+01:00 — TH4.E4.US1 DONE: CLI/rendering/queue/tmux adapter seams added behind stable `main()` with managed distribution coverage; reviewer APPROVED after focused adapter/import/output tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T12:31:00+01:00 — TH4.E4.US2 START: dependency TH4.E4.US1 done; scope deliberately migrates safe repository callers and preserves facade re-exports/aliases with compatibility tests. — copilotcockpit
+
+- 2026-09-07T13:05:00+01:00 — TH4.E4.US2 DONE: conservative caller-import cleanup documented and tested with no facade symbol removals; reviewer APPROVED after facade/repo import tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T13:10:00+01:00 — TH4.E4.US3 START: dependency TH4.E4.US2 done; scope proves final dependency/cycle/vocabulary/import/CLI/schema/replay/lock/controller/wake conformance before theme acceptance. — copilotcockpit
+
+- 2026-09-07T13:55:00+01:00 — TH4.E4.US3 DONE: final dependency/cycle/vocabulary/import/CLI/schema/replay/lock/controller/wake conformance packet and gate added; reviewer APPROVED after focused conformance and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
+- 2026-09-07T14:30:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
+
+- 2026-09-07T15:25:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
+
+- 2026-09-07T15:45:00+01:00 — TH4 THEME GATE ARTIFACTS: release notes created at `docs/plan/RELEASE-TH4.md`, active TH4 issue templates archived, final gate evidence recorded, and branch-local cold-install method clarified after rejecting published-v0.9.0 `latest` as branch evidence. — copilotcockpit
+
+- 2026-09-07T15:55:00+01:00 — TH4 PRODUCT-OWNER REVALIDATION ACCEPTED: VP4 success criteria accepted after clarified runbook context; branch-local candidate cold-install is valid pre-merge evidence, and published `latest` v0.9.0 is not applicable because behavior-preserving `refactor:` merge requires no release. — copilotcockpit
+
+- 2026-09-07T16:05:00+01:00 — TH4 THEME DONE+LOCKED: final reviewer APPROVED, product-owner revalidation accepted VP4, user pre-authorized acceptance/lock in the execution request, and backlog now marks TH4 `status: done`, `locked: true`; no semver release is required for intended `refactor:` squash. — copilotcockpit
+

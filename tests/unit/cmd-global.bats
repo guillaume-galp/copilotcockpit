@@ -26,6 +26,19 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit-queue" ]
 	[ -f "$HOME/.local/bin/cockpit-control" ]
 	[ -f "$HOME/.local/bin/cockpit_control.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_root_schema.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_locks.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_journal.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_projection.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_lifecycle.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_commands.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_mission_control.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]
 
 	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/control-root"
 	run "$HOME/.local/bin/cockpit-overseer" start

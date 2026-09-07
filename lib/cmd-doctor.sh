@@ -7,7 +7,7 @@
 #   * Skills        — install state / drift for each of the 8 skills (AC4).
 #   * cockpit tools — install state / drift for cockpit-wake, cockpit-protocol,
 #                     cockpit-overseer, cockpit-trace, and cockpit-queue artefacts (AC4).
-#     cockpit-control and its shared Python module are included with them.
+#     cockpit-control and its shared Python modules are included with them.
 #
 # Exit code (AC5): 0 when every HARD prerequisite (bash, git, node, python3) is
 # present; non-zero ONLY when a hard prerequisite is missing. Missing optional
@@ -229,6 +229,32 @@ main() {
 	_row "cockpit-control" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control.py" "$home_bin/cockpit_control.py")"
 	_row "cockpit_control.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_root_schema.py" "$home_bin/cockpit_control_root_schema.py")"
+	_row "cockpit_control_root_schema.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_locks.py" "$home_bin/cockpit_control_locks.py")"
+	_row "cockpit_control_locks.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_journal.py" "$home_bin/cockpit_control_journal.py")"
+	_row "cockpit_control_journal.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_projection.py" "$home_bin/cockpit_control_projection.py")"
+	_row "cockpit_control_projection.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_lifecycle.py" "$home_bin/cockpit_control_lifecycle.py")"
+	_row "cockpit_control_lifecycle.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_commands.py" "$home_bin/cockpit_control_commands.py")"
+	_row "cockpit_control_commands.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_mission_control.py" "$home_bin/cockpit_control_mission_control.py")"
+	_row "cockpit_control_mission_control.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_controller.py" "$home_bin/cockpit_control_controller.py")"
+	_row "cockpit_control_controller.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_wake.py" "$home_bin/cockpit_control_wake.py")"
+	_row "cockpit_control_wake.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_queue_adapter.py" "$home_bin/cockpit_control_queue_adapter.py")"
+	_row "cockpit_control_queue_adapter.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_tmux_adapter.py" "$home_bin/cockpit_control_tmux_adapter.py")"
+	_row "cockpit_control_tmux_adapter.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_rendering.py" "$home_bin/cockpit_control_rendering.py")"
+	_row "cockpit_control_rendering.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_cli.py" "$home_bin/cockpit_control_cli.py")"
+	_row "cockpit_control_cli.py" "$state"
 
 	# --- control-store preflight (AC2) ---------------------------------------
 	_section "control-store"

@@ -14,6 +14,19 @@
 #   * bin/cockpit-queue      -> ~/.local/bin/cockpit-queue (+x)
 #   * bin/cockpit-control    -> ~/.local/bin/cockpit-control (+x)
 #   * bin/cockpit_control.py -> ~/.local/bin/cockpit_control.py
+#   * bin/cockpit_control_root_schema.py -> ~/.local/bin/cockpit_control_root_schema.py
+#   * bin/cockpit_control_locks.py -> ~/.local/bin/cockpit_control_locks.py
+#   * bin/cockpit_control_journal.py -> ~/.local/bin/cockpit_control_journal.py
+#   * bin/cockpit_control_projection.py -> ~/.local/bin/cockpit_control_projection.py
+#   * bin/cockpit_control_lifecycle.py -> ~/.local/bin/cockpit_control_lifecycle.py
+#   * bin/cockpit_control_commands.py -> ~/.local/bin/cockpit_control_commands.py
+#   * bin/cockpit_control_mission_control.py -> ~/.local/bin/cockpit_control_mission_control.py
+#   * bin/cockpit_control_controller.py -> ~/.local/bin/cockpit_control_controller.py
+#   * bin/cockpit_control_wake.py -> ~/.local/bin/cockpit_control_wake.py
+#   * bin/cockpit_control_queue_adapter.py -> ~/.local/bin/cockpit_control_queue_adapter.py
+#   * bin/cockpit_control_tmux_adapter.py -> ~/.local/bin/cockpit_control_tmux_adapter.py
+#   * bin/cockpit_control_rendering.py -> ~/.local/bin/cockpit_control_rendering.py
+#   * bin/cockpit_control_cli.py -> ~/.local/bin/cockpit_control_cli.py
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -64,6 +77,19 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit-queue          (+x)
   ~/.local/bin/cockpit-control        (+x)
   ~/.local/bin/cockpit_control.py
+  ~/.local/bin/cockpit_control_root_schema.py
+  ~/.local/bin/cockpit_control_locks.py
+  ~/.local/bin/cockpit_control_journal.py
+  ~/.local/bin/cockpit_control_projection.py
+  ~/.local/bin/cockpit_control_lifecycle.py
+  ~/.local/bin/cockpit_control_commands.py
+  ~/.local/bin/cockpit_control_mission_control.py
+  ~/.local/bin/cockpit_control_controller.py
+  ~/.local/bin/cockpit_control_wake.py
+  ~/.local/bin/cockpit_control_queue_adapter.py
+  ~/.local/bin/cockpit_control_tmux_adapter.py
+  ~/.local/bin/cockpit_control_rendering.py
+  ~/.local/bin/cockpit_control_cli.py
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -354,6 +380,19 @@ main() {
 	local cq_src="$CC_ROOT/bin/cockpit-queue"
 	local cc_src="$CC_ROOT/bin/cockpit-control"
 	local ccp_src="$CC_ROOT/bin/cockpit_control.py"
+	local ccrs_src="$CC_ROOT/bin/cockpit_control_root_schema.py"
+	local ccls_src="$CC_ROOT/bin/cockpit_control_locks.py"
+	local ccj_src="$CC_ROOT/bin/cockpit_control_journal.py"
+	local ccpj_src="$CC_ROOT/bin/cockpit_control_projection.py"
+	local ccl_src="$CC_ROOT/bin/cockpit_control_lifecycle.py"
+	local ccc_src="$CC_ROOT/bin/cockpit_control_commands.py"
+	local ccm_src="$CC_ROOT/bin/cockpit_control_mission_control.py"
+	local ccco_src="$CC_ROOT/bin/cockpit_control_controller.py"
+	local ccw_src="$CC_ROOT/bin/cockpit_control_wake.py"
+	local ccqa_src="$CC_ROOT/bin/cockpit_control_queue_adapter.py"
+	local ccta_src="$CC_ROOT/bin/cockpit_control_tmux_adapter.py"
+	local ccrn_src="$CC_ROOT/bin/cockpit_control_rendering.py"
+	local cccf_src="$CC_ROOT/bin/cockpit_control_cli.py"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
@@ -364,6 +403,19 @@ main() {
 	local cq_dst="$home_bin/cockpit-queue"
 	local cc_dst="$home_bin/cockpit-control"
 	local ccp_dst="$home_bin/cockpit_control.py"
+	local ccrs_dst="$home_bin/cockpit_control_root_schema.py"
+	local ccls_dst="$home_bin/cockpit_control_locks.py"
+	local ccj_dst="$home_bin/cockpit_control_journal.py"
+	local ccpj_dst="$home_bin/cockpit_control_projection.py"
+	local ccl_dst="$home_bin/cockpit_control_lifecycle.py"
+	local ccc_dst="$home_bin/cockpit_control_commands.py"
+	local ccm_dst="$home_bin/cockpit_control_mission_control.py"
+	local ccco_dst="$home_bin/cockpit_control_controller.py"
+	local ccw_dst="$home_bin/cockpit_control_wake.py"
+	local ccqa_dst="$home_bin/cockpit_control_queue_adapter.py"
+	local ccta_dst="$home_bin/cockpit_control_tmux_adapter.py"
+	local ccrn_dst="$home_bin/cockpit_control_rendering.py"
+	local cccf_dst="$home_bin/cockpit_control_cli.py"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -406,6 +458,58 @@ main() {
 	fi
 	if [[ ! -f "$ccp_src" ]]; then
 		log_error "required source missing: $ccp_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccrs_src" ]]; then
+		log_error "required source missing: $ccrs_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccls_src" ]]; then
+		log_error "required source missing: $ccls_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccj_src" ]]; then
+		log_error "required source missing: $ccj_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccpj_src" ]]; then
+		log_error "required source missing: $ccpj_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccl_src" ]]; then
+		log_error "required source missing: $ccl_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccc_src" ]]; then
+		log_error "required source missing: $ccc_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccm_src" ]]; then
+		log_error "required source missing: $ccm_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccco_src" ]]; then
+		log_error "required source missing: $ccco_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccw_src" ]]; then
+		log_error "required source missing: $ccw_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccqa_src" ]]; then
+		log_error "required source missing: $ccqa_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccta_src" ]]; then
+		log_error "required source missing: $ccta_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccrn_src" ]]; then
+		log_error "required source missing: $ccrn_src"
+		missing=1
+	fi
+	if [[ ! -f "$cccf_src" ]]; then
+		log_error "required source missing: $cccf_src"
 		missing=1
 	fi
 	if [[ "$missing" -ne 0 ]]; then
@@ -457,6 +561,19 @@ main() {
 		cc_run chmod +x "$cc_dst" || return 1
 	fi
 	cc_place "$ccp_src" "$ccp_dst" || return 1
+	cc_place "$ccrs_src" "$ccrs_dst" || return 1
+	cc_place "$ccls_src" "$ccls_dst" || return 1
+	cc_place "$ccj_src" "$ccj_dst" || return 1
+	cc_place "$ccpj_src" "$ccpj_dst" || return 1
+	cc_place "$ccl_src" "$ccl_dst" || return 1
+	cc_place "$ccc_src" "$ccc_dst" || return 1
+	cc_place "$ccm_src" "$ccm_dst" || return 1
+	cc_place "$ccco_src" "$ccco_dst" || return 1
+	cc_place "$ccw_src" "$ccw_dst" || return 1
+	cc_place "$ccqa_src" "$ccqa_dst" || return 1
+	cc_place "$ccta_src" "$ccta_dst" || return 1
+	cc_place "$ccrn_src" "$ccrn_dst" || return 1
+	cc_place "$cccf_src" "$cccf_dst" || return 1
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
 	case ":$PATH:" in
