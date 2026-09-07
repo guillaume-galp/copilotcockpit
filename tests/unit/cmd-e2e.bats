@@ -25,10 +25,18 @@ setup() {
 	[ "$status" -eq 0 ]
 	[ -f "$proj/e2e/playwright.config.ts" ]
 	[ -f "$proj/e2e/MANIFEST.toml" ]
-	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"' "$proj/e2e/tmux-cockpit.sh"
+	[ -f "$proj/docs/cockpit-control/control.json" ]
+	[ -d "$proj/docs/cockpit-queue" ]
+	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/cockpit-queue}"' "$proj/e2e/tmux-cockpit.sh"
+	grep -q 'COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/docs/cockpit-control}"' "$proj/e2e/tmux-cockpit.sh"
 	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"' "$proj/e2e/tmux-cockpit.sh"
-	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"' "$proj/e2e/tmux-cockpit-local.sh"
+	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"' "$proj/e2e/tmux-cockpit.sh"
+	grep -q 'COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/cockpit-queue}"' "$proj/e2e/tmux-cockpit-local.sh"
+	grep -q 'COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/docs/cockpit-control}"' "$proj/e2e/tmux-cockpit-local.sh"
 	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"' "$proj/e2e/tmux-cockpit-local.sh"
+	grep -q 'tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"' "$proj/e2e/tmux-cockpit-local.sh"
+	COCKPIT_CONTROL_ROOT="$proj/docs/cockpit-control" COCKPIT_QUEUE_ROOT="$proj/docs/cockpit-queue" \
+		"$BATS_TEST_DIRNAME/../../bin/cockpit-control" preflight | grep -q "preflight ready"
 }
 
 # --- idempotency: --update twice yields the same state, no new backup --------

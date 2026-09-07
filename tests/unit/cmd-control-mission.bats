@@ -90,7 +90,11 @@ cc_refuse() {
 # cc_mission_store <root> — initialize one empty control store under <root>.
 cc_mission_store() {
 	export COCKPIT_CONTROL_ROOT="$1"
-	"$CONTROL_BIN" init >/dev/null
+	export COCKPIT_QUEUE_ROOT="$1-queue"
+	"$CONTROL_BIN" init \
+		--queue-root "$1-queue" \
+		--planning-root "$1-planning" \
+		--implementation-root "$1-implementation" >/dev/null
 }
 
 # cc_emit <record-lifecycle args...> — emit one lifecycle event successfully.

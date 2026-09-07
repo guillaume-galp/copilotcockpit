@@ -459,6 +459,20 @@ _e2e_git_init() {
 	return 0
 }
 
+_e2e_bootstrap_control_plane() {
+	local target_abs="$1"
+	local control_root="$target_abs/docs/cockpit-control"
+	local queue_root="$target_abs/docs/cockpit-queue"
+	local planning_root="$target_abs/docs/plan"
+	local implementation_root="$target_abs"
+
+	mkdir -p "$queue_root" "$planning_root" || return 1
+	COCKPIT_CONTROL_ROOT="$control_root" "$CC_ROOT/bin/cockpit-control" init \
+		--queue-root "$queue_root" \
+		--planning-root "$planning_root" \
+		--implementation-root "$implementation_root" >/dev/null
+}
+
 # --- Handoff (AC7) -----------------------------------------------------------
 _e2e_print_handoff() {
 	local dir="$1"
@@ -557,6 +571,11 @@ main() {
 	# --- AC8: dry-run — print plan, write nothing ----------------------------
 	if [[ "${DRY_RUN:-0}" != "0" ]]; then
 		printf 'e2e dry-run — would scaffold into: %s\n' "$dest"
+		printf 'Control plane roots:\n'
+		printf '  COCKPIT_CONTROL_ROOT = %s\n' "$target_abs/docs/cockpit-control"
+		printf '  COCKPIT_QUEUE_ROOT   = %s\n' "$target_abs/docs/cockpit-queue"
+		printf '  planning root        = %s\n' "$target_abs/docs/plan"
+		printf '  implementation root  = %s\n' "$target_abs"
 		printf '\nResolved tokens:\n'
 		printf '  @@APP_NAME@@      = %s\n' "$app_name"
 		printf '  @@BACKEND_PORT@@  = %s\n' "$backend_port"
@@ -618,6 +637,12 @@ EOF
 	_CC_E2E_STAGE=""
 	trap - EXIT
 	log_ok "scaffolded e2e/ into $dest"
+
+	if ! _e2e_bootstrap_control_plane "$target_abs"; then
+		log_error "e2e: failed to initialize cockpit control-plane roots"
+		return 1
+	fi
+	log_ok "initialized cockpit control-plane roots"
 
 	# --- AC6: git init + initial commit (unless --no-git) --------------------
 	if [[ "$no_git" -eq 1 ]]; then

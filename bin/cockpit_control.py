@@ -9433,6 +9433,7 @@ FINDING_CONFIGURATION = "configuration"
 
 PREFLIGHT_STATUS_READY = "ready"
 PREFLIGHT_STATUS_DEGRADED = "degraded"
+PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED = "operationally-blocked"
 PREFLIGHT_STATUS_BLOCKED = "blocked"
 
 # The complete set of control-plane dimensions preflight always reports, in the
@@ -9471,6 +9472,10 @@ STORE_REPAIR_REPAIRED = "repaired"
 STORE_REPAIR_WOULD_REPAIR = "would-repair"
 
 REPAIR_ACTION_INIT = "cockpit-control init"
+REPAIR_ACTION_BIND_ROOTS = (
+    "cockpit-control bind-roots --queue-root <absolute queue root> "
+    "--planning-root <absolute planning root> --implementation-root <absolute implementation root>"
+)
 REPAIR_ACTION_REPLAY = "cockpit-control replay-ledger"
 REPAIR_ACTION_REPAIR_LOCK = "cockpit-control repair-lock"
 REPAIR_ACTION_REPAIR_STORE = DEFAULT_STORE_REPAIR_COMMAND
@@ -9655,7 +9660,10 @@ class PreflightReport:
 
     @property
     def blocked(self) -> bool:
-        return self.status == PREFLIGHT_STATUS_BLOCKED
+        return self.status in (
+            PREFLIGHT_STATUS_BLOCKED,
+            PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
+        )
 
     @property
     def actionable(self) -> Tuple[PreflightFinding, ...]:
@@ -9699,6 +9707,20 @@ class ControlPreflight:
 
     def _ready(self, dimension: str, detail: str) -> None:
         self._add(dimension, PREFLIGHT_READY, FINDING_OK, detail)
+
+    def _operationally_blocked(
+        self,
+        dimension: str,
+        detail: str,
+        repair: str = REPAIR_ACTION_BIND_ROOTS,
+    ) -> None:
+        self._add(
+            dimension,
+            PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
+            FINDING_CONFIGURATION,
+            detail,
+            repair,
+        )
 
     def _undeterminable(self, dimension: str, detail: str, repair: Optional[str] = None) -> None:
         self._add(dimension, PREFLIGHT_UNDETERMINABLE, FINDING_OK, detail, repair)
@@ -10135,20 +10157,19 @@ class ControlPreflight:
         if declared is None:
             detail = (
                 "no queue root is declared yet, so this root-level store carries no "
-                "product-work authority; a mission must declare one before dispatch"
+                "product-work authority; bind canonical roots before dispatch"
             )
             if exported:
-                self._add(
+                self._operationally_blocked(
                     dimension,
-                    PREFLIGHT_ADVISORY,
-                    FINDING_CONFIGURATION,
                     f"{detail}; the shell exports COCKPIT_QUEUE_ROOT={exported}, which "
                     f"{CONTROL_METADATA_NAME} does not declare",
-                    f"declare canonical_roots.queue_root as {exported} when the mission is "
-                    "created, or unset COCKPIT_QUEUE_ROOT in this shell",
+                    f"cockpit-control bind-roots --queue-root {exported} "
+                    "--planning-root <absolute planning root> "
+                    "--implementation-root <absolute implementation root>",
                 )
                 return
-            self._ready(dimension, detail)
+            self._operationally_blocked(dimension, detail)
             return
 
         self._check_declared_root(dimension, "queue root", declared)
@@ -10304,7 +10325,7 @@ class ControlPreflight:
         if self._has_finding(dimension):
             return
         if declared_count == 0:
-            self._ready(
+            self._operationally_blocked(
                 dimension,
                 "no planning root or implementation roots are declared yet, so no mission "
                 "boundary can be crossed",
@@ -10356,12 +10377,17 @@ class ControlPreflight:
             raise ControlStoreError("preflight produced a finding outside its declared dimensions")
 
         status = PREFLIGHT_STATUS_READY
+        operationally_blocked = False
         for finding in ordered:
             if finding.state == PREFLIGHT_BLOCKED:
                 status = PREFLIGHT_STATUS_BLOCKED
                 break
+            if finding.state == PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED:
+                operationally_blocked = True
             if finding.state != PREFLIGHT_READY:
                 status = PREFLIGHT_STATUS_DEGRADED
+        if status != PREFLIGHT_STATUS_BLOCKED and operationally_blocked:
+            status = PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED
         return PreflightReport(
             root=self.root,
             source=self.source,
@@ -10797,17 +10823,103 @@ def _session_identity() -> str:
     return "shell"
 
 
-def _initial_records(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _canonical_roots_record(
+    control_root: Path,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Build one normalized canonical-root declaration."""
+
+    roots = {
+        "control_root": str(control_root),
+        "queue_root": queue_root,
+        "planning_root": planning_root,
+        "implementation_roots": list(implementation_roots),
+    }
+    return _validate_canonical_roots(roots, "canonical root binding", control_root)
+
+
+def _declared_roots_from_values(
+    control_root: Path,
+    queue_root: str,
+    planning_root: str,
+    implementation_roots: Sequence[str],
+) -> Dict[str, Any]:
+    """Validate a complete operational root binding from CLI arguments."""
+
+    if not implementation_roots:
+        raise ControlStoreError("at least one --implementation-root is required")
+    roots = _canonical_roots_record(
+        control_root,
+        queue_root=_require_root_path(queue_root, "queue_root", "root binding"),
+        planning_root=_require_root_path(planning_root, "planning_root", "root binding"),
+        implementation_roots=[
+            _require_root_path(value, f"implementation_roots[{index}]", "root binding")
+            for index, value in enumerate(implementation_roots)
+        ],
+    )
+    seen: Dict[str, str] = {}
+    for label, value in (
+        ("control_root", roots["control_root"]),
+        ("queue_root", roots["queue_root"]),
+        ("planning_root", roots["planning_root"]),
+    ):
+        if value in seen:
+            raise ControlStoreError(
+                f"root binding requires distinct paths; {label} duplicates {seen[value]}"
+            )
+        seen[value] = label
+    for index, value in enumerate(roots["implementation_roots"]):
+        label = f"implementation_roots[{index}]"
+        if value in seen:
+            raise ControlStoreError(
+                f"root binding requires distinct paths; {label} duplicates {seen[value]}"
+            )
+        seen[value] = label
+    return roots
+
+
+def _metadata_with_canonical_roots(
+    metadata: Mapping[str, Any],
+    roots: Mapping[str, Any],
+    *,
+    migrated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return metadata with canonical and compatibility root fields synchronized."""
+
+    updated = dict(metadata)
+    canonical = {
+        "control_root": roots["control_root"],
+        "queue_root": roots["queue_root"],
+        "planning_root": roots["planning_root"],
+        "implementation_roots": list(roots["implementation_roots"]),
+    }
+    updated["canonical_roots"] = canonical
+    updated["queue_root"] = canonical["queue_root"]
+    updated["planning_root"] = canonical["planning_root"]
+    updated["implementation_roots"] = list(canonical["implementation_roots"])
+    if migrated_at is not None:
+        updated["last_migration_at"] = migrated_at
+    return updated
+
+
+def _initial_records(
+    root: Path,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     created_at = utc_timestamp()
     control_id = str(uuid4())
     session_id = _session_identity()
     cockpit_id = os.environ.get("COCKPIT_ID") or session_id
-    canonical_roots = {
-        "control_root": str(root),
-        "queue_root": None,
-        "planning_root": None,
-        "implementation_roots": [],
-    }
+    canonical_roots = _canonical_roots_record(
+        root,
+        queue_root=queue_root,
+        planning_root=planning_root,
+        implementation_roots=implementation_roots,
+    )
     metadata = {
         "schema_version": CONTROL_SCHEMA_VERSION,
         "record_type": "control-root",
@@ -10816,8 +10928,8 @@ def _initial_records(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "session_id": session_id,
         "control_root": str(root),
         "canonical_roots": canonical_roots,
-        "queue_root": None,
-        "planning_root": None,
+        "queue_root": canonical_roots["queue_root"],
+        "planning_root": canonical_roots["planning_root"],
         "implementation_roots": list(canonical_roots["implementation_roots"]),
         "capabilities": {"control_store": CONTROL_SCHEMA_VERSION},
         "tool_capability_versions": {"cockpit-control": CONTROL_SCHEMA_VERSION},
@@ -10839,7 +10951,7 @@ def _root_has_entries(root: Path) -> bool:
     return True
 
 
-def _create_store_atomically(root: Path) -> None:
+def _create_store_atomically(root: Path, roots: Optional[Mapping[str, Any]] = None) -> None:
     parent = root.parent
     if not parent.is_dir():
         raise ControlStoreError(f"parent directory does not exist for COCKPIT_CONTROL_ROOT: {parent}")
@@ -10855,7 +10967,15 @@ def _create_store_atomically(root: Path) -> None:
         temporary_root.chmod(0o700)
         for name in REQUIRED_STORE_DIRECTORIES:
             (temporary_root / name).mkdir(mode=0o700)
-        metadata, ledger = _initial_records(root)
+        if roots is None:
+            metadata, ledger = _initial_records(root)
+        else:
+            metadata, ledger = _initial_records(
+                root,
+                queue_root=roots["queue_root"],
+                planning_root=roots["planning_root"],
+                implementation_roots=roots["implementation_roots"],
+            )
         _write_json(temporary_root / CONTROL_METADATA_NAME, metadata)
         _write_json(temporary_root / LEDGER_NAME, ledger)
         _write_new_text(temporary_root / EVENTS_NAME, build_events_view())
@@ -10871,11 +10991,23 @@ def _create_store_atomically(root: Path) -> None:
 
 def initialize_control_store(
     resolved_root: Optional[ResolvedControlRoot] = None,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
 ) -> StoreInitialization:
     """Create a complete store atomically, or validate an existing one unchanged."""
 
     resolved = resolved_root or resolve_control_root()
     root = resolved.path
+    if any(value is not None for value in (queue_root, planning_root)) or implementation_roots:
+        if queue_root is None or planning_root is None or not implementation_roots:
+            raise ControlStoreError(
+                "init root binding requires --queue-root, --planning-root, and at least "
+                "one --implementation-root together"
+            )
+        roots = _declared_roots_from_values(root, queue_root, planning_root, implementation_roots)
+    else:
+        roots = _canonical_roots_record(root)
     if root.exists() or root.is_symlink():
         if root.is_symlink() or not root.is_dir():
             raise ControlStoreError("COCKPIT_CONTROL_ROOT must be a directory, not a symlink or file")
@@ -10883,10 +11015,151 @@ def initialize_control_store(
             validate_control_store(root)
             return StoreInitialization(root=root, source=resolved.source, created=False)
 
-    _create_store_atomically(root)
+    if roots["queue_root"] is not None:
+        for label, value in (
+            ("queue root", roots["queue_root"]),
+            ("planning root", roots["planning_root"]),
+        ):
+            _ensure_declared_directory(value, label)
+        for index, value in enumerate(roots["implementation_roots"]):
+            _ensure_declared_directory(value, f"implementation root {index + 1}")
+    _create_store_atomically(root, roots if roots["queue_root"] is not None else None)
     # Re-read the just-published files through the normal fail-closed validator.
     validate_control_store(root)
     return StoreInitialization(root=root, source=resolved.source, created=True)
+
+
+@dataclass(frozen=True)
+class RootBindingResult:
+    """Outcome of binding canonical work roots into an existing control store."""
+
+    root: Path
+    queue_root: str
+    planning_root: str
+    implementation_roots: Tuple[str, ...]
+    changed: bool
+
+
+def _ensure_declared_directory(path: str, label: str) -> None:
+    """Create or validate one declared work root without following symlinks."""
+
+    root = Path(path)
+    mode = _existing_mode(root, label)
+    if mode is None:
+        parent = root.parent
+        if not parent.is_dir():
+            raise ControlStoreError(f"parent directory does not exist for {label}: {parent}")
+        if parent.is_symlink():
+            raise ControlStoreError(f"parent directory for {label} must not be a symlink: {parent}")
+        try:
+            root.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ControlStoreError(f"cannot create {label}: {exc}") from None
+        _fsync_directory(parent)
+        return
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise ControlStoreError(f"{label} must be a real directory, not a symlink or file")
+    if not os.access(path, os.W_OK):
+        raise ControlStoreError(f"{label} is not writable by this user")
+
+
+def _write_replacement_json(path: Path, record: Mapping[str, Any], label: str) -> None:
+    temporary = path.with_name(f".{path.name}.bind-{uuid4()}.tmp")
+    try:
+        _write_json(temporary, record)
+        identity = temporary.lstat()
+        os.replace(str(temporary), str(path))
+        replaced = path.lstat()
+    except OSError as exc:
+        raise ControlStoreError(f"cannot atomically replace {label}: {exc}") from None
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    if not _same_filesystem_identity(replaced, identity):
+        raise ControlStoreError(f"{label} changed filesystem identity during replacement")
+    _fsync_directory(path.parent)
+
+
+def bind_control_roots(
+    root: Path,
+    queue_root: str,
+    planning_root: str,
+    implementation_roots: Sequence[str],
+    *,
+    command: str = "cockpit-control bind-roots",
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> RootBindingResult:
+    """Bind complete canonical work roots and refresh the derived ledger."""
+
+    root = _require_absolute_root(str(root), "configured")
+    roots = _declared_roots_from_values(root, queue_root, planning_root, implementation_roots)
+    metadata = validate_control_authority(root)
+    current = metadata["canonical_roots"]
+    changed = current != roots
+    if dry_run:
+        return RootBindingResult(
+            root=root,
+            queue_root=roots["queue_root"],
+            planning_root=roots["planning_root"],
+            implementation_roots=tuple(roots["implementation_roots"]),
+            changed=changed,
+        )
+
+    for label, value in (
+        ("queue root", roots["queue_root"]),
+        ("planning root", roots["planning_root"]),
+    ):
+        _ensure_declared_directory(value, label)
+    for index, value in enumerate(roots["implementation_roots"]):
+        _ensure_declared_directory(value, f"implementation root {index + 1}")
+
+    with PortableControlLock(
+        root,
+        command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    ) as lock:
+        metadata = validate_control_authority(root)
+        changed = metadata["canonical_roots"] != roots
+        if changed:
+            updated = _metadata_with_canonical_roots(
+                metadata,
+                roots,
+                migrated_at=utc_timestamp(),
+            )
+            validate_root_metadata(updated, root)
+            history = read_committed_events(root, updated["control_id"])
+            ledger = build_ledger_projection(updated, history.events)
+            _write_replacement_json(root / CONTROL_METADATA_NAME, updated, CONTROL_METADATA_NAME)
+            _write_replacement_json(root / LEDGER_NAME, ledger, LEDGER_NAME)
+            view_identity = _write_projection_temporary(
+                root / EVENTS_VIEW_TEMPORARY_NAME,
+                build_events_view(history.events),
+                EVENTS_VIEW_TEMPORARY_NAME,
+            )
+            _replace_projection(
+                root / EVENTS_VIEW_TEMPORARY_NAME,
+                root / EVENTS_NAME,
+                view_identity,
+                EVENTS_NAME,
+            )
+        else:
+            ControlLedgerProjection(root, command=command, held_lock=lock).run()
+    validate_control_store(root)
+    return RootBindingResult(
+        root=root,
+        queue_root=roots["queue_root"],
+        planning_root=roots["planning_root"],
+        implementation_roots=tuple(roots["implementation_roots"]),
+        changed=changed,
+    )
 
 
 def _print_error(error: Exception) -> int:
@@ -12347,7 +12620,36 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("init", help="atomically initialize an explicit control root")
+    init = subcommands.add_parser("init", help="atomically initialize an explicit control root")
+    init.add_argument("--queue-root", default=None, metavar="PATH", help="declared queue root")
+    init.add_argument("--planning-root", default=None, metavar="PATH", help="declared planning root")
+    init.add_argument(
+        "--implementation-root",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    bind_roots = subcommands.add_parser(
+        "bind-roots",
+        help="atomically bind queue, planning, and implementation roots into a control store",
+    )
+    bind_roots.add_argument("--queue-root", required=True, metavar="PATH", help="declared queue root")
+    bind_roots.add_argument(
+        "--planning-root", required=True, metavar="PATH", help="declared planning root"
+    )
+    bind_roots.add_argument(
+        "--implementation-root",
+        action="append",
+        required=True,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    bind_roots.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and report the binding without changing any state",
+    )
     subcommands.add_parser("validate", help="validate an explicit control root without mutation")
     repair = subcommands.add_parser(
         "repair-lock",
@@ -12947,9 +13249,31 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
     try:
         resolved = resolve_control_root()
         if args.command == "init":
-            result = initialize_control_store(resolved)
+            result = initialize_control_store(
+                resolved,
+                queue_root=args.queue_root,
+                planning_root=args.planning_root,
+                implementation_roots=tuple(args.implementation_root or ()),
+            )
             verb = "initialized" if result.created else "validated"
             print(f"cockpit-control: {verb} {result.root} (source: {result.source})")
+            return 0
+        if args.command == "bind-roots":
+            result = bind_control_roots(
+                resolved.path,
+                args.queue_root,
+                args.planning_root,
+                tuple(args.implementation_root or ()),
+                dry_run=args.dry_run,
+            )
+            verb = "would bind" if args.dry_run and result.changed else "bound"
+            if not result.changed:
+                verb = "already bound"
+            print(
+                f"cockpit-control: {verb} roots in {result.root}: "
+                f"queue={result.queue_root} planning={result.planning_root} "
+                f"implementation-roots={len(result.implementation_roots)}"
+            )
             return 0
         if args.command == "publish-event":
             return _report_event_publication(

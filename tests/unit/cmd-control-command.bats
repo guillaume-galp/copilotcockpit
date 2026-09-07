@@ -46,7 +46,11 @@ print(cockpit_control.command_payload_digest(__import__("json").loads(sys.argv[1
 # cc_command_store <root> — initialize one empty control store under <root>.
 cc_command_store() {
 	export COCKPIT_CONTROL_ROOT="$1"
-	"$CONTROL_BIN" init >/dev/null
+	export COCKPIT_QUEUE_ROOT="$1-queue"
+	"$CONTROL_BIN" init \
+		--queue-root "$1-queue" \
+		--planning-root "$1-planning" \
+		--implementation-root "$1-implementation" >/dev/null
 }
 
 # cc_absent <pattern> <file> — require <pattern> to be absent from <file>.

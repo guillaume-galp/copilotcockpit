@@ -219,7 +219,7 @@ for sh in tmux-cockpit.sh tmux-cockpit-local.sh; do
 		fail "$sh not found for control-root check"
 		continue
 	fi
-	if ! grep -Fq 'COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"' "$f"; then
+	if ! grep -Fq 'COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/docs/cockpit-control}"' "$f"; then
 		fail "$sh does not define the explicit control root"
 	elif ! grep -Fq 'tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"' "$f"; then
 		fail "$sh does not export the control root to tmux"
