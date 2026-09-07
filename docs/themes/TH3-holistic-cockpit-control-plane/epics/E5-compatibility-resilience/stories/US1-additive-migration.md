@@ -10,7 +10,7 @@ acceptance-criteria:
   - AC1: "Existing queue items, trace archives, wake schedules, project-owned launchers, and overlays remain intact during VP3 adoption."
   - AC2: "Doctor identifies legacy wakes and workers and reports the exact migration or capability limitation."
   - AC3: "Schema migration creates backups, is idempotent, and refuses unknown future versions without mutation."
-depends-on: [TH3.E1.US3, TH3.E2.US3, TH3.E4.US1]
+depends-on: [TH3.E1.US7, TH3.E2.US3, TH3.E4.US1]
 ---
 
 As an existing cockpit operator, I want additive migration so that resilience

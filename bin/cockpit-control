@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""cockpit-control — versioned VP3 control-store init, validation, event publication,
+worker lifecycle recording and freshness observation, idempotent command envelopes
+and acknowledgements, managed mission control (questions, replies, access-prompt
+responses, cooperative cancellation, and replacement correlated to one mission
+slot per worker), ledger projection replay, read-only preflight, and guarded
+lock/store repair."""
+
+from cockpit_control import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

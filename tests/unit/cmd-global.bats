@@ -24,6 +24,13 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit-overseer" ]
 	[ -f "$HOME/.local/bin/cockpit-trace" ]
 	[ -f "$HOME/.local/bin/cockpit-queue" ]
+	[ -f "$HOME/.local/bin/cockpit-control" ]
+	[ -f "$HOME/.local/bin/cockpit_control.py" ]
+
+	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/control-root"
+	run "$HOME/.local/bin/cockpit-overseer" start
+	[ "$status" -eq 0 ]
+	[ -f "$COCKPIT_CONTROL_ROOT/control.json" ]
 }
 
 @test "global: second run reports already-current and writes no backup" {

@@ -101,10 +101,10 @@ The script must:
 3. Start `kubectl port-forward` in `k8s-pf`
 4. Start chromium/browserless in `chromium`
 5. Prime each worker pane with `prime_worker()` (see below)
-6. Set a session-local FIFO root:
+6. Set session-local FIFO and VP3 control roots:
    `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"`,
-   `export COCKPIT_QUEUE_ROOT`, then
-   `tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"`
+   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"`,
+   export both, then set both through `tmux set-environment -t "$SESSION"`.
 
 ### `e2e/tmux-cockpit-local.sh` — local dev cockpit
 
@@ -126,10 +126,10 @@ The script must:
 1. Create windows: `overseer`, `backend`, `frontend`, `worker-test`, `worker-dev`, `worker-fix`
 2. Start backend and frontend in their respective windows
 3. Prime each worker pane with `prime_worker()`
-4. Set a session-local FIFO root:
+4. Set session-local FIFO and VP3 control roots:
    `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"`,
-   `export COCKPIT_QUEUE_ROOT`, then
-   `tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"`
+   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"`,
+   export both, then set both through `tmux set-environment -t "$SESSION"`.
 
 ### `prime_worker()` function (required in both scripts)
 

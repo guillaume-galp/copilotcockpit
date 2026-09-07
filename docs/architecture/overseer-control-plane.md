@@ -114,7 +114,9 @@ explicit through `COCKPIT_QUEUE_ROOT`.
 <control-root>/
   control.json                 # root metadata and schema version
   ledger.json                  # materialized active-mission projection
-  events.jsonl                 # append-only control event journal
+  events/                      # immutable committed event records
+  pending/                     # private unpublished event candidates
+  events.jsonl                 # optional rebuildable compatibility view
   commands/<command-id>.json   # command envelope and latest acknowledgement
   escalations/<id>.json        # human-readable bounded escalation records
   locks/control.lock/          # portable mkdir lock with owner metadata
@@ -161,28 +163,131 @@ diagnostic evidence and may be redacted or rotated independently.
 
 ## 8. Atomicity, Locking, and Recovery
 
-All control mutations acquire the same portable lock by atomically creating
-`locks/control.lock/`. The lock records PID, host, command, and acquisition
-time. Writers wait for a bounded interval and then fail visibly.
+Control durability is split into two independently testable protocols:
 
-A lock may be removed only when:
+1. a portable ownership protocol for acquisition, release, and stale repair;
+2. an immutable event-publication protocol from which projections are rebuilt.
 
-- its PID is proven absent on the same host; or
-- an explicit repair command is used after the configured stale threshold.
+ADR-018 defines lock ownership and repair. ADR-019 defines committed events and
+projection replay.
 
-Mutation order is:
+### 8.1 Lock safety and liveness invariants
 
-1. acquire lock;
-2. reload and validate current revision;
-3. write command or event data to a sibling temporary file when applicable;
-4. append and flush the event;
-5. rebuild the ledger projection in memory;
-6. write `ledger.json.tmp`, flush, and atomically replace `ledger.json`;
-7. release lock.
+The implementation must preserve these invariants:
 
-On startup, a missing, corrupt, or stale ledger is rebuilt from valid journal
-events. A malformed journal line blocks mutation and requires explicit repair;
-it is never silently skipped by authoritative readers.
+- **Single owner:** at most one `control.lock` directory is published.
+- **Complete publication:** a published lock always contains a complete,
+  schema-valid `owner.json`; an owner-less published lock is impossible.
+- **Exact release:** only the owner UUID that acquired the lock may release it.
+- **No live repair:** repair cannot move or remove a lock while its positively
+  identified same-host process is alive.
+- **No pathname-only deletion:** no cleanup operation unlinks a shared marker
+  after a separate identity check.
+- **Replacement preservation:** release or repair cannot remove a lock that was
+  replaced after the caller obtained its handle.
+- **Crash release of transition guard:** process death cannot permanently hold
+  the acquisition/repair serialization primitive.
+- **Bounded wait:** contention returns a visible timeout without leaking a
+  published lock owned by the timed-out caller.
+- **Recoverable debris:** abandoned private candidates and quarantined locks are
+  non-authoritative and can be diagnosed or cleaned without blocking a new
+  valid owner.
+
+### 8.2 Lock state machine
+
+```text
+absent
+  -> candidate-prepared
+  -> owned
+  -> released-quarantine
+
+owned
+  -> repair-validated
+  -> repaired-quarantine
+
+candidate-prepared
+  -> abandoned-candidate
+```
+
+`candidate-prepared`, `released-quarantine`, `repaired-quarantine`, and
+`abandoned-candidate` paths use unique UUID names. Only `control.lock` is
+authoritative ownership.
+
+Every acquisition, release, or repair transition first obtains an advisory
+exclusive `fcntl.flock` on `locks/control.guard`. This short-lived guard is
+supported by the target Linux/macOS Python runtime and is automatically released
+by the kernel when a process exits.
+
+Acquisition prepares a complete private directory containing `owner.json`,
+flushes it, then atomically renames that directory to `control.lock` while
+holding the guard. Therefore there is no creation-to-owner-publication window.
+If `control.lock` already exists, the private candidate is removed by its own
+creator or retained as non-authoritative diagnostic debris.
+
+Release reacquires the guard, validates the owner UUID and filesystem identity,
+then atomically renames `control.lock` to a unique released quarantine before
+cleanup. Repair follows the same pattern after proving same-host owner death or
+receiving explicit guarded authorization. Because acquisition also requires the
+guard, no new lock can replace the path between validation and rename.
+
+Repair has no in-lock claim marker. The atomic rename to a unique repaired
+quarantine is the claim. A crash before rename changes nothing; a crash after
+rename leaves a non-authoritative quarantine and permits a new acquisition.
+
+### 8.3 Event publication and projection
+
+A single append-only JSONL file is not authoritative because process
+interruption can expose a torn final record. Each authoritative event is instead
+an immutable file:
+
+```text
+events/<zero-padded-revision>-<event-id>.json
+```
+
+While holding `control.lock`, the writer:
+
+1. reads the latest committed revision;
+2. writes one complete event to a unique file under `pending/`;
+3. flushes the file and validates its exact serialized contents;
+4. atomically renames it into `events/`;
+5. flushes the containing directory where supported;
+6. rebuilds the next ledger projection in memory;
+7. writes and flushes `ledger.json.tmp`;
+8. atomically replaces `ledger.json`;
+9. releases `control.lock`.
+
+Only files in `events/` are committed authority. Partial files under `pending/`
+are ignored by replay, reported by preflight, and quarantined or removed only by
+an explicit repair operation. `events.jsonl`, when present for compatibility or
+inspection, is a derived view rebuilt from committed event files.
+
+A missing, corrupt, or stale ledger is rebuilt from the longest contiguous
+sequence of valid event revisions. A duplicate revision, gap, invalid event, or
+event whose declared revision does not match its filename blocks mutation.
+Interrupted ledger temporary files are non-authoritative and never override a
+projection rebuilt from committed events.
+
+### 8.4 Required interruption matrix
+
+The lock and event protocols are not complete until deterministic tests cover
+process interruption:
+
+| Boundary | Required post-crash state |
+|---|---|
+| Before candidate owner write | No authoritative lock; private debris is diagnosable. |
+| After candidate flush, before lock rename | No authoritative lock; another writer can acquire. |
+| After lock rename, before guard release | Complete owned lock; guard is kernel-released on process exit. |
+| During release/repair validation | Existing lock remains unchanged. |
+| After quarantine rename, before cleanup | No authoritative lock; quarantine preserves evidence. |
+| During private event write | No committed event; pending debris is diagnosable. |
+| After event rename, before ledger replace | Event is committed; replay advances the ledger exactly once. |
+| During ledger temporary write | Committed events remain authoritative. |
+| After ledger replace, before lock release | Event and ledger revisions agree; later acquisition succeeds after owner-death repair. |
+
+Tests must also coordinate real concurrent processes for acquire/acquire,
+acquire/repair, release/acquire, repair/acquire, replacement preservation, and
+bounded timeout behavior. Sleep-only race tests are insufficient; barriers or
+fault hooks must place processes at the named protocol boundaries.
 
 ## 9. Worker Lifecycle
 
@@ -379,9 +484,11 @@ upgrade.
 
 ### Fault-injection tests
 
-- process interruption between event append and ledger replacement;
+- process interruption at every boundary in section 8.4;
 - malformed ledger and journal records;
-- stale and contended locks;
+- stale, contended, replaced, and quarantined locks;
+- concurrent acquire, release, and repair under the transition guard;
+- abandoned private lock candidates and event candidates;
 - lost acknowledgement and duplicate command delivery;
 - worker heartbeat expiry;
 - overlapping recurrent wakes.
@@ -409,3 +516,5 @@ and prove the recurrent wake terminated.
 - [ADR-015](../ADRs/ADR-015-intent-aware-wake-leases.md)
 - [ADR-016](../ADRs/ADR-016-trace-and-boundary-correlation.md)
 - [ADR-017](../ADRs/ADR-017-control-plane-compatibility.md)
+- [ADR-018](../ADRs/ADR-018-portable-lock-repair-protocol.md)
+- [ADR-019](../ADRs/ADR-019-immutable-event-publication.md)

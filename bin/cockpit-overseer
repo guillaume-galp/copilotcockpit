@@ -3,6 +3,8 @@
 cockpit-overseer — compact overseer helper for delta-only cockpit loops.
 
 Subcommands:
+  start     Atomically initialize and validate the explicit VP3 control store.
+  tick      Reconcile durable evidence and take at most one action, then exit.
   loop      Print only changed worker pane tails since the last snapshot.
   status    Print a one-shot compact snapshot without updating state.
   dispatch  Paste a mission brief into a worker pane from a reference file.
@@ -26,6 +28,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
+
+from cockpit_control import (
+    CONTROLLER_LIVE_REACHABLE,
+    CONTROLLER_LIVE_UNOBSERVED,
+    CONTROLLER_LIVE_UNREACHABLE,
+    CONTROLLER_PANE_UNOBSERVED,
+    ControllerDiagnostic,
+    ControlStoreError,
+    controller_tick,
+    initialize_control_store,
+    report_controller_tick,
+    resolve_control_root,
+    validate_control_authority,
+    validate_control_store,
+)
 
 STATE_DIR = Path.home() / ".config" / "cockpit-overseer"
 STATE_FILE = STATE_DIR / "state.json"
@@ -317,6 +334,63 @@ def cmd_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_start(args: argparse.Namespace) -> int:
+    """Initialize the durable control root before controller work begins."""
+
+    try:
+        result = initialize_control_store()
+    except ControlStoreError as exc:
+        print(f"cockpit-overseer: {exc}", file=sys.stderr)
+        return 1
+    action = "initialized" if result.created else "validated"
+    print(f"cockpit-overseer: control store {action}: {result.root} (source: {result.source})")
+    return 0
+
+
+def pane_diagnostics(session: str, windows: List[str]) -> List[ControllerDiagnostic]:
+    """Observe each worker pane as ADR-014 rule 7 and rule 8 evidence only.
+
+    Capturing a pane is the last thing a controller does and the least thing it
+    trusts.  The result is handed to the tick as a `ControllerDiagnostic`, which
+    the decision function has no parameter for, so what is read here can be
+    reported to an operator and can never advance authoritative state.
+    """
+
+    diagnostics: List[ControllerDiagnostic] = []
+    for window in windows:
+        live = CONTROLLER_LIVE_UNOBSERVED
+        pane = CONTROLLER_PANE_UNOBSERVED
+        if session:
+            try:
+                text = capture(session, window)
+            except (RuntimeError, OSError):
+                live = CONTROLLER_LIVE_UNREACHABLE
+            else:
+                live = CONTROLLER_LIVE_REACHABLE
+                pane = status_label(text)
+        diagnostics.append(ControllerDiagnostic.build(window, live, pane))
+    return diagnostics
+
+
+def cmd_tick(args: argparse.Namespace) -> int:
+    """Run one bounded controller tick and report exactly what it decided."""
+
+    session = args.session or current_session()
+    windows = args.window or list(DEFAULT_WINDOWS)
+    try:
+        return report_controller_tick(
+            controller_tick(
+                resolve_control_root().path,
+                diagnostics=pane_diagnostics(session, windows),
+                as_of=args.as_of,
+                dry_run=args.dry_run,
+            )
+        )
+    except ControlStoreError as exc:
+        print(f"cockpit-overseer: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     args.session = args.session or current_session()
     if not args.session:
@@ -411,6 +485,37 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("-n", "--lines", type=int, default=5)
     common.add_argument("--mode", choices=["normal", "minimal"], default="normal")
 
+    start = sub.add_parser("start", help="initialize the explicit versioned control store")
+    start.set_defaults(func=cmd_start)
+
+    tick = sub.add_parser(
+        "tick",
+        help=(
+            "reconcile durable evidence in ADR-014 precedence order, take at most one "
+            "state-changing action, persist it, and exit"
+        ),
+    )
+    tick.add_argument("-s", "--session", default=os.environ.get("TMUX_SESSION"))
+    tick.add_argument(
+        "-w",
+        "--window",
+        action="append",
+        default=[],
+        help="worker window to observe as diagnostic-only evidence; repeatable",
+    )
+    tick.add_argument(
+        "--as-of",
+        default=None,
+        metavar="UTC",
+        help="reconcile at this explicit UTC moment instead of now",
+    )
+    tick.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the action that would be taken without changing any state",
+    )
+    tick.set_defaults(func=cmd_tick)
+
     loop = sub.add_parser("loop", parents=[common], help="delta-only loop snapshot")
     loop.set_defaults(func=cmd_loop)
 
@@ -440,6 +545,24 @@ def main(argv: List[str]) -> int:
     if not getattr(args, "cmd", None):
         parser.print_help()
         return 0
+
+    # `start` is the only command permitted to create the control root.  Every
+    # other overseer command is fail-closed until it resolves and validates the
+    # same explicit root, so no command can fall back to its working directory
+    # or silently operate on incompatible control state.
+    #
+    # `tick` is deliberately absent from this pre-check. Architecture section 17
+    # repairs a corrupt ledger by replaying the journal, so refusing the tick for
+    # derived state it is about to rebuild would turn the one command that can
+    # perform that repair into the one command that cannot run. The tick
+    # validates committed authority itself, with the explicit repair a malformed
+    # committed event requires; every other command keeps failing closed here.
+    if args.cmd not in {"start", "tick"}:
+        try:
+            validate_control_store(resolve_control_root().path)
+        except ControlStoreError as exc:
+            print(f"cockpit-overseer: {exc}", file=sys.stderr)
+            return 1
 
     if args.cmd in {"loop", "status"} and not args.window:
         args.window = list(DEFAULT_WINDOWS)

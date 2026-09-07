@@ -2,4 +2,5 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+export COCKPIT_CONTROL_BIN="$SELF_DIR/cockpit-control"
 exec go run "$SELF_DIR/cockpit-protocol.go" "$@"

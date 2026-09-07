@@ -30,11 +30,24 @@ Examples:
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
+
+from cockpit_control import (
+    ControlStoreError,
+    publish_control_event,
+    resolve_control_root,
+    validate_control_store,
+    initialize_control_store,
+    CONTROL_METADATA_NAME,
+    CONTROL_SCHEMA_VERSION,
+)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 WAKE_DIR   = Path.home() / ".config" / "cockpit-wake"
@@ -42,8 +55,11 @@ STATE_FILE = WAKE_DIR / "awakenings.json"
 JOBS_DIR   = WAKE_DIR / "jobs"
 SELF       = str(Path(sys.argv[0]).resolve())
 
-for d in (WAKE_DIR, JOBS_DIR):
-    d.mkdir(parents=True, exist_ok=True)
+def ensure_wake_dirs():
+    """Create wake state directories only after command validation succeeds."""
+
+    for directory in (WAKE_DIR, JOBS_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
 
 # Resolve binaries at schedule-time so fire scripts work in minimal environments
 def _bin(name):
@@ -53,6 +69,13 @@ def _bin(name):
 TMUX_BIN   = _bin("tmux")
 AT_BIN     = _bin("at")
 PYTHON_BIN = _bin("python3")
+OVERSEER_BIN = _bin("cockpit-overseer")
+
+WAKE_LEASE_DIR = "wake-leases"
+WAKE_LEASE_RECOVERED_DIR = "recovered"
+WAKE_LEASE_RELEASED_DIR = "released"
+WAKE_LEASE_FILE = "mission-tick-lease.json"
+WAKE_LEASE_TTL_SECONDS = 120
 
 # ── State ──────────────────────────────────────────────────────────────────────
 def load_state():
@@ -62,6 +85,7 @@ def load_state():
         return json.load(f)
 
 def save_state(state):
+    ensure_wake_dirs()
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -144,51 +168,91 @@ def parse_once_timespec(once_str):
 INBOX_FILE = WAKE_DIR / "inbox.md"
 
 def write_inbox(id_, label, message, fired_at):
+    ensure_wake_dirs()
     entry = f"## [{fired_at}] {label or id_}\n\n{message}\n\n---\n\n"
     with open(INBOX_FILE, "a") as f:
         f.write(entry)
 
 # ── Fire script ────────────────────────────────────────────────────────────────
-def make_fire_script(id_, session, window, message, label=""):
-    """Write a standalone bash fire script. Used by both at and cron."""
+# ── Fire script ────────────────────────────────────────────────────────────────
+def make_fire_script(id_, session, window, message, control_root, label="", 
+                     mission="", queue_item="", owner="", intent="",
+                     stop_condition="", cadence="", blocker_threshold=0,
+                     lifecycle_state="pending"):
+    """Write a standalone bash fire script. Used by both at and cron.
+
+    The script writes the message to the inbox and invokes the controller
+    tick (cockpit-overseer tick) with wake metadata exported in the
+    environment. Legacy wakes missing owner or mission are blocked with
+    migration guidance.
+    """
+    ensure_wake_dirs()
     script  = JOBS_DIR / f"{id_}.sh"
     msg_file = JOBS_DIR / f"{id_}.msg"
-    msg_file.write_text(message)          # pre-written message file for load-buffer
-
+    msg_file.write_text(message)          # pre-written message file for controller
     notify_bin = subprocess.run(["which", "notify-send"], capture_output=True, text=True).stdout.strip()
-    notify_line = (
-        f'"{notify_bin}" "cockpit-wake ⏰" "{(label or id_)}" 2>/dev/null || true'
-        if notify_bin else "true  # notify-send not available"
-    )
-    escaped_label = (label or id_).replace('"', '\\"')
+    if notify_bin:
+        notify_line = (
+            f"{shlex.quote(notify_bin)} {shlex.quote('cockpit-wake ⏰')} {shlex.quote(label or id_)} 2>/dev/null || true"
+        )
+    else:
+        notify_line = "true  # notify-send not available"
 
-    content = f"""#!/usr/bin/env bash
+    try:
+        blocker_threshold_int = int(blocker_threshold)
+    except Exception:
+        blocker_threshold_int = 0
+
+
+    content = f'''#!/usr/bin/env bash
 # cockpit-wake fire script — {id_}
 # Auto-generated — do not edit manually.
 
-TMUX_BIN="{TMUX_BIN}"
-PYTHON="{PYTHON_BIN}"
-SELF="{SELF}"
-MSG_FILE="{msg_file}"
+TMUX_BIN={shlex.quote(TMUX_BIN)}
+PYTHON={shlex.quote(PYTHON_BIN)}
+OVERSEER={shlex.quote(OVERSEER_BIN)}
+SELF={shlex.quote(SELF)}
+MSG_FILE={shlex.quote(str(msg_file))}
+export COCKPIT_CONTROL_ROOT={shlex.quote(str(control_root))}
+# exported wake metadata for controller ticks
+export COCKPIT_WAKE_ID={shlex.quote(id_)}
+export COCKPIT_WAKE_LABEL={shlex.quote(label or id_)}
+export COCKPIT_WAKE_SESSION={shlex.quote(session)}
+export COCKPIT_WAKE_WINDOW={shlex.quote(window)}
+export COCKPIT_WAKE_MISSION={shlex.quote(mission)}
+export COCKPIT_WAKE_QUEUE_ITEM={shlex.quote(queue_item)}
+export COCKPIT_WAKE_OWNER={shlex.quote(owner)}
+export COCKPIT_WAKE_INTENT={shlex.quote(intent)}
+export COCKPIT_WAKE_STOP_CONDITION={shlex.quote(stop_condition)}
+export COCKPIT_WAKE_CADENCE={shlex.quote(cadence)}
+export COCKPIT_WAKE_BLOCKER_THRESHOLD={shlex.quote(str(blocker_threshold_int))}
+export COCKPIT_WAKE_LIFECYCLE_STATE={shlex.quote(lifecycle_state)}
+# message body available at $MSG_FILE
 FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
 
 # 1. Write to persistent inbox — readable by any future Copilot session
-"$PYTHON" "$SELF" _write-inbox "{id_}" "{escaped_label}" "$MSG_FILE" "$FIRED_AT"
+# 3. Block legacy/malformed wakes that lack mission or owner — fail closed before any side effects
+if [ -z "$COCKPIT_WAKE_OWNER" ] || [ -z "$COCKPIT_WAKE_MISSION" ]; then
+  echo "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'" >&2
+  exit 1
+fi
+
+"$PYTHON" "$SELF" _write-inbox {shlex.quote(id_)} {shlex.quote(label or id_)} "$MSG_FILE" "$FIRED_AT" || exit $?
 
 # 2. Desktop notification (if available)
 {notify_line}
 
-# 3. Deliver via load-buffer + paste-buffer (reliable for long messages in Copilot readline)
-#    Falls back gracefully if the pane is not a Copilot session
-"$TMUX_BIN" load-buffer "$MSG_FILE" 2>/dev/null && \\
-  "$TMUX_BIN" paste-buffer -t "{session}:{window}" 2>/dev/null || true
-sleep 1
-"$TMUX_BIN" send-keys -t "{session}:{window}" Enter 2>/dev/null || \\
-  "$TMUX_BIN" send-keys -t "{session}:{window}" C-m 2>/dev/null || true
 
-# 4. Mark awakening as fired in state
-"$PYTHON" "$SELF" _mark-fired {id_}
-"""
+# 3b. Deterministic guard: check persisted wake lifecycle/stop condition and skip if terminal
+"$PYTHON" "$SELF" _guard-fire {shlex.quote(id_)} || exit $?
+
+
+# 4. Acquire a bounded wake lease, then invoke one controller tick
+"$PYTHON" "$SELF" _tick-with-lease {shlex.quote(id_)} {shlex.quote(session)} {shlex.quote(window)} || exit $?
+
+# 5. Mark awakening as fired in state
+"$PYTHON" "$SELF" _mark-fired {shlex.quote(id_)}
+'''
     script.write_text(content)
     script.chmod(0o755)
     return str(script)
@@ -206,7 +270,298 @@ def cmd_write_inbox(args):
     msg = Path(args.msg_file).read_text() if Path(args.msg_file).exists() else args.msg_file
     write_inbox(args.id, args.label, msg, args.fired_at)
 
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_timestamp(moment: Optional[datetime] = None) -> str:
+    stamp = (moment or _utc_now()).isoformat(timespec="seconds")
+    return stamp.replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: str, label: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ControlStoreError(f"wake lease {label} must be an RFC3339 timestamp") from None
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_wake_event(root: Path, event_type: str, payload: Dict[str, Any]) -> None:
+    publish_control_event(
+        root,
+        event_type,
+        actor="cockpit-wake",
+        payload=payload,
+        command="cockpit-wake lease",
+    )
+
+
+def _load_lease_record(path: Path) -> Tuple[Dict[str, Any], os.stat_result]:
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        first_identity = path.lstat()
+        raw = path.read_text()
+        second_identity = path.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ControlStoreError(f"cannot read {label}: {exc}") from None
+    if (
+        first_identity.st_dev != second_identity.st_dev
+        or first_identity.st_ino != second_identity.st_ino
+    ):
+        raise ControlStoreError(f"{label} changed while being read; retry acquisition")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ControlStoreError(f"{label} is malformed JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise ControlStoreError(f"{label} must be a JSON object")
+    return data, second_identity
+
+
+def _lease_paths(root: Path) -> Tuple[Path, Path, Path, Path]:
+    lease_dir = root / WAKE_LEASE_DIR
+    recovered_dir = lease_dir / WAKE_LEASE_RECOVERED_DIR
+    released_dir = lease_dir / WAKE_LEASE_RELEASED_DIR
+    active = lease_dir / WAKE_LEASE_FILE
+    return lease_dir, recovered_dir, released_dir, active
+
+
+def _ensure_lease_dirs(root: Path) -> Tuple[Path, Path, Path, Path]:
+    lease_dir, recovered_dir, released_dir, active = _lease_paths(root)
+    for directory in (lease_dir, recovered_dir, released_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    return lease_dir, recovered_dir, released_dir, active
+
+
+def _write_owned_lease(path: Path, record: Dict[str, Any]) -> None:
+    descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _is_expired_lease(record: Dict[str, Any], now: datetime) -> bool:
+    expires = record.get("expires_at")
+    if not isinstance(expires, str):
+        raise ControlStoreError("wake lease expires_at must be a timestamp string")
+    return _parse_utc_timestamp(expires, "expires_at") <= now
+
+
+def _reconcile_expired_lease(
+    root: Path,
+    wake_id: str,
+    reason: str,
+    record: Dict[str, Any],
+    identity: os.stat_result,
+    recovered_dir: Path,
+    active_path: Path,
+) -> None:
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        current = active_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label} before reconciliation: {exc}") from None
+    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
+        return
+
+    recovered_path = recovered_dir / (
+        f"{active_path.stem}.recovered-{int(time.time())}-{uuid4().hex}.json"
+    )
+    try:
+        os.rename(str(active_path), str(recovered_path))
+        _fsync_directory(recovered_dir)
+        _fsync_directory(active_path.parent)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ControlStoreError(f"cannot reconcile expired {label}: {exc}") from None
+
+    _publish_wake_event(
+        root,
+        "wake-lease-recovered",
+        {
+            "wake_id": wake_id,
+            "reason": reason,
+            "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
+            "recovered_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_RECOVERED_DIR / recovered_path.name),
+            "prior_lease": record,
+        },
+    )
+
+
+def _acquire_tick_lease(
+    root: Path, wake_id: str, session: str, window: str
+) -> Tuple[str, Optional[os.stat_result]]:
+    now = _utc_now()
+    _, recovered_dir, _, active = _ensure_lease_dirs(root)
+    lease_id = str(uuid4())
+    record = {
+        "schema_version": 1,
+        "lease_id": lease_id,
+        "wake_id": wake_id,
+        "pid": os.getpid(),
+        "session": session,
+        "window": window,
+        "acquired_at": _utc_timestamp(now),
+        "expires_at": _utc_timestamp(now + timedelta(seconds=WAKE_LEASE_TTL_SECONDS)),
+    }
+
+    for _attempt in range(8):
+        try:
+            _write_owned_lease(active, record)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ControlStoreError(f"cannot create {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}: {exc}") from None
+        else:
+            _fsync_directory(active.parent)
+            return lease_id, active.lstat()
+
+        try:
+            existing, identity = _load_lease_record(active)
+            expired = _is_expired_lease(existing, _utc_now())
+        except FileNotFoundError:
+            continue
+        except ControlStoreError as exc:
+            try:
+                identity = active.lstat()
+            except FileNotFoundError:
+                continue
+            _reconcile_expired_lease(
+                root,
+                wake_id,
+                f"invalid-lease:{exc}",
+                {"error": str(exc)},
+                identity,
+                recovered_dir,
+                active,
+            )
+            continue
+
+        if not expired:
+            _publish_wake_event(
+                root,
+                "wake-duplicate-skipped",
+                {
+                    "wake_id": wake_id,
+                    "lease_path": str(Path(WAKE_LEASE_DIR) / WAKE_LEASE_FILE),
+                    "held_by": existing,
+                },
+            )
+            return "", None
+
+        _reconcile_expired_lease(
+            root,
+            wake_id,
+            "expired",
+            existing,
+            identity,
+            recovered_dir,
+            active,
+        )
+
+    raise ControlStoreError(
+        f"unable to acquire {WAKE_LEASE_DIR}/{WAKE_LEASE_FILE} after bounded retries"
+    )
+
+
+def _release_tick_lease(root: Path, lease_id: str, identity: os.stat_result) -> None:
+    _, _, released_dir, active = _ensure_lease_dirs(root)
+    label = f"{WAKE_LEASE_DIR}/{WAKE_LEASE_FILE}"
+    try:
+        current = active.lstat()
+    except FileNotFoundError:
+        raise ControlStoreError(f"cannot release {label}; lease disappeared") from None
+    except OSError as exc:
+        raise ControlStoreError(f"cannot inspect {label} during release: {exc}") from None
+    if current.st_dev != identity.st_dev or current.st_ino != identity.st_ino:
+        raise ControlStoreError(f"cannot release {label}; lease owner changed")
+
+    record, _ = _load_lease_record(active)
+    if record.get("lease_id") != lease_id:
+        raise ControlStoreError(f"cannot release {label}; lease id mismatch")
+
+    released = released_dir / f"{active.stem}.released-{int(time.time())}-{uuid4().hex}.json"
+    try:
+        os.rename(str(active), str(released))
+        _fsync_directory(released_dir)
+        _fsync_directory(active.parent)
+    except OSError as exc:
+        raise ControlStoreError(f"cannot release {label}: {exc}") from None
+
+
+def cmd_tick_with_lease(args):
+    state = load_state()
+    wake = get_awakening(state, args.id)
+    if not wake:
+        print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    root = args.control_root
+    lease_id, lease_identity = _acquire_tick_lease(root, args.id, args.session, args.window)
+    if not lease_id:
+        print(f"skipped: wake {args.id} duplicate lease holder", file=sys.stderr)
+        sys.exit(0)
+
+    try:
+        subprocess.run(
+            [OVERSEER_BIN, "tick", "-s", args.session, "-w", args.window],
+            check=False,
+        )
+    finally:
+        _release_tick_lease(root, lease_id, lease_identity)
+    sys.exit(0)
+
 # ── inbox ──────────────────────────────────────────────────────────────────────
+def cmd_guard_fire(args):
+    """Guard a generated job invocation by consulting the persisted awakenings.
+
+    Exit 0 only when the wake is valid and should run. Exit non-zero to
+    abort the generated job; callers should treat any non-zero as a hard
+    stop that prevents the controller tick from running.
+    """
+    state = load_state()
+    a = get_awakening(state, args.id)
+    if not a:
+        print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fail closed on legacy/malformed wakes that lack owner or mission
+    if not a.get("owner") or not a.get("mission"):
+        print("blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'", file=sys.stderr)
+        sys.exit(1)
+
+    # Terminal statuses or lifecycle states that must prevent future runs
+    status = a.get("status", "pending")
+    lifecycle = a.get("lifecycle_state", "")
+    terminal_lifecycles = {"completed", "cancelled", "superseded", "terminal", "human-suspended"}
+    if status in ("cancelled", "fired") or lifecycle in terminal_lifecycles:
+        print(f"skipped: wake {args.id} has lifecycle/status {lifecycle}/{status}", file=sys.stderr)
+        sys.exit(1)
+
+    # Fulfilled stop condition represented as a persisted flag
+    if a.get("stop_condition_fulfilled"):
+        print(f"skipped: wake {args.id} stop condition already fulfilled", file=sys.stderr)
+        sys.exit(1)
+
+    # Otherwise allow the job to proceed
+    sys.exit(0)
+
 def cmd_inbox(args):
     if not INBOX_FILE.exists() or not INBOX_FILE.read_text().strip():
         print("📭 Inbox is empty — no pending awakenings.")
@@ -225,7 +580,23 @@ def cmd_schedule(args):
     id_   = gen_id()
     once  = args.once is not None
 
-    job_script = make_fire_script(id_, args.s, args.w, args.m, label=args.label or "")
+    job_script = make_fire_script(
+        id_,
+        args.s,
+        args.w,
+        args.m,
+        args.control_root,
+        label=args.label or "",
+        mission=args.mission or "",
+        queue_item=args.queue_item or "",
+        owner=args.owner or "",
+        intent=args.intent or "",
+        stop_condition=args.stop_condition or "",
+        cadence=(args.cron if args.cron else (args.once if args.once else "")),
+        blocker_threshold=(args.blocker_threshold if args.blocker_threshold is not None else 0),
+        lifecycle_state=(args.lifecycle or "pending"),
+    )
+
 
     if once:
         at_timespec, iso_dt = parse_once_timespec(args.once)
@@ -253,6 +624,15 @@ def cmd_schedule(args):
         "status":       "pending",
         "created_at":   datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "fired_at":     None,
+        # VP3 wake metadata (AC1)
+        "mission":      args.mission or "",
+        "queue_item":   args.queue_item or "",
+        "owner":        args.owner or "",
+        "intent":       args.intent or "",
+        "stop_condition": args.stop_condition or "",
+        "cadence":      cron_expr if not once else iso_dt,
+        "blocker_threshold": args.blocker_threshold if args.blocker_threshold is not None else 0,
+        "lifecycle_state": args.lifecycle or "pending",
     }
     state["awakenings"].append(entry)
     save_state(state)
@@ -341,6 +721,51 @@ def cmd_clean(args):
     print(f"🧹 Removed {before - len(state['awakenings'])} entries (fired/cancelled).")
 
 # ── main ───────────────────────────────────────────────────────────────────────
+def cmd_migrate(args):
+    """Migrate an existing environment into a VP3 control root.
+
+    This operation is intentionally additive: it creates a new control root
+    when absent, backs up readable but invalid metadata, refuses to mutate
+    when an unsupported future schema is present, and is idempotent.
+    """
+    root = args.control_root
+    try:
+        validate_control_store(root)
+    except ControlStoreError as exc:
+        text = str(exc)
+        if "future schema_version" in text:
+            print(f"blocked: {text}")
+            sys.exit(1)
+        meta_path = root / CONTROL_METADATA_NAME
+        if meta_path.exists():
+            # backup existing metadata
+            stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+            bak = root / f"{CONTROL_METADATA_NAME}.bak-{stamp}"
+            try:
+                meta_path.replace(bak)
+                print(f"backed-up: {meta_path} -> {bak}")
+            except OSError:
+                print(f"cannot backup corrupted {meta_path}; aborting")
+                sys.exit(1)
+            print("cockpit-wake: metadata backed up; please run 'cockpit-control repair-store' to continue")
+            sys.exit(1)
+        # If root does not exist, initialize it atomically.
+        if not root.exists():
+            try:
+                initialize_control_store()
+            except Exception as exc_init:
+                print(f"cockpit-wake: initialization failed: {exc_init}")
+                sys.exit(1)
+            print(f"initialized control root: {root}")
+            return
+        # Otherwise refuse to touch an existing populated root with missing metadata.
+        print(f"blocked: {root} exists but {CONTROL_METADATA_NAME} is missing or unreadable")
+        sys.exit(1)
+    else:
+        print(f"control root already current: {root}")
+        return
+
+
 def main():
     p = argparse.ArgumentParser(
         description="cockpit-wake: schedule messages to tmux cockpit panes",
@@ -360,6 +785,13 @@ def main():
     ps.add_argument("-w", required=True, metavar="WINDOW",  help="tmux window name")
     ps.add_argument("-m", required=True, metavar="MESSAGE", help="Message to send to the pane")
     ps.add_argument("--label", metavar="TEXT", help="Human-readable label")
+    ps.add_argument("--mission", help="mission id")
+    ps.add_argument("--queue-item", help="queue item id")
+    ps.add_argument("--owner", help="owner identity")
+    ps.add_argument("--intent", help="brief intent for the wake")
+    ps.add_argument("--stop-condition", help="stop condition expression")
+    ps.add_argument("--blocker-threshold", type=int, help="blocker threshold")
+    ps.add_argument("--lifecycle", help="lifecycle state")
 
     sub.add_parser("list",   help="List all awakenings")
     pc = sub.add_parser("cancel", help="Cancel a pending awakening")
@@ -370,11 +802,17 @@ def main():
     sub.add_parser("clean",  help="Remove fired/cancelled entries")
     sub.add_parser("inbox",       help="Show unread inbox messages from fired awakenings")
     sub.add_parser("inbox-clear", help="Clear the inbox")
+    sub.add_parser("migrate", help="migrate an existing environment into a VP3 control root")
 
     # Internal — called by fire scripts
     pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
     pw = sub.add_parser("_write-inbox")
     pw.add_argument("id"); pw.add_argument("label"); pw.add_argument("msg_file"); pw.add_argument("fired_at")
+    pg = sub.add_parser("_guard-fire"); pg.add_argument("id")
+    pt = sub.add_parser("_tick-with-lease")
+    pt.add_argument("id")
+    pt.add_argument("session")
+    pt.add_argument("window")
 
     args = p.parse_args()
     dispatch = {
@@ -388,10 +826,36 @@ def main():
         "inbox-clear":  cmd_inbox_clear,
         "_mark-fired":  cmd_mark_fired,
         "_write-inbox": cmd_write_inbox,
+        "_guard-fire":  cmd_guard_fire,
+        "_tick-with-lease": cmd_tick_with_lease,
+        "migrate":      cmd_migrate,
     }
     if args.command not in dispatch:
         p.print_help()
         sys.exit(1)
+    # Commands that require a validated control root before running.
+    validated = {
+        "schedule",
+        "cancel",
+        "fire",
+        "clean",
+        "inbox-clear",
+        "_mark-fired",
+        "_write-inbox",
+        "_guard-fire",
+        "_tick-with-lease",
+    }
+    if args.command in validated:
+        try:
+            resolved_root = resolve_control_root()
+            validate_control_store(resolved_root.path)
+        except ControlStoreError as exc:
+            p.exit(1, f"cockpit-wake: {exc}\n")
+        args.control_root = resolved_root.path
+    elif args.command == "migrate":
+        # Migrate only needs the resolved root; it may create it.
+        resolved_root = resolve_control_root()
+        args.control_root = resolved_root.path
     dispatch[args.command](args)
 
 if __name__ == "__main__":

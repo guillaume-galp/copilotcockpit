@@ -211,6 +211,23 @@ for rel in \
 	fi
 done
 
+# --- Check 6: launchers export one explicit control root to tmux -------------
+printf '\n== Check 6: cockpit launchers export COCKPIT_CONTROL_ROOT ==\n'
+for sh in tmux-cockpit.sh tmux-cockpit-local.sh; do
+	f="$TEMPLATE_ROOT/$sh"
+	if [[ ! -f "$f" ]]; then
+		fail "$sh not found for control-root check"
+		continue
+	fi
+	if ! grep -Fq 'COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"' "$f"; then
+		fail "$sh does not define the explicit control root"
+	elif ! grep -Fq 'tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"' "$f"; then
+		fail "$sh does not export the control root to tmux"
+	else
+		ok "$sh exports the explicit control root to tmux"
+	fi
+done
+
 # --- Verdict -----------------------------------------------------------------
 printf '\n'
 if [[ "$fails" -ne 0 ]]; then

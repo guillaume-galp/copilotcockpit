@@ -36,6 +36,7 @@ setup() {
 	echo "$output" | grep -q "cockpit-overseer"
 	echo "$output" | grep -q "cockpit-trace"
 	echo "$output" | grep -q "cockpit-queue"
+	echo "$output" | grep -q "cockpit-control"
 
 	# doctor must never create anything under HOME.
 	[ ! -e "$HOME/.copilot" ]

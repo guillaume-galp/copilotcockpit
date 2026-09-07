@@ -11,6 +11,11 @@ description: "@@APP_NAME@@ Playwright E2E cockpit: project topology overlay — 
 > Use `cockpit-overseer loop` for compact status checks instead of re-capturing
 > full panes in a loop.
 
+> **VP3 control store:** Before controller work, use the launcher-exported
+> absolute `COCKPIT_CONTROL_ROOT` and run `cockpit-overseer start`. The control
+> root may only fall back to the active tmux session when absent from the shell;
+> never derive it from the current directory.
+
 > **If you are in `worker-test`** — load the `e2e-operator` skill instead.
 
 ## Cockpit communication protocol

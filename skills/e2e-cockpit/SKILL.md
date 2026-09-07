@@ -256,12 +256,109 @@ current directory, because a machine may host multiple independent FIFO queues:
 
 ```bash
 export COCKPIT_QUEUE_ROOT="<repo-or-cockpit>/docs/queue"
+export COCKPIT_CONTROL_ROOT="<absolute-repo-or-cockpit>/.cockpit/control"
 tmux set-environment -t "<session>" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
+tmux set-environment -t "<session>" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"
 ```
 
 Generated cockpit launchers should set this tmux session environment when the
 session starts. `cockpit-queue` may read `COCKPIT_QUEUE_ROOT` from the shell or
 from the current tmux session environment, but it must never infer it from `cwd`.
+Before VP3 controller work, run `cockpit-overseer start`; it requires an absolute
+`COCKPIT_CONTROL_ROOT` from the shell, or (only when absent from the shell) the
+active tmux session. Never derive the control root from `cwd`.
+
+### Controller tick
+
+`cockpit-overseer tick` is the deterministic reconciler. One tick validates the
+control and queue roots, replays the committed journal, checks the derived
+ledger against that replay, reads queue and worker state, applies the ADR-014
+precedence order, takes **at most one** state-changing action, persists it, and
+exits.
+
+```bash
+cockpit-overseer tick --window worker-dev --window worker-test --window worker-fix
+cockpit-overseer tick --dry-run          # report the decision, change nothing
+```
+
+Read the `precedence <n> <source> <role> ...` lines it prints: they are the
+ADR-014 ladder it actually applied, in order. Rules 7 (`live-status`) and 8
+(`pane-text`) always carry `advances-state no` — pane text is diagnostic only
+and can never dispatch, complete, or advance a mission.
+
+Exit codes: `0` when the tick dispatched, recorded an observation, redelivered
+a command that already stands, or found nothing new. It exits `1` in exactly two
+cases, both of which print a named diagnostic on stderr and never a traceback:
+
+* the decision is **blocked** — the tick refuses to guess, names the exact
+  repair, and records one conflict observation;
+* the dispatch command was committed but **did not claim the worker's mission
+  slot** — the fold, not the tick, decides who holds a slot, so the tick reports
+  what the fold recorded and creates no second mission.
+
+Ticking again over the same evidence persists nothing, so a recurrent wake
+terminates instead of re-investigating.
+
+A concurrent writer is ordinary operation, not an incident: while another
+process is between committing its event and replacing `ledger.json`, a reader
+legitimately sees a projection one revision behind. The tick settles that
+reading before deciding, then repairs any derived state the committed journal
+can rebuild — a missing, stale, unreadable, or disagreeing `ledger.json`, or a
+stale `events.jsonl` view — by replaying the journal. That repair commits no
+event, so it is never the tick's one action. Read the `ledger repair <outcome>
+from <classification>` line to see what it did.
+
+Two things are never repaired automatically:
+
+* a `ledger.json` that records revisions `events/` no longer holds — replay
+  would rewind derived state and hide the disappearance of committed authority;
+* malformed authoritative journal data under `events/`.
+
+Both stop the tick before it derives one fact, commit nothing, change not one
+byte, and print the exact repair. For a malformed committed event that repair is
+always `cockpit-control preflight` to name the file, then restoring or
+correcting that one file yourself: cockpit-control never rewrites, reorders, or
+removes committed authority.
+
+### Bounded recovery and conflicts
+
+An expired heartbeat is an **observation**, never a mission state. A stale
+worker is never marked `failed` by timeout; the tick walks a fixed, finite
+ladder instead, one rung per tick and each rung at most once per staleness
+episode:
+
+```text
+nudge -> troubleshoot -> cancel -> replace -> escalate
+```
+
+Each command rung declares the moment a response is due by, and the ladder does
+not advance until that declared window has elapsed — so a worker is never
+cancelled for missing a window it was never given. An episode ends when the
+controller looks and records that the mission was fresh; the next staleness is
+then a new episode and the ladder starts again at `nudge`. That observation
+carries the freshness the worker itself declared, so a worker that goes quiet
+and then answers is always a new situation and is always recorded: a responsive
+worker that blips repeatedly is nudged each time and is never walked on to
+cancel or replace. Lifecycle evidence that is
+already expired by the time the controller looks does **not** end an episode,
+however much of it arrives: a worker that declares a two-minute freshness
+window but reports every ten minutes is walked to the end of the ladder rather
+than nudged forever. When the queue item a mission implements leaves the active
+set, the ladder is only `cancel -> escalate`: the controller asks the worker to
+stop and **never** reopens the queue item. `escalate` blocks, names the decision
+it needs from you, and stops for good.
+
+When two active missions claim one worker, the mission that claimed the slot
+first *in committed revision order* is kept — never the one with the newest or
+oldest timestamp. Dispatch stops, the conflict is escalated once, and the
+refused claim is retained as durable evidence. Dispatch resumes when the
+**duplicate** mission the refusal names ends: request that with
+`cockpit-control cancel-mission` and have its worker record the lifecycle
+events the printed repair names. Those are computed from the transition table,
+not assumed — `cancelled` has no edge from `accepted`, so a duplicate a worker
+has only accepted is ended by recording `running` and then `cancelled`. Never
+end the retained mission — that is the mission the control plane is keeping,
+and the block clears without touching it.
 
 ### Queue intake
 
