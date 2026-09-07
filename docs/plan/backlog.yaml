@@ -569,7 +569,7 @@ themes:
       - id: TH4.E3
         title: "Runtime orchestration domain extraction"
         slug: runtime-orchestration-domain-extraction
-        status: in-progress
+        status: done
         depends_on: [TH4.E2]
         stories:
           - id: TH4.E3.US1

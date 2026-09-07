@@ -451,3 +451,16 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 **Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_root_schema.py`, `bin/cockpit_control_locks.py`, `bin/cockpit_control_journal.py`, `bin/cockpit_control_projection.py`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, control-store seam tests, managed-distribution tests.
 
 **Evidence:** Developer epic integration and final full `./run-tests.sh all` exited 0 with unit `1..233`; integration smoke `1..8`; epic re-review APPROVED after exact managed module smoke coverage was corrected. Residual risk: duplicated facade code remains temporarily for rollback/compatibility until later cleanup.
+
+## Epic TH4.E3 — Runtime orchestration domain extraction
+
+**Stories Completed:** TH4.E3.US1, TH4.E3.US2, TH4.E3.US3, TH4.E3.US4, TH4.E3.US5 (reviewer-approved).
+
+**Key Changes:**
+- Extracted worker lifecycle/freshness, command envelopes/acknowledgements, mission-control dialogs, controller reconciliation, and wake scheduling into managed facade-backed modules.
+- Preserved command, mission, controller, wake, and lifecycle schemas/output/exit/dry-run contracts while keeping `cockpit_control`, `cockpit-wake`, and overseer entry points stable.
+- Extended seam unittest, wake/controller/recovery, managed-distribution, and integration smoke coverage; added ignore rules for generated Python caches.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_lifecycle.py`, `bin/cockpit_control_commands.py`, `bin/cockpit_control_mission_control.py`, `bin/cockpit_control_controller.py`, `bin/cockpit_control_wake.py`, `bin/cockpit-wake`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, seam/wake/controller/distribution tests.
+
+**Evidence:** Developer epic integration `./run-tests.sh all` passed with unit `1..236`, template, skills, integration `1..8`, and codex checks; epic quality review APPROVED. Residual risk: real host tmux/cron integration remains covered by existing local smoke contracts, not external-system campaigns.

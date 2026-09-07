@@ -453,3 +453,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T11:18:00+01:00 — TH4.E3.US5 DONE: wake intent/lease/scheduling guard seam extracted with facade and `cockpit-wake` compatibility plus managed distribution coverage; reviewer APPROVED after wake/controller/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T11:40:00+01:00 — TH4.E3 EPIC DONE: lifecycle, command, mission-control, controller, and wake seams done; developer integration `./run-tests.sh all` passed (unit 1..236 plus template/skills/integration/codex) and epic review APPROVED. Next action: start TH4.E4 CLI/conformance cleanup. — copilotcockpit
+
