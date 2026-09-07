@@ -10,6 +10,7 @@
     tests.unit.test_control_projection_seam \
     tests.unit.test_control_lifecycle_seam \
     tests.unit.test_control_mission_control_seam \
-    tests.unit.test_control_controller_seam
+    tests.unit.test_control_controller_seam \
+    tests.unit.test_control_wake_seam
   [ "$status" -eq 0 ]
 }

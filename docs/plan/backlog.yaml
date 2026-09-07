@@ -602,7 +602,7 @@ themes:
             depends_on: [TH4.E3.US3]
           - id: TH4.E3.US5
             title: "Wake lease and scheduling extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US5-wake-leases-scheduling.md

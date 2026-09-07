@@ -54,6 +54,7 @@ setup() {
 	echo "$output" | grep -q "cockpit_control_commands.py"
 	echo "$output" | grep -q "cockpit_control_mission_control.py"
 	echo "$output" | grep -q "cockpit_control_controller.py"
+	echo "$output" | grep -q "cockpit_control_wake.py"
 
 	# Dry-run is side-effect-free: nothing written under the fake HOME.
 	[ ! -e "$HOME/.copilot" ]
@@ -99,6 +100,7 @@ setup() {
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_commands.py"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_mission_control.py"
 	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_controller.py"
+	echo "$output" | grep -q "$HOME/.local/bin/cockpit_control_wake.py"
 	[ ! -e "$HOME/.copilot" ]
 	[ ! -e "$HOME/.agents" ]
 	[ ! -e "$HOME/.local" ]

@@ -449,3 +449,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T10:20:00+01:00 — TH4.E3.US4 DONE: controller evidence/reconciliation/one-action/recovery seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after controller/recovery/escalation/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T10:36:00+01:00 — TH4.E3.US5 START: dependency TH4.E3.US4 done; scope extracts wake intent/lease/scheduling guard integration behind the facade while preserving duplicate-skip and stop-condition contracts. — copilotcockpit
+
+- 2026-09-07T11:18:00+01:00 — TH4.E3.US5 DONE: wake intent/lease/scheduling guard seam extracted with facade and `cockpit-wake` compatibility plus managed distribution coverage; reviewer APPROVED after wake/controller/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

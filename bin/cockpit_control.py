@@ -42,6 +42,7 @@ import cockpit_control_lifecycle as control_lifecycle
 import cockpit_control_commands as control_commands
 import cockpit_control_mission_control as control_mission_control
 import cockpit_control_controller as control_controller
+import cockpit_control_wake as control_wake
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -11834,6 +11835,25 @@ worker_lifecycle_cancellation_route = control_controller.worker_lifecycle_cancel
 controller_duplicate_repair_route = control_controller.controller_duplicate_repair_route
 controller_blocking_repair = control_controller.controller_blocking_repair
 report_controller_tick = control_controller.report_controller_tick
+
+# --- managed wake lease/scheduling seam --------------------------------------
+
+control_wake.bind_facade(globals())
+control_wake.ControlStoreError = ControlStoreError
+
+WakeIntent = control_wake.WakeIntent
+WAKE_LEASE_DIR = control_wake.WAKE_LEASE_DIR
+WAKE_LEASE_RECOVERED_DIR = control_wake.WAKE_LEASE_RECOVERED_DIR
+WAKE_LEASE_RELEASED_DIR = control_wake.WAKE_LEASE_RELEASED_DIR
+WAKE_LEASE_FILE = control_wake.WAKE_LEASE_FILE
+WAKE_LEASE_TTL_SECONDS = control_wake.WAKE_LEASE_TTL_SECONDS
+WAKE_CRON_TAG = control_wake.CRON_TAG
+build_wake_intent = control_wake.build_wake_intent
+wake_intent_to_dict = control_wake.wake_intent_to_dict
+guard_wake_fire = control_wake.guard_wake_fire
+acquire_tick_lease = control_wake.acquire_tick_lease
+release_tick_lease = control_wake.release_tick_lease
+run_wake_controller_tick = control_wake.run_wake_controller_tick
 
 
 def _parsed_command_payload(value: str) -> Dict[str, Any]:

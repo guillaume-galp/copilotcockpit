@@ -245,6 +245,8 @@ main() {
 	_row "cockpit_control_mission_control.py" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_controller.py" "$home_bin/cockpit_control_controller.py")"
 	_row "cockpit_control_controller.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_wake.py" "$home_bin/cockpit_control_wake.py")"
+	_row "cockpit_control_wake.py" "$state"
 
 	# --- control-store preflight (AC2) ---------------------------------------
 	_section "control-store"

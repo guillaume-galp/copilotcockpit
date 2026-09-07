@@ -22,6 +22,7 @@
 #   * bin/cockpit_control_commands.py -> ~/.local/bin/cockpit_control_commands.py
 #   * bin/cockpit_control_mission_control.py -> ~/.local/bin/cockpit_control_mission_control.py
 #   * bin/cockpit_control_controller.py -> ~/.local/bin/cockpit_control_controller.py
+#   * bin/cockpit_control_wake.py -> ~/.local/bin/cockpit_control_wake.py
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -80,6 +81,7 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit_control_commands.py
   ~/.local/bin/cockpit_control_mission_control.py
   ~/.local/bin/cockpit_control_controller.py
+  ~/.local/bin/cockpit_control_wake.py
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -378,6 +380,7 @@ main() {
 	local ccc_src="$CC_ROOT/bin/cockpit_control_commands.py"
 	local ccm_src="$CC_ROOT/bin/cockpit_control_mission_control.py"
 	local ccco_src="$CC_ROOT/bin/cockpit_control_controller.py"
+	local ccw_src="$CC_ROOT/bin/cockpit_control_wake.py"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
@@ -396,6 +399,7 @@ main() {
 	local ccc_dst="$home_bin/cockpit_control_commands.py"
 	local ccm_dst="$home_bin/cockpit_control_mission_control.py"
 	local ccco_dst="$home_bin/cockpit_control_controller.py"
+	local ccw_dst="$home_bin/cockpit_control_wake.py"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -472,6 +476,10 @@ main() {
 		log_error "required source missing: $ccco_src"
 		missing=1
 	fi
+	if [[ ! -f "$ccw_src" ]]; then
+		log_error "required source missing: $ccw_src"
+		missing=1
+	fi
 	if [[ "$missing" -ne 0 ]]; then
 		log_error "aborting: required source(s) missing — nothing was installed"
 		return 1
@@ -529,6 +537,7 @@ main() {
 	cc_place "$ccc_src" "$ccc_dst" || return 1
 	cc_place "$ccm_src" "$ccm_dst" || return 1
 	cc_place "$ccco_src" "$ccco_dst" || return 1
+	cc_place "$ccw_src" "$ccw_dst" || return 1
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
 	case ":$PATH:" in

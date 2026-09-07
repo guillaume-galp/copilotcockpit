@@ -12,3 +12,4 @@ cockpit_control_lifecycle
 cockpit_control_commands
 cockpit_control_mission_control
 cockpit_control_controller
+cockpit_control_wake
