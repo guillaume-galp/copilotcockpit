@@ -1,5 +1,7 @@
 # Session Log — copilotcockpit
 
+- 2026-09-07T01:39:46+01:00 — VP4/TH4 PLANNED: post-release human direction for progressive `bin/cockpit_control.py` modularity was scheduled as a new todo/unlocked VP4/TH4 because TH3 is done and locked; plan adopts the control-plane ontology, ADR-020 compatibility facade, bounded-context extraction order, facade/import/CLI/schema preservation, proportional focused tests, and final dependency/vocabulary conformance. — copilotcockpit
+
 - 2026-09-07T01:25:35+01:00 — TH3 THEME DONE+LOCKED: final reviewer APPROVED and product-owner revalidated VP3 success criteria under the reduced envelope; SC1–7 and SC10–11 covered, SC8 cross-model parity and SC9 AIC/token measurement recorded as non-blocking operational follow-ups. User pre-authorized checkpoint acceptance/lock, so TH3 is marked done and locked. — copilotcockpit
 
 - 2026-09-07T01:22:46+01:00 — TH3 THEME GATE ARTIFACTS: developer full-test/readiness gate passed (`./run-tests.sh all` unit `1..228`, doctor, global/codex-global/e2e dry-runs, Python compile, Go build, release prerequisites); release notes created at `docs/plan/RELEASE-TH3.md` and TH3 issue templates archived under `.github/ISSUE_TEMPLATE/archive/`. — copilotcockpit

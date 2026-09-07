@@ -44,6 +44,16 @@ Use `cockpit-protocol` for all pane communication and pane observability.
 Do not bypass it with direct tmux commands, including read-only status or
 discovery commands.
 
+### Control-plane context packet
+
+For VP3+ control-plane work, keep vocabulary and ownership aligned with the
+[Cockpit Control-Plane Ontology](../../docs/architecture/cockpit-control-plane-ontology.md).
+Use its canonical terms consistently across code, CLI output, ADRs, stories,
+skills, and docs. New synonyms for queue item, mission, command,
+acknowledgement, lifecycle event, wake lease, trace/evidence, authority, derived
+state, and one-action tick are review defects unless documented as compatibility
+aliases.
+
 When a tmux cockpit is running, treat it as managed state. Do not improvise
 `tmux ls`, `tmux list-windows`, `tmux list-panes`, `tmux capture-pane`,
 `tmux load-buffer`, `tmux paste-buffer`, or `tmux send-keys` unless the user
