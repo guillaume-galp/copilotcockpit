@@ -403,3 +403,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T03:30:00+01:00 — TH4.E1.US2 DONE: typed pre-extraction seam helper and dependency/cycle checks approved after stdlib unittest gate wiring; evidence: unittest 4/4 and py-tests.bats 1/1. Residual risk: helper remains source-tree only until a later story adds installer management before runtime use. — copilotcockpit
 
+- 2026-09-07T03:46:00+01:00 — TH4.E1 EPIC DONE: both foundation stories done; full `./run-tests.sh all` exit 0 (unit 1..233 plus template/skills/integration/codex), changelog appended, and epic quality review APPROVED. Next action: start TH4.E2 control-store extraction. — copilotcockpit
+

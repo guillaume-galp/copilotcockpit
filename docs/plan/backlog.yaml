@@ -513,7 +513,7 @@ themes:
       - id: TH4.E1
         title: "Foundation facade and typed contracts"
         slug: foundation-facade-contracts
-        status: in-progress
+        status: done
         depends_on: []
         stories:
           - id: TH4.E1.US1

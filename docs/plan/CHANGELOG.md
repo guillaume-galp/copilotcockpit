@@ -425,3 +425,16 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 - `docs/plan/session-log.md`
 
 **Epic ceremony:** Full repository gate `./run-tests.sh all` completed with exit 0 after the final quoting fix (unit category `1..223`, template, skills, integration `1..8`, and codex categories all passed). Final proportionate epic re-review APPROVED. Residual risk: cron path quoting remains documented as a future robustness cleanup for unusual wake-directory paths; generated job metadata and notification injection vectors are covered.
+
+## Epic TH4.E1 — Foundation facade and typed contracts
+
+**Stories Completed:** TH4.E1.US1, TH4.E1.US2 (reviewer-approved).
+
+**Key Changes:**
+- Pinned `cockpit_control` as the compatibility facade with focused import and wrapper characterization tests.
+- Documented the stdlib-only source/installed module layout, exact managed runtime module declaration, rollback rule, and ADR-020 pre-extraction gate.
+- Added source-tree typed seam contracts plus dependency-direction and import-cycle checks wired into the unit gate via stdlib `unittest` under bats.
+
+**Files Modified:** `MANAGED_RUNTIME_MODULES`, `docs/architecture/facade-compatibility.md`, `bin/cockpit_control_seams.py`, `tests/unit/compatibility-facade2.bats`, `tests/unit/py-tests.bats`, `tests/unit/test_typed_contracts.py`, `tests/unit/cmd-wake.bats`.
+
+**Evidence:** Full `./run-tests.sh all` exited 0 with unit `1..233`; epic quality review APPROVED. Residual risk: `cockpit_control_seams` remains source-tree-only until a later story adds installer management before runtime use.
