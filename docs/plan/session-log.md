@@ -469,3 +469,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T14:30:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
 
+- 2026-09-07T15:25:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
+
