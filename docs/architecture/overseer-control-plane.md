@@ -3,6 +3,7 @@
 > Status: Accepted
 > Date: 2026-09-03
 > Implements: [VP3](../vision_of_product/VP3-overseer-orchestration-resilience/VP3.md)
+> Context packet: [Cockpit Control-Plane Ontology](./cockpit-control-plane-ontology.md)
 
 ## 1. Purpose
 
@@ -518,3 +519,25 @@ and prove the recurrent wake terminated.
 - [ADR-017](../ADRs/ADR-017-control-plane-compatibility.md)
 - [ADR-018](../ADRs/ADR-018-portable-lock-repair-protocol.md)
 - [ADR-019](../ADRs/ADR-019-immutable-event-publication.md)
+- [ADR-020](../ADRs/ADR-020-incremental-control-plane-module-extraction.md)
+
+## 20. Post-TH3 Modularity Evolution
+
+TH3 accepted and locked the control-plane mechanisms above. Post-TH3 work may
+improve maintainability by extracting the current implementation into bounded
+modules only when behavior, schemas, CLI verbs, event formats, and import
+compatibility are preserved.
+
+The concise vocabulary and ownership packet for agents and humans is the
+[Cockpit Control-Plane Ontology](./cockpit-control-plane-ontology.md). The
+module-extraction decision is
+[ADR-020](../ADRs/ADR-020-incremental-control-plane-module-extraction.md).
+
+This evolution is intentionally incremental:
+
+- no big-bang rewrite of `bin/cockpit_control.py`;
+- no reopening of ADR-011 through ADR-019 for aesthetic purity;
+- one bounded context extracted per small story where possible;
+- thin CLI/adapters over typed domain contracts;
+- `cockpit_control` public imports and existing commands preserved through a
+  compatibility facade until callers deliberately migrate.

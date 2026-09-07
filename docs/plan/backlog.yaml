@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-07T01:25:35+01:00"
+last-updated: "2026-09-07T01:39:46+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -21,10 +21,16 @@ vision_phases:
     title: "Holistic cockpit control plane and overseer resilience"
     status: planned
     path: docs/vision_of_product/VP3-overseer-orchestration-resilience/VP3.md
+  - id: VP4
+    slug: control-plane-modularity-ontology
+    title: "Control-plane modularity and ontology adoption"
+    status: planned
+    path: docs/vision_of_product/VP4-control-plane-modularity-ontology/VP4.md
 
 architecture:
   overview: docs/architecture/overview.md
   control_plane: docs/architecture/overseer-control-plane.md
+  control_plane_ontology: docs/architecture/cockpit-control-plane-ontology.md
   adrs:
     - id: ADR-001
       title: "Skills source-of-truth strategy"
@@ -98,6 +104,10 @@ architecture:
       title: "Immutable event publication and projection replay"
       status: accepted
       path: docs/ADRs/ADR-019-immutable-event-publication.md
+    - id: ADR-020
+      title: "Incremental control-plane module extraction and compatibility facade"
+      status: accepted
+      path: docs/ADRs/ADR-020-incremental-control-plane-module-extraction.md
 
 themes:
   - id: TH1
@@ -491,3 +501,137 @@ themes:
             size: M
             path: docs/themes/TH3-holistic-cockpit-control-plane/epics/E5-compatibility-resilience/stories/US3-end-to-end-resilience.md
             depends_on: [TH3.E5.US2]
+
+  - id: TH4
+    slug: control-plane-modularity-ontology
+    vision: VP4-control-plane-modularity-ontology
+    title: "Control-plane modularity and ontology adoption"
+    status: todo
+    locked: false
+    readme: docs/themes/TH4-control-plane-modularity-ontology/README.md
+    epics:
+      - id: TH4.E1
+        title: "Foundation facade and typed contracts"
+        slug: foundation-facade-contracts
+        status: todo
+        depends_on: []
+        stories:
+          - id: TH4.E1.US1
+            title: "Compatibility facade and public import contract"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E1-foundation-facade-contracts/stories/US1-compatibility-facade-public-contract.md
+            depends_on: []
+          - id: TH4.E1.US2
+            title: "Typed contracts and dependency-boundary rules"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E1-foundation-facade-contracts/stories/US2-typed-contracts-dependency-boundaries.md
+            depends_on: [TH4.E1.US1]
+
+      - id: TH4.E2
+        title: "Control-store domain extraction"
+        slug: control-store-domain-extraction
+        status: todo
+        depends_on: [TH4.E1]
+        stories:
+          - id: TH4.E2.US1
+            title: "Control-root schemas, validation, and compatibility extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US1-control-root-schemas-validation-compatibility.md
+            depends_on: [TH4.E1.US2]
+          - id: TH4.E2.US2
+            title: "Lock ownership, acquire/release, and repair extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US2-lock-ownership-protocol.md
+            depends_on: [TH4.E2.US1]
+          - id: TH4.E2.US3
+            title: "Immutable event journal extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US3-immutable-journal-publication.md
+            depends_on: [TH4.E2.US2]
+          - id: TH4.E2.US4
+            title: "Projection and replay extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US4-projection-replay.md
+            depends_on: [TH4.E2.US3]
+
+      - id: TH4.E3
+        title: "Runtime orchestration domain extraction"
+        slug: runtime-orchestration-domain-extraction
+        status: todo
+        depends_on: [TH4.E2]
+        stories:
+          - id: TH4.E3.US1
+            title: "Worker lifecycle and freshness extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US1-worker-lifecycle-freshness.md
+            depends_on: [TH4.E2.US4]
+          - id: TH4.E3.US2
+            title: "Command envelopes and acknowledgements extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US2-command-envelopes-acknowledgements.md
+            depends_on: [TH4.E3.US1]
+          - id: TH4.E3.US3
+            title: "Mission command, question, and recovery transition extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US3-mission-dialog-transitions.md
+            depends_on: [TH4.E3.US2]
+          - id: TH4.E3.US4
+            title: "Controller evidence, decision, and reconciliation extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US4-controller-evidence-reconciliation.md
+            depends_on: [TH4.E3.US3]
+          - id: TH4.E3.US5
+            title: "Wake lease and scheduling extraction"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US5-wake-leases-scheduling.md
+            depends_on: [TH4.E3.US4]
+
+      - id: TH4.E4
+        title: "CLI thinning and conformance cleanup"
+        slug: cli-conformance-cleanup
+        status: todo
+        depends_on: [TH4.E3]
+        stories:
+          - id: TH4.E4.US1
+            title: "CLI parsing, rendering, and adapter thinning"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US1-cli-parsing-rendering-adapters.md
+            depends_on: [TH4.E3.US5]
+          - id: TH4.E4.US2
+            title: "Compatibility facade cleanup and caller migration"
+            status: todo
+            priority: medium
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US2-compatibility-facade-cleanup.md
+            depends_on: [TH4.E4.US1]
+          - id: TH4.E4.US3
+            title: "Dependency, cycle, vocabulary, and integration conformance"
+            status: todo
+            priority: high
+            size: M
+            path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US3-dependency-cycle-vocabulary-integration-conformance.md
+            depends_on: [TH4.E4.US2]

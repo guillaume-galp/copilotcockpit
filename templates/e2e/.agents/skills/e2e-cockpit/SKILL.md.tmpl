@@ -17,6 +17,15 @@ When a tmux cockpit is running, treat it as managed state. Use
 Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
 checks and short-loop polling.
 
+## Control-plane context packet
+
+For VP3+ controller work, keep vocabulary and ownership aligned with the
+copilotcockpit repository context packet
+`docs/architecture/cockpit-control-plane-ontology.md`. Use canonical terms
+consistently across briefs, CLI output, ADRs, stories, skills, and docs; do not
+invent synonyms for queue item, mission, command, acknowledgement, lifecycle
+event, wake lease, trace/evidence, authority, derived state, or one-action tick.
+
 Before VP3 controller work, use the launcher-exported absolute
 `COCKPIT_CONTROL_ROOT` and run `cockpit-overseer start`. It may be read from the
 active tmux session only when absent from the shell; never derive it from `cwd`.
