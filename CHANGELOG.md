@@ -17,6 +17,31 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.9.1 — 2026-09-07
+
+### Changed
+- Modularized the cockpit control plane behind the stable `cockpit_control`
+  compatibility facade, extracting control-root schemas, locks, immutable
+  journal publication, ledger projection, worker lifecycle, command
+  acknowledgements, mission control, controller reconciliation, wake
+  scheduling, and CLI adapter seams.
+- Preserved existing public imports, commands, output and exit-code contracts,
+  control-store schemas, event and ledger formats, dry-run behavior, and
+  fail-closed diagnostics throughout the extraction.
+- Added the cockpit control-plane ontology and dependency-direction rules so
+  implementation modules align with explicit bounded contexts and shared
+  vocabulary.
+
+### Distribution
+- Added an explicit managed-runtime-module inventory and wired extracted Python
+  modules into global copy/link installation, doctor drift detection,
+  uninstall, release archives, and isolated cold-install verification.
+
+### Tests
+- Added modularity conformance coverage for import compatibility, dependency
+  cycles, vocabulary, CLI behavior, schemas, replay, locking, controller
+  reconciliation, wake behavior, and installed-wrapper execution.
+
 ## v0.9.0 — 2026-09-07
 
 ### Added
