@@ -17,3 +17,6 @@ vocabulary, and integration conformance for TH4.
 The CLI is thin, the facade remains intentionally compatible, dependency checks
 are acyclic, ontology terminology is aligned in touched files, and the final
 theme gate proves behavior preservation without speculative redesign.
+
+Final conformance evidence and focused gate command are recorded in
+[`TH4-E4-US3-conformance.md`](./TH4-E4-US3-conformance.md).

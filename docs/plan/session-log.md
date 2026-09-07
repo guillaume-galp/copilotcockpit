@@ -463,3 +463,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T13:05:00+01:00 — TH4.E4.US2 DONE: conservative caller-import cleanup documented and tested with no facade symbol removals; reviewer APPROVED after facade/repo import tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T13:10:00+01:00 — TH4.E4.US3 START: dependency TH4.E4.US2 done; scope proves final dependency/cycle/vocabulary/import/CLI/schema/replay/lock/controller/wake conformance before theme acceptance. — copilotcockpit
+
+- 2026-09-07T13:55:00+01:00 — TH4.E4.US3 DONE: final dependency/cycle/vocabulary/import/CLI/schema/replay/lock/controller/wake conformance packet and gate added; reviewer APPROVED after focused conformance and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

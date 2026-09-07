@@ -630,7 +630,7 @@ themes:
             depends_on: [TH4.E4.US1]
           - id: TH4.E4.US3
             title: "Dependency, cycle, vocabulary, and integration conformance"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US3-dependency-cycle-vocabulary-integration-conformance.md

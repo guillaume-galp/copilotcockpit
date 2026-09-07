@@ -12,6 +12,7 @@
     tests.unit.test_control_mission_control_seam \
     tests.unit.test_control_controller_seam \
     tests.unit.test_control_wake_seam \
-    tests.unit.test_control_cli_adapter_seam
+    tests.unit.test_control_cli_adapter_seam \
+    tests.unit.test_th4_e4_us3_conformance
   [ "$status" -eq 0 ]
 }
