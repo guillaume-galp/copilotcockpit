@@ -467,3 +467,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T13:55:00+01:00 — TH4.E4.US3 DONE: final dependency/cycle/vocabulary/import/CLI/schema/replay/lock/controller/wake conformance packet and gate added; reviewer APPROVED after focused conformance and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T14:30:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
+

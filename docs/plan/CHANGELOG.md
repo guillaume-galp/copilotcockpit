@@ -464,3 +464,16 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 **Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_lifecycle.py`, `bin/cockpit_control_commands.py`, `bin/cockpit_control_mission_control.py`, `bin/cockpit_control_controller.py`, `bin/cockpit_control_wake.py`, `bin/cockpit-wake`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, seam/wake/controller/distribution tests.
 
 **Evidence:** Developer epic integration `./run-tests.sh all` passed with unit `1..236`, template, skills, integration `1..8`, and codex checks; epic quality review APPROVED. Residual risk: real host tmux/cron integration remains covered by existing local smoke contracts, not external-system campaigns.
+
+## Epic TH4.E4 — CLI thinning and conformance cleanup
+
+**Stories Completed:** TH4.E4.US1, TH4.E4.US2, TH4.E4.US3 (reviewer-approved).
+
+**Key Changes:**
+- Added thin CLI, rendering, queue, and tmux adapter seams behind stable `cockpit_control.main()` and preserved facade aliases for public imports.
+- Documented conservative facade cleanup policy and final rollback/no-migration posture.
+- Added final TH4 conformance gate proving dependency direction, no circular imports, managed-module coverage, vocabulary/legacy alias documentation, CLI contracts, and resilience invariants.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_cli.py`, `bin/cockpit_control_rendering.py`, `bin/cockpit_control_queue_adapter.py`, `bin/cockpit_control_tmux_adapter.py`, `MANAGED_RUNTIME_MODULES`, `docs/architecture/facade-compatibility.md`, TH4 E4 conformance docs, conformance/adapter/import/distribution tests.
+
+**Evidence:** Epic `./run-tests.sh all` exited 0 with unit `1..238` plus template, skills, integration, and codex checks; epic quality review APPROVED. Residual risk: hardcoded conformance module list must stay synchronized with future managed modules.

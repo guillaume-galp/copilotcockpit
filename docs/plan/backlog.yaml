@@ -611,7 +611,7 @@ themes:
       - id: TH4.E4
         title: "CLI thinning and conformance cleanup"
         slug: cli-conformance-cleanup
-        status: in-progress
+        status: done
         depends_on: [TH4.E3]
         stories:
           - id: TH4.E4.US1
