@@ -588,7 +588,7 @@ themes:
             depends_on: [TH4.E3.US1]
           - id: TH4.E3.US3
             title: "Mission command, question, and recovery transition extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US3-mission-dialog-transitions.md

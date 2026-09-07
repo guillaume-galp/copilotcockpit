@@ -10,3 +10,4 @@ cockpit_control_journal
 cockpit_control_projection
 cockpit_control_lifecycle
 cockpit_control_commands
+cockpit_control_mission_control

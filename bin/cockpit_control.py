@@ -40,6 +40,7 @@ import cockpit_control_journal as control_journal
 import cockpit_control_projection as control_projection
 import cockpit_control_lifecycle as control_lifecycle
 import cockpit_control_commands as control_commands
+import cockpit_control_mission_control as control_mission_control
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -7043,6 +7044,88 @@ def observe_mission_control(
             key: entry["lifecycle"]["state"] for key, entry in state.missions.items()
         },
     )
+
+
+# --- managed mission dialogs, cancellation, replacement, and recovery ---------
+
+control_mission_control.ControlStoreError = ControlStoreError
+control_mission_control.MISSION_CONTROL_SCHEMA_VERSION = MISSION_CONTROL_SCHEMA_VERSION
+control_mission_control.MISSION_DIALOG_RECORD_TYPE = MISSION_DIALOG_RECORD_TYPE
+control_mission_control.MISSION_CANCELLATION_RECORD_TYPE = MISSION_CANCELLATION_RECORD_TYPE
+control_mission_control.MISSION_REPLACEMENT_RECORD_TYPE = MISSION_REPLACEMENT_RECORD_TYPE
+control_mission_control.MISSION_RECOVERY_RECORD_TYPE = MISSION_RECOVERY_RECORD_TYPE
+control_mission_control.MISSION_DIALOG_PAYLOAD_FIELD = MISSION_DIALOG_PAYLOAD_FIELD
+control_mission_control.MISSION_CANCELLATION_PAYLOAD_FIELD = MISSION_CANCELLATION_PAYLOAD_FIELD
+control_mission_control.MISSION_REPLACEMENT_PAYLOAD_FIELD = MISSION_REPLACEMENT_PAYLOAD_FIELD
+control_mission_control.MISSION_RECOVERY_PAYLOAD_FIELD = MISSION_RECOVERY_PAYLOAD_FIELD
+control_mission_control.MISSION_DIALOG_PENDING = MISSION_DIALOG_PENDING
+control_mission_control.MISSION_DIALOG_OBSERVATION_ANSWERABLE = (
+    MISSION_DIALOG_OBSERVATION_ANSWERABLE
+)
+control_mission_control.MISSION_DIALOG_OBSERVATION_ORPHANED = MISSION_DIALOG_OBSERVATION_ORPHANED
+control_mission_control.MISSION_DIALOG_OBSERVATION_SETTLED = MISSION_DIALOG_OBSERVATION_SETTLED
+control_mission_control.MISSION_DIALOG_QUESTION = MISSION_DIALOG_QUESTION
+control_mission_control.MISSION_DIALOG_ACCESS_PROMPT = MISSION_DIALOG_ACCESS_PROMPT
+control_mission_control.MISSION_DIALOG_PROMPT_KINDS = MISSION_DIALOG_PROMPT_KINDS
+control_mission_control.MISSION_DIALOG_ANSWERS = MISSION_DIALOG_ANSWERS
+control_mission_control.MISSION_FOLD_RETAINED_DUPLICATE = MISSION_FOLD_RETAINED_DUPLICATE
+control_mission_control.CANCELLATION_AWAITING = CANCELLATION_AWAITING
+control_mission_control.CANCELLATION_ACKNOWLEDGED = CANCELLATION_ACKNOWLEDGED
+control_mission_control.CANCELLATION_TIMED_OUT = CANCELLATION_TIMED_OUT
+control_mission_control.CANCELLATION_TIMEOUT_REASON = CANCELLATION_TIMEOUT_REASON
+control_mission_control.CANCELLATION_TIMEOUT_RECOVERY = CANCELLATION_TIMEOUT_RECOVERY
+control_mission_control.COMMAND_DUPLICATE = COMMAND_DUPLICATE
+control_mission_control.DEFAULT_EVENT_ACTOR = DEFAULT_EVENT_ACTOR
+control_mission_control.DEFAULT_COMMAND_REGISTER_COMMAND = DEFAULT_COMMAND_REGISTER_COMMAND
+control_mission_control.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_mission_control.WORKER_LIFECYCLE_ACTIVE_STATES = WORKER_LIFECYCLE_ACTIVE_STATES
+control_mission_control.validate_mission_dialog = (
+    lambda *args, **kwargs: validate_mission_dialog(*args, **kwargs)
+)
+control_mission_control.validate_mission_cancellation = (
+    lambda *args, **kwargs: validate_mission_cancellation(*args, **kwargs)
+)
+control_mission_control.validate_mission_replacement = (
+    lambda *args, **kwargs: validate_mission_replacement(*args, **kwargs)
+)
+control_mission_control.validate_mission_recovery = (
+    lambda *args, **kwargs: validate_mission_recovery(*args, **kwargs)
+)
+control_mission_control.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_mission_control.fold_mission_state = lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+control_mission_control.register_command = lambda *args, **kwargs: register_command(*args, **kwargs)
+control_mission_control.fold_commands = lambda *args, **kwargs: fold_commands(*args, **kwargs)
+control_mission_control._committed_events_after_publication = (
+    lambda *args, **kwargs: _committed_events_after_publication(*args, **kwargs)
+)
+control_mission_control._parsed_timestamp = (
+    lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+)
+control_mission_control._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_mission_control._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_mission_control._require_identifier = (
+    lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+)
+control_mission_control.utc_timestamp = lambda: utc_timestamp()
+
+MissionControlResult = control_mission_control.MissionControlResult
+CancellationObservation = control_mission_control.CancellationObservation
+MissionControlReport = control_mission_control.MissionControlReport
+build_mission_dialog = control_mission_control.build_mission_dialog
+build_mission_cancellation = control_mission_control.build_mission_cancellation
+build_mission_replacement = control_mission_control.build_mission_replacement
+build_mission_recovery = control_mission_control.build_mission_recovery
+read_mission_state = control_mission_control.read_mission_state
+require_active_mission = control_mission_control.require_active_mission
+require_pending_prompt = control_mission_control.require_pending_prompt
+register_mission_command = control_mission_control.register_mission_command
+_cancellation_acknowledgement = control_mission_control._cancellation_acknowledgement
+observe_cancellation = control_mission_control.observe_cancellation
+observe_mission_control = control_mission_control.observe_mission_control
 
 
 # --- deterministic controller reconciliation (ADR-014, sections 6 and 11) ----

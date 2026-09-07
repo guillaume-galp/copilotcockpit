@@ -437,3 +437,11 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T08:36:00+01:00 — TH4.E3.US2 DONE: command envelope/digest/acknowledgement/idempotency seam extracted with facade compatibility and managed distribution coverage; rework wired command seam unittests into bats gate, reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T08:42:00+01:00 — TH4.E3.US3 START: dependency TH4.E3.US2 done; scope extracts mission dialog/question/reply/access-prompt/cancel/replace/recovery transitions behind the facade. — copilotcockpit
+
+- 2026-09-07T09:12:00+01:00 — TH4.E3.US3 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found mission-control seam tests omitted from py-tests.bats; rework limited to stdlib unittest wrapper wiring and pycache cleanup. — copilotcockpit
+
+- 2026-09-07T09:25:00+01:00 — TH4.E3.US3 RE-REVIEW CLEANUP: mission seam gate wiring was correct, but review found untracked backup/pycache debris; removed debris and added repo ignore rules before final review. — copilotcockpit
+
+- 2026-09-07T09:33:00+01:00 — TH4.E3.US3 DONE: mission-control question/reply/access-prompt/cancel/replace/recovery seam extracted with facade compatibility and managed distribution coverage; cleanup added ignore rules, final reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
+
