@@ -427,3 +427,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T07:02:00+01:00 — TH4.E2 EPIC DONE: root/schema, lock, journal, and projection seams done; reworked smoke exact-module coverage passed; full `./run-tests.sh all` exit 0 and epic re-review APPROVED. Next action: start TH4.E3 runtime orchestration extraction. — copilotcockpit
 
+- 2026-09-07T07:07:00+01:00 — TH4.E3.US1 START: dependency TH4.E2 done; scope extracts worker lifecycle/freshness/stale-observation folding behind the facade with lifecycle CLI and fail-closed contracts preserved. — copilotcockpit
+
+- 2026-09-07T07:42:00+01:00 — TH4.E3.US1 DONE: worker lifecycle/freshness/stale-observation seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lifecycle/facade/install smoke tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

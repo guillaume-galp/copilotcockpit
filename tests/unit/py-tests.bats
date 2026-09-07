@@ -6,6 +6,7 @@
     tests.unit.test_control_root_schema_seam \
     tests.unit.test_control_lock_seam \
     tests.unit.test_control_journal_seam \
-    tests.unit.test_control_projection_seam
+    tests.unit.test_control_projection_seam \
+    tests.unit.test_control_lifecycle_seam
   [ "$status" -eq 0 ]
 }

@@ -49,6 +49,7 @@ cc_make_source_fallback_fixture() {
 	[ -f "$HOME/.local/bin/cockpit_control_locks.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_journal.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_projection.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_lifecycle.py" ]
 	[ "$(cc_count_backups "$HOME")" -eq 0 ]
 
 	run env HOME="$HOME" CC_RELEASE_BASE_URL="file://$fixture" bash "$CC_REPO_ROOT/install.sh"
@@ -78,4 +79,5 @@ cc_make_source_fallback_fixture() {
 	[ -f "$HOME/.local/bin/cockpit_control_locks.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_journal.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_projection.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_lifecycle.py" ]
 }

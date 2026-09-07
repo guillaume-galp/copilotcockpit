@@ -569,12 +569,12 @@ themes:
       - id: TH4.E3
         title: "Runtime orchestration domain extraction"
         slug: runtime-orchestration-domain-extraction
-        status: todo
+        status: in-progress
         depends_on: [TH4.E2]
         stories:
           - id: TH4.E3.US1
             title: "Worker lifecycle and freshness extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US1-worker-lifecycle-freshness.md

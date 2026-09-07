@@ -38,6 +38,7 @@ from uuid import UUID, uuid4, uuid5
 import cockpit_control_locks as control_locks
 import cockpit_control_journal as control_journal
 import cockpit_control_projection as control_projection
+import cockpit_control_lifecycle as control_lifecycle
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -5893,234 +5894,89 @@ publish_control_event = control_journal.publish_control_event
 
 # --- versioned worker lifecycle recording and freshness observation ----------
 
+control_lifecycle.ControlStoreError = ControlStoreError
+control_lifecycle.WORKER_LIFECYCLE_SCHEMA_VERSION = WORKER_LIFECYCLE_SCHEMA_VERSION
+control_lifecycle.WORKER_LIFECYCLE_RECORD_TYPE = WORKER_LIFECYCLE_RECORD_TYPE
+control_lifecycle.WORKER_LIFECYCLE_PAYLOAD_FIELD = WORKER_LIFECYCLE_PAYLOAD_FIELD
+control_lifecycle.WORKER_LIFECYCLE_EVENT_PREFIX = WORKER_LIFECYCLE_EVENT_PREFIX
+control_lifecycle.LIFECYCLE_PENDING_DISPATCH = LIFECYCLE_PENDING_DISPATCH
+control_lifecycle.LIFECYCLE_ACCEPTED = LIFECYCLE_ACCEPTED
+control_lifecycle.LIFECYCLE_RUNNING = LIFECYCLE_RUNNING
+control_lifecycle.LIFECYCLE_BLOCKED = LIFECYCLE_BLOCKED
+control_lifecycle.LIFECYCLE_COMPLETED = LIFECYCLE_COMPLETED
+control_lifecycle.LIFECYCLE_FAILED = LIFECYCLE_FAILED
+control_lifecycle.LIFECYCLE_CANCELLED = LIFECYCLE_CANCELLED
+control_lifecycle.LIFECYCLE_REPLACED = LIFECYCLE_REPLACED
+control_lifecycle.WORKER_LIFECYCLE_STATES = WORKER_LIFECYCLE_STATES
+control_lifecycle.WORKER_LIFECYCLE_ACTIVE_STATES = WORKER_LIFECYCLE_ACTIVE_STATES
+control_lifecycle.WORKER_LIFECYCLE_TERMINAL_STATES = WORKER_LIFECYCLE_TERMINAL_STATES
+control_lifecycle.WORKER_LIFECYCLE_REASON_REQUIRED = WORKER_LIFECYCLE_REASON_REQUIRED
+control_lifecycle.WORKER_LIFECYCLE_TRANSITIONS = WORKER_LIFECYCLE_TRANSITIONS
+control_lifecycle.WORKER_LIFECYCLE_FIELDS = WORKER_LIFECYCLE_FIELDS
+control_lifecycle.WORKER_LIFECYCLE_BLOCKER_FIELDS = WORKER_LIFECYCLE_BLOCKER_FIELDS
+control_lifecycle.LIFECYCLE_APPLIED = LIFECYCLE_APPLIED
+control_lifecycle.LIFECYCLE_RETAINED_TERMINAL = LIFECYCLE_RETAINED_TERMINAL
+control_lifecycle.LIFECYCLE_RETAINED_STALE_SEQUENCE = LIFECYCLE_RETAINED_STALE_SEQUENCE
+control_lifecycle.LIFECYCLE_RETAINED_INVALID_TRANSITION = LIFECYCLE_RETAINED_INVALID_TRANSITION
+control_lifecycle.LIFECYCLE_RETAINED_UNMATCHED = LIFECYCLE_RETAINED_UNMATCHED
+control_lifecycle.LIFECYCLE_OBSERVATION_FRESH = LIFECYCLE_OBSERVATION_FRESH
+control_lifecycle.LIFECYCLE_OBSERVATION_STALE = LIFECYCLE_OBSERVATION_STALE
+control_lifecycle.LIFECYCLE_OBSERVATION_TERMINAL = LIFECYCLE_OBSERVATION_TERMINAL
+control_lifecycle.LIFECYCLE_STALE_REASON = LIFECYCLE_STALE_REASON
+control_lifecycle.LIFECYCLE_STALE_RECOVERY = LIFECYCLE_STALE_RECOVERY
+control_lifecycle.DEFAULT_LIFECYCLE_COMMAND = DEFAULT_LIFECYCLE_COMMAND
+control_lifecycle.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_lifecycle.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_lifecycle._require_typed_references = (
+    lambda *args, **kwargs: _require_typed_references(*args, **kwargs)
+)
+control_lifecycle._require_object = lambda *args, **kwargs: _require_object(*args, **kwargs)
+control_lifecycle._require_record_type = (
+    lambda *args, **kwargs: _require_record_type(*args, **kwargs)
+)
+control_lifecycle._require_string = lambda *args, **kwargs: _require_string(*args, **kwargs)
+control_lifecycle._require_identifier = (
+    lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+)
+control_lifecycle._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_lifecycle._require_optional_uuid = (
+    lambda *args, **kwargs: _require_optional_uuid(*args, **kwargs)
+)
+control_lifecycle._require_positive_integer = (
+    lambda *args, **kwargs: _require_positive_integer(*args, **kwargs)
+)
+control_lifecycle._require_optional_string = (
+    lambda *args, **kwargs: _require_optional_string(*args, **kwargs)
+)
+control_lifecycle._parsed_timestamp = (
+    lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+)
+control_lifecycle._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_lifecycle.publish_control_event = (
+    lambda *args, **kwargs: publish_control_event(*args, **kwargs)
+)
+control_lifecycle.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_lifecycle.fold_mission_state = (
+    lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+)
+control_lifecycle.utc_timestamp = lambda: utc_timestamp()
+control_lifecycle.CommittedEvent = CommittedEvent
+control_lifecycle.EventPublicationResult = EventPublicationResult
 
-@dataclass(frozen=True)
-class LifecycleRecordResult:
-    """Outcome of committing one versioned worker lifecycle event."""
-
-    root: Path
-    publication: EventPublicationResult
-    lifecycle: Dict[str, Any]
-    applied: bool
-    outcome: str
-    materialized: Optional[Dict[str, Any]]
-
-    @property
-    def committed(self) -> bool:
-        return self.publication.committed
-
-    @property
-    def retained_for_audit(self) -> bool:
-        """Report a durably committed event that did not move materialized state."""
-
-        return not self.applied
-
-
-@dataclass(frozen=True)
-class WorkerLifecycleObservation:
-    """One freshness observation of a materialized worker mission slot.
-
-    An observation is not a mission state.  `stale` says only that the control
-    plane can no longer see a fresh heartbeat, names a recoverable reason, and
-    records that a bounded recovery action is owed.  It never claims `failed`.
-    """
-
-    mission_id: str
-    worker_id: str
-    queue_item_id: str
-    trace_id: str
-    state: str
-    sequence: int
-    terminal: bool
-    observation: str
-    reason: Optional[str]
-    recoverable: bool
-    recovery: Optional[str]
-    heartbeat_at: Optional[str]
-    fresh_until: Optional[str]
-    revision: int
-    event_id: str
-    as_of: str
-
-    @property
-    def stale(self) -> bool:
-        return self.observation == LIFECYCLE_OBSERVATION_STALE
-
-
-def build_worker_lifecycle(
-    state: str,
-    worker_id: str,
-    mission_id: str,
-    queue_item_id: str,
-    trace_id: str,
-    sequence: Any,
-    parent_trace_id: Optional[str] = None,
-    reason: Optional[str] = None,
-    blocker: Optional[Mapping[str, Any]] = None,
-    heartbeat_at: Optional[str] = None,
-    fresh_until: Optional[str] = None,
-    evidence_refs: Sequence[str] = (),
-    superseded_by_mission_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Assemble one complete lifecycle record and validate it before use."""
-
-    record = {
-        "schema_version": WORKER_LIFECYCLE_SCHEMA_VERSION,
-        "record_type": WORKER_LIFECYCLE_RECORD_TYPE,
-        "state": state,
-        "worker_id": worker_id,
-        "mission_id": mission_id,
-        "queue_item_id": queue_item_id,
-        "trace_id": trace_id,
-        "parent_trace_id": parent_trace_id,
-        "sequence": sequence,
-        "reason": reason,
-        "blocker": None if blocker is None else dict(blocker),
-        "heartbeat_at": heartbeat_at,
-        "fresh_until": fresh_until,
-        "evidence_refs": list(evidence_refs),
-        "superseded_by_mission_id": superseded_by_mission_id,
-    }
-    return validate_worker_lifecycle(record, "worker lifecycle")
-
-
-def record_worker_lifecycle(
-    root: Path,
-    lifecycle: Mapping[str, Any],
-    actor: Optional[str] = None,
-    command: str = DEFAULT_LIFECYCLE_COMMAND,
-    timeout_seconds: Optional[float] = None,
-    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
-    dry_run: bool = False,
-) -> LifecycleRecordResult:
-    """Commit one lifecycle event and report whether it moved materialized state.
-
-    Publication and materialization are deliberately separate answers.  A late,
-    duplicate, superseded, or uncorrelated record is still committed as durable
-    audit evidence through the ordinary immutable-event protocol; the fold then
-    reports that it changed nothing.  Only a malformed record is refused, and it
-    is refused before any private candidate exists.
-    """
-
-    validated = validate_worker_lifecycle(dict(lifecycle), "worker lifecycle")
-    publication = publish_control_event(
-        root,
-        f"{WORKER_LIFECYCLE_EVENT_PREFIX}{validated['state']}",
-        actor=actor or validated["worker_id"],
-        payload={WORKER_LIFECYCLE_PAYLOAD_FIELD: validated},
-        command=command,
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        dry_run=dry_run,
-    )
-
-    # Committed authority answers this, not the in-memory guess made under the
-    # lock: the fold is re-derived from the committed sequence that now exists.
-    try:
-        _metadata, history = inspect_control_events(publication.root)
-    except ControlStoreError as exc:
-        if not publication.committed:
-            raise
-        raise ControlStoreError(
-            f"{EVENTS_DIR_NAME}/{publication.path.name} is committed at revision "
-            f"{publication.revision}; only its materialization could not be reported: {exc}"
-        ) from None
-    events = history.events
-    if not publication.committed:
-        events = events + (
-            CommittedEvent(
-                path=publication.path,
-                revision=history.latest_revision + 1,
-                event_id=publication.event_id,
-                record=publication.record,
-            ),
-        )
-    slots, outcomes = fold_worker_missions(events)
-    applied, outcome = outcomes.get(publication.event_id, (False, LIFECYCLE_RETAINED_UNMATCHED))
-    return LifecycleRecordResult(
-        root=publication.root,
-        publication=publication,
-        lifecycle=dict(validated),
-        applied=applied,
-        outcome=outcome,
-        materialized=slots.get(validated["mission_id"]),
-    )
-
-
-def _observed_slot(slot: Mapping[str, Any], now: datetime, as_of: str) -> WorkerLifecycleObservation:
-    """Classify one materialized slot as fresh, stale, or terminal."""
-
-    lifecycle = slot["lifecycle"]
-    state = lifecycle["state"]
-    terminal = state in WORKER_LIFECYCLE_TERMINAL_STATES
-    observation = LIFECYCLE_OBSERVATION_TERMINAL
-    reason: Optional[str] = None
-    recovery: Optional[str] = None
-    recoverable = False
-    if not terminal:
-        expiry = _parsed_timestamp(lifecycle["fresh_until"], "fresh_until", "worker lifecycle")
-        if now > expiry:
-            observation = LIFECYCLE_OBSERVATION_STALE
-            reason = LIFECYCLE_STALE_REASON
-            recovery = LIFECYCLE_STALE_RECOVERY
-            recoverable = True
-        else:
-            observation = LIFECYCLE_OBSERVATION_FRESH
-    return WorkerLifecycleObservation(
-        mission_id=lifecycle["mission_id"],
-        worker_id=lifecycle["worker_id"],
-        queue_item_id=lifecycle["queue_item_id"],
-        trace_id=lifecycle["trace_id"],
-        state=state,
-        sequence=lifecycle["sequence"],
-        terminal=terminal,
-        observation=observation,
-        reason=reason,
-        recoverable=recoverable,
-        recovery=recovery,
-        heartbeat_at=lifecycle["heartbeat_at"],
-        fresh_until=lifecycle["fresh_until"],
-        revision=slot["revision"],
-        event_id=slot["event_id"],
-        as_of=as_of,
-    )
-
-
-def observe_worker_lifecycle(
-    root: Path,
-    as_of: Optional[str] = None,
-    mission_id: Optional[str] = None,
-    worker_id: Optional[str] = None,
-) -> Tuple[WorkerLifecycleObservation, ...]:
-    """Report freshness for every materialized mission without changing a byte.
-
-    The observation is derived from committed events rather than the published
-    projection, so a stale or interrupted `ledger.json` can never make a worker
-    look fresh.  A worker whose `fresh_until` has passed is reported `stale`
-    with a recoverable reason; its mission state is left exactly as the last
-    lifecycle event declared it.
-    """
-
-    root = _require_absolute_root(str(root), "configured")
-    moment = as_of if as_of is not None else utc_timestamp()
-    now = _parsed_timestamp(moment, "as_of", "lifecycle status")
-    if mission_id is not None:
-        mission_id = _require_uuid({"mission_id": mission_id}, "mission_id", "lifecycle status")
-    if worker_id is not None:
-        worker_id = _require_string({"worker_id": worker_id}, "worker_id", "lifecycle status")
-
-    _metadata, history = inspect_control_events(root)
-    slots, _outcomes = fold_worker_missions(history.events)
-    observations: List[WorkerLifecycleObservation] = []
-    for key in sorted(slots):
-        lifecycle = slots[key]["lifecycle"]
-        if mission_id is not None and lifecycle["mission_id"] != mission_id:
-            continue
-        if worker_id is not None and lifecycle["worker_id"] != worker_id:
-            continue
-        observations.append(_observed_slot(slots[key], now, moment))
-    return tuple(observations)
-
+validate_worker_lifecycle = control_lifecycle.validate_worker_lifecycle
+event_worker_lifecycle = control_lifecycle.event_worker_lifecycle
+apply_worker_lifecycle = control_lifecycle.apply_worker_lifecycle
+fold_worker_missions = control_lifecycle.fold_worker_missions
+LifecycleRecordResult = control_lifecycle.LifecycleRecordResult
+WorkerLifecycleObservation = control_lifecycle.WorkerLifecycleObservation
+build_worker_lifecycle = control_lifecycle.build_worker_lifecycle
+record_worker_lifecycle = control_lifecycle.record_worker_lifecycle
+_observed_slot = control_lifecycle._observed_slot
+observe_worker_lifecycle = control_lifecycle.observe_worker_lifecycle
 
 # --- versioned command envelopes, acknowledgements, and idempotent delivery --
 

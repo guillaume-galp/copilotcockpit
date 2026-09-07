@@ -8,3 +8,4 @@ cockpit_control_root_schema
 cockpit_control_locks
 cockpit_control_journal
 cockpit_control_projection
+cockpit_control_lifecycle
