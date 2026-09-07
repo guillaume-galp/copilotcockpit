@@ -471,3 +471,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T15:25:00+01:00 — TH4.E4 EPIC DONE: CLI adapter seams, facade alias cleanup, and final modularity conformance done; full `./run-tests.sh all` passed (unit 1..238 plus all categories) and epic review APPROVED. Next action: theme completion gates. — copilotcockpit
 
+- 2026-09-07T15:45:00+01:00 — TH4 THEME GATE ARTIFACTS: release notes created at `docs/plan/RELEASE-TH4.md`, active TH4 issue templates archived, final gate evidence recorded, and branch-local cold-install method clarified after rejecting published-v0.9.0 `latest` as branch evidence. — copilotcockpit
+
