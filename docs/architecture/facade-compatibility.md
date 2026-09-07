@@ -51,3 +51,14 @@ Rollback
   No data migration is performed; installed runtime modules remaining on disk
   that are not in MANAGED_RUNTIME_MODULES are considered unmanaged and must be
   removed during uninstall or by explicit doctor repair documentation.
+
+Facade cleanup policy (TH4.E4.US2)
+- Repository-internal callers may migrate from `cockpit_control` to extracted
+  modules only when the target seam is already managed and stable.
+- Public wrapper and test compatibility imports (`from cockpit_control import …`)
+  remain authoritative until a repository-wide migration is complete and a
+  compatibility note explicitly documents any symbol retirement.
+- Accepted legacy names are treated as compatibility aliases during TH4 cleanup;
+  they are not removed for aesthetics alone.
+- Rollback remains re-export based: restore the previous facade symbol exports
+  and wrapper/module wiring without any state-file or data migration.

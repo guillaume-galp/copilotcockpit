@@ -459,3 +459,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T12:25:00+01:00 — TH4.E4.US1 DONE: CLI/rendering/queue/tmux adapter seams added behind stable `main()` with managed distribution coverage; reviewer APPROVED after focused adapter/import/output tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T12:31:00+01:00 — TH4.E4.US2 START: dependency TH4.E4.US1 done; scope deliberately migrates safe repository callers and preserves facade re-exports/aliases with compatibility tests. — copilotcockpit
+
+- 2026-09-07T13:05:00+01:00 — TH4.E4.US2 DONE: conservative caller-import cleanup documented and tested with no facade symbol removals; reviewer APPROVED after facade/repo import tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

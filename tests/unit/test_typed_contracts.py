@@ -10,19 +10,28 @@ if str(ROOT / 'bin') not in sys.path:
 
 import cockpit_control as cc  # the compatibility facade (unchanged runtime)
 import cockpit_control_seams as seams
+import cockpit_control_commands as control_commands
 
 class TypedContractConversionTests(unittest.TestCase):
+    def test_facade_re_exports_command_digest_symbol(self):
+        self.assertIs(cc.command_payload_digest, control_commands.command_payload_digest)
+        self.assertEqual(cc.COMMAND_SCHEMA_VERSION, control_commands.COMMAND_SCHEMA_VERSION)
+        self.assertEqual(
+            cc.COMMAND_ENVELOPE_RECORD_TYPE,
+            control_commands.COMMAND_ENVELOPE_RECORD_TYPE,
+        )
+
     def test_command_envelope_roundtrip_preserves_wire_shape(self):
         payload = {"field": "value", "z": [1,2,3]}
-        digest = cc.command_payload_digest(payload)
+        digest = control_commands.command_payload_digest(payload)
         envelope = {
-            "schema_version": cc.COMMAND_SCHEMA_VERSION,
-            "record_type": cc.COMMAND_ENVELOPE_RECORD_TYPE,
+            "schema_version": control_commands.COMMAND_SCHEMA_VERSION,
+            "record_type": control_commands.COMMAND_ENVELOPE_RECORD_TYPE,
             "command_id": "11111111-1111-1111-1111-111111111111",
             "command_type": "example-type",
             "mission_id": "22222222-2222-2222-2222-222222222222",
             "queue_item_id": "QI-1",
-            "target": {"kind": cc.COMMAND_TARGET_WORKER, "id": "worker-dev"},
+            "target": {"kind": control_commands.COMMAND_TARGET_WORKER, "id": "worker-dev"},
             "trace_id": "33333333-3333-3333-3333-333333333333",
             "parent_trace_id": None,
             "payload_digest": digest,
@@ -42,8 +51,8 @@ class TypedContractConversionTests(unittest.TestCase):
 
     def test_command_payload_canonicalization_keeps_digest(self):
         payload = {"alpha": 1, "beta": ["x", "y"]}
-        digest1 = cc.command_payload_digest(payload)
-        digest2 = cc.command_payload_digest(payload)
+        digest1 = control_commands.command_payload_digest(payload)
+        digest2 = control_commands.command_payload_digest(payload)
         self.assertEqual(digest1, digest2)
 
 class DependencyDirectionTests(unittest.TestCase):

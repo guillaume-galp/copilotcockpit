@@ -31,6 +31,18 @@ PY
     echo "$output" | grep -q "ok"
 }
 
+@test "repository callers can import extracted modules directly while facade re-exports stay" {
+    run python3 -c 'import sys, importlib; sys.path.insert(0, sys.argv[1]); facade = importlib.import_module("cockpit_control"); commands = importlib.import_module("cockpit_control_commands"); root_schema = importlib.import_module("cockpit_control_root_schema"); assert commands.command_payload_digest({"a": 1}).startswith(commands.COMMAND_DIGEST_PREFIX); assert root_schema.CONTROL_SCHEMA_VERSION == facade.CONTROL_SCHEMA_VERSION; assert facade.command_payload_digest is commands.command_payload_digest; print("ok")' "$REPO_BIN"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "ok"
+}
+
+@test "from-import callers keep compatibility symbols required by wrappers and tests" {
+    run python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from cockpit_control import main, resolve_control_root, command_payload_digest; import cockpit_control_cli as cli; import cockpit_control_commands as commands; assert main is cli.main; assert callable(resolve_control_root); assert command_payload_digest is commands.command_payload_digest; print("ok")' "$REPO_BIN"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "ok"
+}
+
 @test "wrapper entrypoint resolves cockpit_control when run from outside source" {
     tmpdir="$BATS_TEST_TMPDIR/outside-cwd"
     mkdir -p "$tmpdir"

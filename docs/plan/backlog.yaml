@@ -623,7 +623,7 @@ themes:
             depends_on: [TH4.E3.US5]
           - id: TH4.E4.US2
             title: "Compatibility facade cleanup and caller migration"
-            status: todo
+            status: done
             priority: medium
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US2-compatibility-facade-cleanup.md
