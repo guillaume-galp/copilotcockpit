@@ -506,8 +506,8 @@ themes:
     slug: control-plane-modularity-ontology
     vision: VP4-control-plane-modularity-ontology
     title: "Control-plane modularity and ontology adoption"
-    status: in-progress
-    locked: false
+    status: done
+    locked: true
     readme: docs/themes/TH4-control-plane-modularity-ontology/README.md
     epics:
       - id: TH4.E1

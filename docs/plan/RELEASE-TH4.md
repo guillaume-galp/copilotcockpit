@@ -32,3 +32,4 @@ The intended squash commit type is `refactor:` because TH4 is behavior-preservin
 - Final theme gate: `./run-tests.sh all` exit 0 with unit `1..238`, template, skills, integration, and codex checks passing.
 - Final conformance: `tests/unit/check-th4-e4-us3-conformance.sh` passed with 51 Python conformance/seam tests and 68 lock/journal/projection/controller/wake/resilience invariants.
 - Correct branch-local cold-install smoke passed from a locally built release artifact with source `PYTHONPATH` absent; `--from-release latest` was intentionally not used as branch readiness evidence because it resolves to published v0.9.0.
+- Product-owner revalidation accepted VP4/TH4 after clarified `refactor:`/no-release runbook context; TH4 is done and locked in `docs/plan/backlog.yaml`.

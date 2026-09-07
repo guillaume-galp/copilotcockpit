@@ -475,3 +475,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T15:55:00+01:00 — TH4 PRODUCT-OWNER REVALIDATION ACCEPTED: VP4 success criteria accepted after clarified runbook context; branch-local candidate cold-install is valid pre-merge evidence, and published `latest` v0.9.0 is not applicable because behavior-preserving `refactor:` merge requires no release. — copilotcockpit
 
+- 2026-09-07T16:05:00+01:00 — TH4 THEME DONE+LOCKED: final reviewer APPROVED, product-owner revalidation accepted VP4, user pre-authorized acceptance/lock in the execution request, and backlog now marks TH4 `status: done`, `locked: true`; no semver release is required for intended `refactor:` squash. — copilotcockpit
+
