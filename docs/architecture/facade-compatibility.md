@@ -33,10 +33,10 @@ Managed artifact scaffolding
   by cold-install smoke tests to ensure the installed surface provides the
   required artifacts.
 
-- At foundation time (this story) the MANAGED_RUNTIME_MODULES file includes a
-  single entry, the compatibility facade `cockpit_control` itself. Later
-  extraction stories must add new module names to this file before moving any
-  runtime behavior into them.
+- At foundation time the MANAGED_RUNTIME_MODULES file started with the
+  compatibility facade `cockpit_control`. As extraction stories land, each new
+  runtime module is added there before behavior moves, for example
+  `cockpit_control_root_schema` for control root and schema compatibility.
 
 Compatibility checks
 - Tests that validate installed wrapper behavior must run from an isolated
@@ -50,4 +50,3 @@ Rollback
   No data migration is performed; installed runtime modules remaining on disk
   that are not in MANAGED_RUNTIME_MODULES are considered unmanaged and must be
   removed during uninstall or by explicit doctor repair documentation.
-

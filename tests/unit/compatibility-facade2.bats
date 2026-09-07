@@ -19,6 +19,7 @@ sys.path.insert(0, sys.argv[1])
 cwd_files_before = set(os.listdir('.'))
 m = importlib.import_module('cockpit_control')
 assert hasattr(m, 'CONTROL_SCHEMA_VERSION')
+assert hasattr(m, 'resolve_control_root')
 # ensure import didn't create files in cwd
 cwd_files_after = set(os.listdir('.'))
 assert cwd_files_before == cwd_files_after
@@ -54,8 +55,9 @@ PY
     echo "$output" | grep -q "validate"
 }
 
-@test "MANAGED_RUNTIME_MODULES declares the compatibility facade" {
+@test "MANAGED_RUNTIME_MODULES declares facade and extracted control-root module" {
     run cat "$BATS_TEST_DIRNAME/../../MANAGED_RUNTIME_MODULES"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "cockpit_control"
+    echo "$output" | grep -q "cockpit_control_root_schema"
 }

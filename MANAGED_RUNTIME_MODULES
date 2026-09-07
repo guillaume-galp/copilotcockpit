@@ -4,3 +4,4 @@
 # cockpit_control facade.
 
 cockpit_control
+cockpit_control_root_schema

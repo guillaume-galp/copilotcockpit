@@ -405,3 +405,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T03:46:00+01:00 — TH4.E1 EPIC DONE: both foundation stories done; full `./run-tests.sh all` exit 0 (unit 1..233 plus template/skills/integration/codex), changelog appended, and epic quality review APPROVED. Next action: start TH4.E2 control-store extraction. — copilotcockpit
 
+- 2026-09-07T03:50:00+01:00 — TH4.E2.US1 START: E1 foundation is done; scope extracts control-root/schema/compatibility helpers behind the stable facade, preserving root precedence, preflight diagnostics, fail-closed and dry-run contracts. — copilotcockpit
+
+- 2026-09-07T04:12:00+01:00 — TH4.E2.US1 DONE: control-root/schema/compatibility seam extracted with facade re-exports and managed-module install/doctor/uninstall/cold-install coverage; reviewer APPROVED after focused distribution tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

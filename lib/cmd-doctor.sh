@@ -7,7 +7,7 @@
 #   * Skills        — install state / drift for each of the 8 skills (AC4).
 #   * cockpit tools — install state / drift for cockpit-wake, cockpit-protocol,
 #                     cockpit-overseer, cockpit-trace, and cockpit-queue artefacts (AC4).
-#     cockpit-control and its shared Python module are included with them.
+#     cockpit-control and its shared Python modules are included with them.
 #
 # Exit code (AC5): 0 when every HARD prerequisite (bash, git, node, python3) is
 # present; non-zero ONLY when a hard prerequisite is missing. Missing optional
@@ -229,6 +229,8 @@ main() {
 	_row "cockpit-control" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control.py" "$home_bin/cockpit_control.py")"
 	_row "cockpit_control.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_root_schema.py" "$home_bin/cockpit_control_root_schema.py")"
+	_row "cockpit_control_root_schema.py" "$state"
 
 	# --- control-store preflight (AC2) ---------------------------------------
 	_section "control-store"

@@ -35,10 +35,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from uuid import UUID, uuid4, uuid5
 
-CONTROL_SCHEMA_VERSION = 1
-CONTROL_METADATA_NAME = "control.json"
-LEDGER_NAME = "ledger.json"
-EVENTS_NAME = "events.jsonl"
+import cockpit_control_root_schema as control_root_schema
+
+CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
+CONTROL_METADATA_NAME = control_root_schema.CONTROL_METADATA_NAME
+LEDGER_NAME = control_root_schema.LEDGER_NAME
+EVENTS_NAME = control_root_schema.EVENTS_NAME
 # Derived projections are replaced through one reusable temporary path each, so
 # an interruption can only leave a named non-authoritative file behind.
 LEDGER_TEMPORARY_NAME = f"{LEDGER_NAME}.tmp"
@@ -1317,12 +1319,7 @@ class ControlStoreError(RuntimeError):
     """Raised when a control-store configuration is unsafe to use."""
 
 
-@dataclass(frozen=True)
-class ResolvedControlRoot:
-    """The configured root and the sole source from which it was resolved."""
-
-    path: Path
-    source: str
+ResolvedControlRoot = control_root_schema.ResolvedControlRoot
 
 
 @dataclass(frozen=True)
@@ -1343,8 +1340,8 @@ def utc_timestamp() -> str:
 # The shell variable each refusal about a root must name.  A diagnostic that
 # names the wrong variable sends an operator to repair a setting that is already
 # correct, so the boundary being checked is passed in rather than assumed.
-CONTROL_ROOT_VARIABLE = "COCKPIT_CONTROL_ROOT"
-QUEUE_ROOT_VARIABLE = "COCKPIT_QUEUE_ROOT"
+CONTROL_ROOT_VARIABLE = control_root_schema.CONTROL_ROOT_VARIABLE
+QUEUE_ROOT_VARIABLE = control_root_schema.QUEUE_ROOT_VARIABLE
 
 
 def _require_absolute_root(
@@ -1352,49 +1349,16 @@ def _require_absolute_root(
     source: str,
     variable: str = CONTROL_ROOT_VARIABLE,
 ) -> Path:
-    if not isinstance(value, str) or not value:
-        raise ControlStoreError(f"{source} {variable} is empty")
-    if "\x00" in value:
-        raise ControlStoreError(f"{source} {variable} contains a NUL byte")
-
-    candidate = Path(value)
-    if not candidate.is_absolute():
-        raise ControlStoreError(
-            f"{source} {variable} must be an absolute path; refusing to infer it from cwd"
-        )
-
-    # Lexical normalization makes the effective root explicit without resolving
-    # symlinks to an unexpected location.  It also keeps a tmux-exported root
-    # stable when the shell is launched from another working directory.
-    normalized = Path(os.path.normpath(value))
-    if not normalized.is_absolute():
-        raise ControlStoreError(f"{source} {variable} is malformed")
-    return normalized
+    try:
+        return control_root_schema.require_absolute_root(value, source, variable)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _tmux_control_root() -> Optional[str]:
     """Read the exact root from the active tmux server, if there is one."""
 
-    if not os.environ.get("TMUX"):
-        return None
-    try:
-        result = subprocess.run(
-            ["tmux", "show-environment", "COCKPIT_CONTROL_ROOT"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError:
-        return None
-
-    if result.returncode != 0:
-        return None
-    output = result.stdout.rstrip("\r\n")
-    prefix = "COCKPIT_CONTROL_ROOT="
-    if not output.startswith(prefix):
-        return None
-    return output[len(prefix) :]
+    return control_root_schema.tmux_control_root()
 
 
 def resolve_control_root(environ: Optional[Mapping[str, str]] = None) -> ResolvedControlRoot:
@@ -1405,23 +1369,10 @@ def resolve_control_root(environ: Optional[Mapping[str, str]] = None) -> Resolve
     the current working directory.
     """
 
-    environment = os.environ if environ is None else environ
-    if "COCKPIT_CONTROL_ROOT" in environment:
-        return ResolvedControlRoot(
-            _require_absolute_root(environment["COCKPIT_CONTROL_ROOT"], "shell"),
-            "shell",
-        )
-
-    # The fallback intentionally consults tmux only after the shell variable is
-    # absent.  Use the process environment (rather than `environment`) because
-    # tmux invocation needs the active client socket.
-    tmux_value = _tmux_control_root()
-    if tmux_value is not None:
-        return ResolvedControlRoot(_require_absolute_root(tmux_value, "tmux session"), "tmux")
-
-    raise ControlStoreError(
-        "COCKPIT_CONTROL_ROOT is required; set an absolute root in the shell or active tmux session"
-    )
+    try:
+        return control_root_schema.resolve_control_root(environ=environ)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _require_object(record: Any, label: str) -> Dict[str, Any]:
@@ -1431,15 +1382,10 @@ def _require_object(record: Any, label: str) -> Dict[str, Any]:
 
 
 def _require_schema_version(record: Mapping[str, Any], label: str) -> None:
-    version = record.get("schema_version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise ControlStoreError(f"{label} requires integer schema_version")
-    if version > CONTROL_SCHEMA_VERSION:
-        raise ControlStoreError(
-            f"{label} uses unsupported future schema_version {version}; upgrade cockpit tools before mutation"
-        )
-    if version != CONTROL_SCHEMA_VERSION:
-        raise ControlStoreError(f"{label} uses unsupported schema_version {version}")
+    try:
+        control_root_schema.require_schema_version(record, label)
+    except control_root_schema.ControlRootSchemaError as exc:
+        raise ControlStoreError(str(exc)) from None
 
 
 def _require_string(record: Mapping[str, Any], field: str, label: str) -> str:
@@ -9955,18 +9901,17 @@ class ControlPreflight:
                 "rewrites authoritative root metadata",
             )
             return
-        declared = record.get("schema_version") if isinstance(record, dict) else None
-        if (
-            not isinstance(declared, bool)
-            and isinstance(declared, int)
-            and declared > CONTROL_SCHEMA_VERSION
-        ):
+        declared = control_root_schema.declared_future_schema_version(record)
+        if declared is not None:
             self._add(
                 dimension,
                 PREFLIGHT_BLOCKED,
                 FINDING_AUTHORITATIVE,
-                f"{CONTROL_METADATA_NAME} declares future schema_version {declared}; this "
-                f"build supports schema_version {CONTROL_SCHEMA_VERSION} and refuses mutation",
+                control_root_schema.metadata_future_schema_diagnostic(
+                    declared,
+                    metadata_name=CONTROL_METADATA_NAME,
+                    supported_version=CONTROL_SCHEMA_VERSION,
+                ),
                 REPAIR_ACTION_UPGRADE,
             )
             return

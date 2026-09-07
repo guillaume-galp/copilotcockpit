@@ -534,12 +534,12 @@ themes:
       - id: TH4.E2
         title: "Control-store domain extraction"
         slug: control-store-domain-extraction
-        status: todo
+        status: in-progress
         depends_on: [TH4.E1]
         stories:
           - id: TH4.E2.US1
             title: "Control-root schemas, validation, and compatibility extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E2-control-store-domain-extraction/stories/US1-control-root-schemas-validation-compatibility.md
