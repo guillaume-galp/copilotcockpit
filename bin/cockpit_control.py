@@ -39,6 +39,7 @@ import cockpit_control_locks as control_locks
 import cockpit_control_journal as control_journal
 import cockpit_control_projection as control_projection
 import cockpit_control_lifecycle as control_lifecycle
+import cockpit_control_commands as control_commands
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -6343,6 +6344,113 @@ def observe_commands(
             continue
         observed.append(slots[key])
     return tuple(observed)
+
+
+# --- versioned command envelopes, acknowledgements, and idempotent delivery --
+
+control_commands.ControlStoreError = ControlStoreError
+control_commands.COMMAND_SCHEMA_VERSION = COMMAND_SCHEMA_VERSION
+control_commands.COMMAND_ENVELOPE_RECORD_TYPE = COMMAND_ENVELOPE_RECORD_TYPE
+control_commands.COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE = COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE
+control_commands.COMMAND_ENVELOPE_PAYLOAD_FIELD = COMMAND_ENVELOPE_PAYLOAD_FIELD
+control_commands.COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD = COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD
+control_commands.COMMAND_REGISTERED_EVENT_TYPE = COMMAND_REGISTERED_EVENT_TYPE
+control_commands.COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX = COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX
+control_commands.COMMAND_DIGEST_ALGORITHM = COMMAND_DIGEST_ALGORITHM
+control_commands.COMMAND_DIGEST_PREFIX = COMMAND_DIGEST_PREFIX
+control_commands.COMMAND_DIGEST_HEX_DIGITS = COMMAND_DIGEST_HEX_DIGITS
+control_commands.COMMAND_DIGEST_HEX_ALPHABET = COMMAND_DIGEST_HEX_ALPHABET
+control_commands.COMMAND_TARGET_WORKER = COMMAND_TARGET_WORKER
+control_commands.COMMAND_TARGET_QUEUE = COMMAND_TARGET_QUEUE
+control_commands.COMMAND_TARGET_KINDS = COMMAND_TARGET_KINDS
+control_commands.COMMAND_TARGET_FIELDS = COMMAND_TARGET_FIELDS
+control_commands.COMMAND_BOUNDARY_FIELDS = COMMAND_BOUNDARY_FIELDS
+control_commands.COMMAND_ENVELOPE_FIELDS = COMMAND_ENVELOPE_FIELDS
+control_commands.COMMAND_ENVELOPE_IDENTITY_FIELDS = COMMAND_ENVELOPE_IDENTITY_FIELDS
+control_commands.COMMAND_ACKNOWLEDGEMENT_FIELDS = COMMAND_ACKNOWLEDGEMENT_FIELDS
+control_commands.COMMAND_ACCEPTED = COMMAND_ACCEPTED
+control_commands.COMMAND_APPLIED = COMMAND_APPLIED
+control_commands.COMMAND_REJECTED = COMMAND_REJECTED
+control_commands.COMMAND_DUPLICATE = COMMAND_DUPLICATE
+control_commands.COMMAND_ACKNOWLEDGEMENT_OUTCOMES = COMMAND_ACKNOWLEDGEMENT_OUTCOMES
+control_commands.COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED = COMMAND_ACKNOWLEDGEMENT_REASON_REQUIRED
+control_commands.COMMAND_STATUS_REGISTERED = COMMAND_STATUS_REGISTERED
+control_commands.COMMAND_ACKNOWLEDGEMENT_TRANSITIONS = COMMAND_ACKNOWLEDGEMENT_TRANSITIONS
+control_commands.COMMAND_CONFLICT_DIGEST = COMMAND_CONFLICT_DIGEST
+control_commands.COMMAND_CONFLICT_ENVELOPE = COMMAND_CONFLICT_ENVELOPE
+control_commands.COMMAND_CONFLICT_DELIVERY = COMMAND_CONFLICT_DELIVERY
+control_commands.COMMAND_CONFLICT_ACKNOWLEDGEMENT = COMMAND_CONFLICT_ACKNOWLEDGEMENT
+control_commands.COMMAND_FOLD_REGISTERED = COMMAND_FOLD_REGISTERED
+control_commands.COMMAND_FOLD_ACKNOWLEDGED = COMMAND_FOLD_ACKNOWLEDGED
+control_commands.COMMAND_FOLD_CONFLICT_RECORDED = COMMAND_FOLD_CONFLICT_RECORDED
+control_commands.COMMAND_FOLD_RETAINED_DUPLICATE = COMMAND_FOLD_RETAINED_DUPLICATE
+control_commands.COMMAND_FOLD_RETAINED_UNKNOWN = COMMAND_FOLD_RETAINED_UNKNOWN
+control_commands.COMMAND_FOLD_RETAINED_DIGEST = COMMAND_FOLD_RETAINED_DIGEST
+control_commands.COMMAND_FOLD_RETAINED_ORDER = COMMAND_FOLD_RETAINED_ORDER
+control_commands.COMMAND_DUPLICATE_REASON = COMMAND_DUPLICATE_REASON
+control_commands.DEFAULT_EVENT_ACTOR = DEFAULT_EVENT_ACTOR
+control_commands.DEFAULT_COMMAND_REGISTER_COMMAND = DEFAULT_COMMAND_REGISTER_COMMAND
+control_commands.DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND = DEFAULT_COMMAND_ACKNOWLEDGE_COMMAND
+control_commands.DEFAULT_LOCK_POLL_SECONDS = DEFAULT_LOCK_POLL_SECONDS
+control_commands.EVENTS_DIR_NAME = EVENTS_DIR_NAME
+control_commands._require_object = lambda *args, **kwargs: _require_object(*args, **kwargs)
+control_commands._require_record_type = lambda *args, **kwargs: _require_record_type(*args, **kwargs)
+control_commands._require_string = lambda *args, **kwargs: _require_string(*args, **kwargs)
+control_commands._require_identifier = lambda *args, **kwargs: _require_identifier(*args, **kwargs)
+control_commands._require_optional_identifier = (
+    lambda *args, **kwargs: _require_optional_identifier(*args, **kwargs)
+)
+control_commands._require_uuid = lambda *args, **kwargs: _require_uuid(*args, **kwargs)
+control_commands._require_optional_uuid = (
+    lambda *args, **kwargs: _require_optional_uuid(*args, **kwargs)
+)
+control_commands._require_timestamp = lambda *args, **kwargs: _require_timestamp(*args, **kwargs)
+control_commands._require_optional_string = (
+    lambda *args, **kwargs: _require_optional_string(*args, **kwargs)
+)
+control_commands._require_typed_references = (
+    lambda *args, **kwargs: _require_typed_references(*args, **kwargs)
+)
+control_commands._require_root_path = lambda *args, **kwargs: _require_root_path(*args, **kwargs)
+control_commands._parsed_timestamp = lambda *args, **kwargs: _parsed_timestamp(*args, **kwargs)
+control_commands._require_absolute_root = (
+    lambda *args, **kwargs: _require_absolute_root(*args, **kwargs)
+)
+control_commands.publish_control_event = (
+    lambda *args, **kwargs: publish_control_event(*args, **kwargs)
+)
+control_commands.inspect_control_events = (
+    lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
+)
+control_commands.utc_timestamp = lambda: utc_timestamp()
+control_commands.CommittedEvent = CommittedEvent
+control_commands.EventPublicationResult = EventPublicationResult
+
+canonical_command_payload = control_commands.canonical_command_payload
+command_payload_digest = control_commands.command_payload_digest
+_require_digest = control_commands._require_digest
+_require_command_target = control_commands._require_command_target
+_require_boundary_root = control_commands._require_boundary_root
+_require_command_boundaries = control_commands._require_command_boundaries
+_require_command_schema_version = control_commands._require_command_schema_version
+validate_command_envelope = control_commands.validate_command_envelope
+validate_command_acknowledgement = control_commands.validate_command_acknowledgement
+event_command_envelope = control_commands.event_command_envelope
+event_command_acknowledgement = control_commands.event_command_acknowledgement
+CommandRecordResult = control_commands.CommandRecordResult
+_command_conflict_reason = control_commands._command_conflict_reason
+_command_conflict_entry = control_commands._command_conflict_entry
+apply_command_envelope = control_commands.apply_command_envelope
+apply_command_acknowledgement = control_commands.apply_command_acknowledgement
+fold_commands = control_commands.fold_commands
+build_command_envelope = control_commands.build_command_envelope
+build_command_acknowledgement = control_commands.build_command_acknowledgement
+read_command_slots = control_commands.read_command_slots
+_committed_events_after_publication = control_commands._committed_events_after_publication
+_folded_commands_after_publication = control_commands._folded_commands_after_publication
+register_command = control_commands.register_command
+acknowledge_command = control_commands.acknowledge_command
+observe_commands = control_commands.observe_commands
 
 
 # --- managed mission dialogs, cancellation, and replacement -------------------

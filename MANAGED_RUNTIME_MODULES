@@ -9,3 +9,4 @@ cockpit_control_locks
 cockpit_control_journal
 cockpit_control_projection
 cockpit_control_lifecycle
+cockpit_control_commands

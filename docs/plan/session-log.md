@@ -431,3 +431,9 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T07:42:00+01:00 — TH4.E3.US1 DONE: worker lifecycle/freshness/stale-observation seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after lifecycle/facade/install smoke tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T07:48:00+01:00 — TH4.E3.US2 START: dependency TH4.E3.US1 done; scope extracts command envelopes, payload digests, acknowledgements, idempotency/conflict folding behind the facade. — copilotcockpit
+
+- 2026-09-07T08:22:00+01:00 — TH4.E3.US2 REVIEW 1 REQUEST_CHANGES / REWORK 1/1: reviewer found command seam tests omitted from committed py-tests.bats unit gate; rework limited to stdlib unittest wrapper wiring and focused rerun. — copilotcockpit
+
+- 2026-09-07T08:36:00+01:00 — TH4.E3.US2 DONE: command envelope/digest/acknowledgement/idempotency seam extracted with facade compatibility and managed distribution coverage; rework wired command seam unittests into bats gate, reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

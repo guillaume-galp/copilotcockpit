@@ -31,6 +31,7 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit_control_journal.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_projection.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_lifecycle.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_commands.py" ]
 
 	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/control-root"
 	run "$HOME/.local/bin/cockpit-overseer" start

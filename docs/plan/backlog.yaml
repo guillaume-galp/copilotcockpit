@@ -581,7 +581,7 @@ themes:
             depends_on: [TH4.E2.US4]
           - id: TH4.E3.US2
             title: "Command envelopes and acknowledgements extraction"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E3-runtime-orchestration-domain-extraction/stories/US2-command-envelopes-acknowledgements.md
