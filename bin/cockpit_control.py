@@ -44,6 +44,10 @@ import cockpit_control_mission_control as control_mission_control
 import cockpit_control_controller as control_controller
 import cockpit_control_wake as control_wake
 import cockpit_control_root_schema as control_root_schema
+import cockpit_control_cli as control_cli
+import cockpit_control_rendering as control_rendering
+import cockpit_control_queue_adapter as control_queue_adapter
+import cockpit_control_tmux_adapter as control_tmux_adapter
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
 CONTROL_METADATA_NAME = control_root_schema.CONTROL_METADATA_NAME
@@ -11800,6 +11804,36 @@ def _report_mission_status(report: MissionControlReport) -> int:
     return 0
 
 
+# --- managed queue/tmux/rendering adapter seams ------------------------------
+
+control_queue_adapter.bind_facade(globals())
+QueueItemObservation = control_queue_adapter.QueueItemObservation
+QueueObservation = control_queue_adapter.QueueObservation
+_queue_item_observation = control_queue_adapter._queue_item_observation
+_queue_paused = control_queue_adapter._queue_paused
+observe_queue = control_queue_adapter.observe_queue
+
+control_tmux_adapter.bind_facade(globals())
+_session_identity = control_tmux_adapter.session_identity
+
+control_rendering.bind_facade(globals())
+_print_error = control_rendering._print_error
+_report_lock_repair = control_rendering._report_lock_repair
+_report_preflight = control_rendering._report_preflight
+_report_store_repair = control_rendering._report_store_repair
+_report_pending_debris = control_rendering._report_pending_debris
+_report_projection_debris = control_rendering._report_projection_debris
+_report_ledger_projection = control_rendering._report_ledger_projection
+_report_event_publication = control_rendering._report_event_publication
+_report_event_history = control_rendering._report_event_history
+_report_lifecycle_record = control_rendering._report_lifecycle_record
+_report_lifecycle_status = control_rendering._report_lifecycle_status
+_report_command_record = control_rendering._report_command_record
+_report_command_status = control_rendering._report_command_status
+_report_mission_control = control_rendering._report_mission_control
+_report_mission_status = control_rendering._report_mission_status
+
+
 # --- managed controller reconciliation seam ----------------------------------
 
 control_controller.bind_facade(globals())
@@ -12298,7 +12332,7 @@ def _add_command_boundary_arguments(parser: Any) -> None:
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
     """Run the small control-store CLI used by humans and controller commands."""
 
     import argparse
@@ -13034,6 +13068,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     except ControlStoreError as exc:
         return _print_error(exc)
+
+
+control_cli.bind_facade(globals())
+main = control_cli.main
 
 
 if __name__ == "__main__":

@@ -455,3 +455,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T11:40:00+01:00 — TH4.E3 EPIC DONE: lifecycle, command, mission-control, controller, and wake seams done; developer integration `./run-tests.sh all` passed (unit 1..236 plus template/skills/integration/codex) and epic review APPROVED. Next action: start TH4.E4 CLI/conformance cleanup. — copilotcockpit
 
+- 2026-09-07T11:45:00+01:00 — TH4.E4.US1 START: dependency TH4.E3 done; scope thins CLI/rendering/tmux/queue adapter glue behind stable `main()` while preserving public outputs and fail-closed diagnostics. — copilotcockpit
+
+- 2026-09-07T12:25:00+01:00 — TH4.E4.US1 DONE: CLI/rendering/queue/tmux adapter seams added behind stable `main()` with managed distribution coverage; reviewer APPROVED after focused adapter/import/output tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

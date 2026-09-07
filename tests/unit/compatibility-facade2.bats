@@ -68,4 +68,8 @@ PY
     echo "$output" | grep -q "cockpit_control_mission_control"
     echo "$output" | grep -q "cockpit_control_controller"
     echo "$output" | grep -q "cockpit_control_wake"
+    echo "$output" | grep -q "cockpit_control_queue_adapter"
+    echo "$output" | grep -q "cockpit_control_tmux_adapter"
+    echo "$output" | grep -q "cockpit_control_rendering"
+    echo "$output" | grep -q "cockpit_control_cli"
 }

@@ -611,12 +611,12 @@ themes:
       - id: TH4.E4
         title: "CLI thinning and conformance cleanup"
         slug: cli-conformance-cleanup
-        status: todo
+        status: in-progress
         depends_on: [TH4.E3]
         stories:
           - id: TH4.E4.US1
             title: "CLI parsing, rendering, and adapter thinning"
-            status: todo
+            status: done
             priority: high
             size: M
             path: docs/themes/TH4-control-plane-modularity-ontology/epics/E4-cli-conformance-cleanup/stories/US1-cli-parsing-rendering-adapters.md

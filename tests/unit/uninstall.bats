@@ -37,6 +37,10 @@ setup() {
 	[ ! -e "$HOME/.local/bin/cockpit_control_mission_control.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ ! -e "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ ! -e "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ ! -e "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ ! -e "$HOME/.local/bin/cockpit_control_cli.py" ]
 	[ -f "$HOME/.copilot/skills/unrelated/SKILL.md" ]
 	[ -f "$HOME/.agents/skills/unrelated/SKILL.md" ]
 }
@@ -68,6 +72,10 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit_control_mission_control.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]
 }
 
 @test "uninstall --codex-only leaves Copilot skills and cockpit tools" {
@@ -96,6 +104,10 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit_control_mission_control.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]
 }
 
 @test "uninstall: unknown option exits 2" {

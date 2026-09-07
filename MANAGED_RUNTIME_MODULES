@@ -13,3 +13,7 @@ cockpit_control_commands
 cockpit_control_mission_control
 cockpit_control_controller
 cockpit_control_wake
+cockpit_control_queue_adapter
+cockpit_control_tmux_adapter
+cockpit_control_rendering
+cockpit_control_cli

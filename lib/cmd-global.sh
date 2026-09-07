@@ -23,6 +23,10 @@
 #   * bin/cockpit_control_mission_control.py -> ~/.local/bin/cockpit_control_mission_control.py
 #   * bin/cockpit_control_controller.py -> ~/.local/bin/cockpit_control_controller.py
 #   * bin/cockpit_control_wake.py -> ~/.local/bin/cockpit_control_wake.py
+#   * bin/cockpit_control_queue_adapter.py -> ~/.local/bin/cockpit_control_queue_adapter.py
+#   * bin/cockpit_control_tmux_adapter.py -> ~/.local/bin/cockpit_control_tmux_adapter.py
+#   * bin/cockpit_control_rendering.py -> ~/.local/bin/cockpit_control_rendering.py
+#   * bin/cockpit_control_cli.py -> ~/.local/bin/cockpit_control_cli.py
 #
 # Modes:
 #   (default)   copy with backup-before-overwrite (cc_install_file)
@@ -82,6 +86,10 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit_control_mission_control.py
   ~/.local/bin/cockpit_control_controller.py
   ~/.local/bin/cockpit_control_wake.py
+  ~/.local/bin/cockpit_control_queue_adapter.py
+  ~/.local/bin/cockpit_control_tmux_adapter.py
+  ~/.local/bin/cockpit_control_rendering.py
+  ~/.local/bin/cockpit_control_cli.py
 
 Options:
   --link                Symlink each artefact back to the repo instead of copying.
@@ -381,6 +389,10 @@ main() {
 	local ccm_src="$CC_ROOT/bin/cockpit_control_mission_control.py"
 	local ccco_src="$CC_ROOT/bin/cockpit_control_controller.py"
 	local ccw_src="$CC_ROOT/bin/cockpit_control_wake.py"
+	local ccqa_src="$CC_ROOT/bin/cockpit_control_queue_adapter.py"
+	local ccta_src="$CC_ROOT/bin/cockpit_control_tmux_adapter.py"
+	local ccrn_src="$CC_ROOT/bin/cockpit_control_rendering.py"
+	local cccf_src="$CC_ROOT/bin/cockpit_control_cli.py"
 	local skills_dst_root="$HOME/.copilot/skills"
 	local home_bin="$HOME/.local/bin"
 	local cw_dst="$home_bin/cockpit-wake"
@@ -400,6 +412,10 @@ main() {
 	local ccm_dst="$home_bin/cockpit_control_mission_control.py"
 	local ccco_dst="$home_bin/cockpit_control_controller.py"
 	local ccw_dst="$home_bin/cockpit_control_wake.py"
+	local ccqa_dst="$home_bin/cockpit_control_queue_adapter.py"
+	local ccta_dst="$home_bin/cockpit_control_tmux_adapter.py"
+	local ccrn_dst="$home_bin/cockpit_control_rendering.py"
+	local cccf_dst="$home_bin/cockpit_control_cli.py"
 
 	# --- Preflight: all REQUIRED sources must exist BEFORE any write (AC9) ----
 	# Validate up front so a missing required source never leaves a partial,
@@ -480,6 +496,22 @@ main() {
 		log_error "required source missing: $ccw_src"
 		missing=1
 	fi
+	if [[ ! -f "$ccqa_src" ]]; then
+		log_error "required source missing: $ccqa_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccta_src" ]]; then
+		log_error "required source missing: $ccta_src"
+		missing=1
+	fi
+	if [[ ! -f "$ccrn_src" ]]; then
+		log_error "required source missing: $ccrn_src"
+		missing=1
+	fi
+	if [[ ! -f "$cccf_src" ]]; then
+		log_error "required source missing: $cccf_src"
+		missing=1
+	fi
 	if [[ "$missing" -ne 0 ]]; then
 		log_error "aborting: required source(s) missing — nothing was installed"
 		return 1
@@ -538,6 +570,10 @@ main() {
 	cc_place "$ccm_src" "$ccm_dst" || return 1
 	cc_place "$ccco_src" "$ccco_dst" || return 1
 	cc_place "$ccw_src" "$ccw_dst" || return 1
+	cc_place "$ccqa_src" "$ccqa_dst" || return 1
+	cc_place "$ccta_src" "$ccta_dst" || return 1
+	cc_place "$ccrn_src" "$ccrn_dst" || return 1
+	cc_place "$cccf_src" "$cccf_dst" || return 1
 
 	# --- PATH guidance (AC5): advise, never edit dotfiles --------------------
 	case ":$PATH:" in

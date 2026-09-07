@@ -54,6 +54,10 @@ cc_make_source_fallback_fixture() {
 	[ -f "$HOME/.local/bin/cockpit_control_mission_control.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]
 	[ "$(cc_count_backups "$HOME")" -eq 0 ]
 
 	run env HOME="$HOME" CC_RELEASE_BASE_URL="file://$fixture" bash "$CC_REPO_ROOT/install.sh"
@@ -88,4 +92,8 @@ cc_make_source_fallback_fixture() {
 	[ -f "$HOME/.local/bin/cockpit_control_mission_control.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
+	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]
 }
