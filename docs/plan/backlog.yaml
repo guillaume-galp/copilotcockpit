@@ -534,7 +534,7 @@ themes:
       - id: TH4.E2
         title: "Control-store domain extraction"
         slug: control-store-domain-extraction
-        status: in-progress
+        status: done
         depends_on: [TH4.E1]
         stories:
           - id: TH4.E2.US1

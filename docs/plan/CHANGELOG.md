@@ -438,3 +438,16 @@ notion of "command" alongside `command-envelope`; and no `.gitignore` for
 **Files Modified:** `MANAGED_RUNTIME_MODULES`, `docs/architecture/facade-compatibility.md`, `bin/cockpit_control_seams.py`, `tests/unit/compatibility-facade2.bats`, `tests/unit/py-tests.bats`, `tests/unit/test_typed_contracts.py`, `tests/unit/cmd-wake.bats`.
 
 **Evidence:** Full `./run-tests.sh all` exited 0 with unit `1..233`; epic quality review APPROVED. Residual risk: `cockpit_control_seams` remains source-tree-only until a later story adds installer management before runtime use.
+
+## Epic TH4.E2 — Control-store domain extraction
+
+**Stories Completed:** TH4.E2.US1, TH4.E2.US2, TH4.E2.US3, TH4.E2.US4 (reviewer-approved).
+
+**Key Changes:**
+- Extracted control-root/schema/compatibility, portable lock ownership/guarded repair, immutable journal publication, and projection/replay into facade-backed modules.
+- Registered extracted runtime modules in `MANAGED_RUNTIME_MODULES` before behavior moved and updated global install/link, doctor drift, uninstall, release/cold-install, and smoke assertions.
+- Preserved ADR-018/019 fail-closed and durability contracts with focused seam tests, interruption matrix coverage, and full repository gates.
+
+**Files Modified:** `bin/cockpit_control.py`, `bin/cockpit_control_root_schema.py`, `bin/cockpit_control_locks.py`, `bin/cockpit_control_journal.py`, `bin/cockpit_control_projection.py`, `MANAGED_RUNTIME_MODULES`, `lib/cmd-global.sh`, `lib/cmd-doctor.sh`, `uninstall.sh`, control-store seam tests, managed-distribution tests.
+
+**Evidence:** Developer epic integration and final full `./run-tests.sh all` exited 0 with unit `1..233`; integration smoke `1..8`; epic re-review APPROVED after exact managed module smoke coverage was corrected. Residual risk: duplicated facade code remains temporarily for rollback/compatibility until later cleanup.
