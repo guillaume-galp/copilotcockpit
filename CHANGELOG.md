@@ -17,6 +17,40 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.9.0 — 2026-09-07
+
+### Added
+- Delivered the TH3/VP3 holistic cockpit control plane: versioned control store,
+  immutable event journal, replayable ledger projections, structured worker
+  lifecycle state, idempotent command envelopes, deterministic controller ticks,
+  bounded stale-worker recovery, queue-linked escalation, intent-aware wakes,
+  durable wake leases, evidence-boundary enforcement, additive migration, and a
+  deterministic end-to-end resilience proof.
+- Added `cockpit-control` and the Python control-plane runtime with preflight,
+  guarded repair, replay, lifecycle, command, mission, controller, and boundary
+  capabilities.
+- Added integration resilience scenarios covering overseer reset recovery,
+  stalled-worker replacement or escalation, governed evidence clearance, and
+  wake termination/suspension.
+
+### Changed
+- Scheduled VP3 wake jobs now call the managed controller through wake leases
+  instead of directly pasting autonomous prompts.
+- Doctor/readiness output now surfaces control-plane preflight and migration
+  guidance for legacy capability.
+
+### Security
+- Hardened generated wake job scripts by shell-quoting user and persisted wake
+  metadata, including notification labels, with regression tests for malicious
+  owner and label inputs.
+
+### Tests
+- Expanded the repository gate to cover the full TH3 control-plane contract,
+  including schemas, lifecycle transitions, command replay, reconciliation
+  precedence, wake stop/lease behavior, migration, interrupted writes, malformed
+  state, lock contention, stale workers, overlapping wakes, and trace/evidence
+  boundary reconstruction.
+
 ## v0.8.2 — 2026-07-31
 
 ### Fixed
