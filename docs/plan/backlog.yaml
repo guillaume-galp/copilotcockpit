@@ -1,5 +1,5 @@
 version: "1.0"
-last-updated: "2026-09-07T00:58:35+01:00"
+last-updated: "2026-09-07T01:25:35+01:00"
 
 # copilotcockpit backlog — single source of truth for the orchestrator.
 # Phase 2 (Architecture) complete. Phase 3 (Planning) will decompose TH1 into
@@ -320,8 +320,8 @@ themes:
     slug: holistic-cockpit-control-plane
     vision: VP3-overseer-orchestration-resilience
     title: "Holistic cockpit control plane"
-    status: in-progress
-    locked: false
+    status: done
+    locked: true
     readme: docs/themes/TH3-holistic-cockpit-control-plane/README.md
     epics:
       - id: TH3.E1

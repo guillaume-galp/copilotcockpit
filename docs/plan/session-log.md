@@ -1,5 +1,9 @@
 # Session Log — copilotcockpit
 
+- 2026-09-07T01:25:35+01:00 — TH3 THEME DONE+LOCKED: final reviewer APPROVED and product-owner revalidated VP3 success criteria under the reduced envelope; SC1–7 and SC10–11 covered, SC8 cross-model parity and SC9 AIC/token measurement recorded as non-blocking operational follow-ups. User pre-authorized checkpoint acceptance/lock, so TH3 is marked done and locked. — copilotcockpit
+
+- 2026-09-07T01:22:46+01:00 — TH3 THEME GATE ARTIFACTS: developer full-test/readiness gate passed (`./run-tests.sh all` unit `1..228`, doctor, global/codex-global/e2e dry-runs, Python compile, Go build, release prerequisites); release notes created at `docs/plan/RELEASE-TH3.md` and TH3 issue templates archived under `.github/ISSUE_TEMPLATE/archive/`. — copilotcockpit
+
 - 2026-09-07T00:58:35+01:00 — TH3.E5 EPIC DONE: final wake-script quoting rework passed targeted wake 16/16, wake-migrate 3/3, integration 8/8, and full `./run-tests.sh all` (unit `1..223` plus template/skills/integration/codex); final epic re-review APPROVED, changelog appended, and E5 marked done. Residual accepted risk: cron path quoting for unusual wake-dir paths is a future robustness cleanup. — copilotcockpit
 
 - 2026-09-07T00:38:29+01:00 — TH3.E5 EPIC RE-REVIEW REQUEST_CHANGES: exported wake metadata was hardened, but reviewer found a remaining label command-injection vector in generated `notify_line`; invoking final focused epic rework to quote notify arguments and add malicious-label regression. — copilotcockpit
