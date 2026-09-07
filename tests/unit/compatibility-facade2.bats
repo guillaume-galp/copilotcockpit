@@ -66,4 +66,5 @@ PY
     echo "$output" | grep -q "cockpit_control_lifecycle"
     echo "$output" | grep -q "cockpit_control_commands"
     echo "$output" | grep -q "cockpit_control_mission_control"
+    echo "$output" | grep -q "cockpit_control_controller"
 }

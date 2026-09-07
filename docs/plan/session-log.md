@@ -445,3 +445,7 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T09:33:00+01:00 — TH4.E3.US3 DONE: mission-control question/reply/access-prompt/cancel/replace/recovery seam extracted with facade compatibility and managed distribution coverage; cleanup added ignore rules, final reviewer APPROVED, developer full `./run-tests.sh all` exit 0. — copilotcockpit
 
+- 2026-09-07T09:40:00+01:00 — TH4.E3.US4 START: dependency TH4.E3.US3 done; scope extracts controller evidence/reconciliation/one-action/bounded-recovery decision inputs behind the facade without changing adapters or outputs. — copilotcockpit
+
+- 2026-09-07T10:20:00+01:00 — TH4.E3.US4 DONE: controller evidence/reconciliation/one-action/recovery seam extracted with facade compatibility and managed distribution coverage; reviewer APPROVED after controller/recovery/escalation/facade/install tests and developer full `./run-tests.sh all` exit 0. — copilotcockpit
+

@@ -41,6 +41,7 @@ import cockpit_control_projection as control_projection
 import cockpit_control_lifecycle as control_lifecycle
 import cockpit_control_commands as control_commands
 import cockpit_control_mission_control as control_mission_control
+import cockpit_control_controller as control_controller
 import cockpit_control_root_schema as control_root_schema
 
 CONTROL_SCHEMA_VERSION = control_root_schema.CONTROL_SCHEMA_VERSION
@@ -11796,6 +11797,43 @@ def _report_mission_status(report: MissionControlReport) -> int:
             file=os.sys.stderr,
         )
     return 0
+
+
+# --- managed controller reconciliation seam ----------------------------------
+
+control_controller.bind_facade(globals())
+control_controller.ControlStoreError = ControlStoreError
+
+ControllerDiagnostic = control_controller.ControllerDiagnostic
+ControllerEvidence = control_controller.ControllerEvidence
+ControllerAction = control_controller.ControllerAction
+ControllerRecoveryStep = control_controller.ControllerRecoveryStep
+ControllerTickResult = control_controller.ControllerTickResult
+ControllerJournalObservation = control_controller.ControllerJournalObservation
+ControllerTick = control_controller.ControllerTick
+controller_state_key = control_controller.controller_state_key
+controller_ledger_plan = control_controller.controller_ledger_plan
+_controller_derived_uuid = control_controller._controller_derived_uuid
+_controller_observation_action = control_controller._controller_observation_action
+controller_recovery_ladder = control_controller.controller_recovery_ladder
+select_recovery_step = control_controller.select_recovery_step
+select_recovery_action = control_controller.select_recovery_action
+_mission_boundaries = control_controller._mission_boundaries
+_mission_slot_command_id = control_controller._mission_slot_command_id
+select_controller_action = control_controller.select_controller_action
+build_controller_dispatch = control_controller.build_controller_dispatch
+build_controller_observation = control_controller.build_controller_observation
+_controller_dispatched_pairs = control_controller._controller_dispatched_pairs
+_correlation_counts = control_controller._correlation_counts
+controller_tick = control_controller.controller_tick
+_precedence_verdicts = control_controller._precedence_verdicts
+controller_precedence_lines = control_controller.controller_precedence_lines
+controller_tick_lines = control_controller.controller_tick_lines
+_contested_duplicate = control_controller._contested_duplicate
+worker_lifecycle_cancellation_route = control_controller.worker_lifecycle_cancellation_route
+controller_duplicate_repair_route = control_controller.controller_duplicate_repair_route
+controller_blocking_repair = control_controller.controller_blocking_repair
+report_controller_tick = control_controller.report_controller_tick
 
 
 def _parsed_command_payload(value: str) -> Dict[str, Any]:
