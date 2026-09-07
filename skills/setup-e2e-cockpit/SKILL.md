@@ -169,7 +169,7 @@ Load the runtime skills in order:
 After reading your skills, confirm: "I am ${role} for $(basename "$(pwd)"), ready."
 PRIME
 
-  cockpit-protocol dispatch \
+  cockpit-protocol dispatch --bootstrap \
     --target "$target" \
     --message-file /tmp/prime_${role}.txt \
     --force
@@ -219,8 +219,11 @@ For the `e2e-cockpit` overlay specifically, include a visible
 `## Cockpit communication protocol` section that makes the managed-cockpit rule
 persistent in the generated project:
 
-- Use `cockpit-protocol` for dispatch, send, tail, watch, pending questions,
-  replies, `meta cockpit --json`, and `status --workers all --json`.
+- Use `cockpit-queue` plus `cockpit-overseer tick` for product missions.
+- Use `cockpit-protocol` for send, tail, watch, pending questions, replies,
+  `meta cockpit --json`, and `status --workers all --json`.
+- Use `cockpit-protocol dispatch --bootstrap --target ...` only while priming a
+  newly created worker pane; never use it for product work.
 - Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
   checks and short-loop polling.
 - Do not use ad-hoc raw `tmux` commands for cockpit status, discovery, pane

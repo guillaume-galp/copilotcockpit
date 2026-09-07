@@ -7142,7 +7142,9 @@ class QueueItemObservation:
     """One durable queue item as the controller may read it, never own it."""
 
     item_id: str
+    title: str
     state: str
+    source_text: str
     created_at: str
 
     @property
@@ -7197,7 +7199,9 @@ def _queue_item_observation(path: Path, label: str) -> QueueItemObservation:
         )
     return QueueItemObservation(
         item_id=item_id,
+        title=_require_string(record, "title", label),
         state=state,
+        source_text=_require_string(record, "source_text", label),
         created_at=_require_string(record, "created_at", label),
     )
 

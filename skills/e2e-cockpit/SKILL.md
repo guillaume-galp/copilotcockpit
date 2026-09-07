@@ -132,13 +132,17 @@ Do **NOT**:
 ### Dispatch — Reliable Pattern
 
 ```bash
-# Multi-line mission brief
+# Persist the multi-line mission before delivery.
 cat >/tmp/worker-mission.txt <<'EOF'
 <multi-line mission brief>
 EOF
-cockpit-protocol dispatch \
-  --target "<session>:<window>" \
-  --message-file /tmp/worker-mission.txt
+QI_ID="$(cockpit-queue enqueue \
+  --approved \
+  --title "<short mission title>" \
+  --text "$(cat /tmp/worker-mission.txt)")"
+cockpit-queue start-next
+cockpit-queue transition "$QI_ID" implementing --reason "ready for worker-dev"
+cockpit-overseer tick
 
 # Single-line command
 cockpit-protocol send --target "<session>:<window>" --text "git status"
@@ -146,7 +150,6 @@ cockpit-protocol send --target "<session>:<window>" --text "git status"
 # Worker shortcut command (session resolves from --session, TMUX_SESSION,
 # current tmux session, or single-cockpit auto-detection)
 cockpit-protocol tail --worker worker-test --lines 80
-cockpit-protocol dispatch --worker worker-fix --message-file /tmp/worker-mission.txt
 cockpit-protocol status --workers all --json
 ```
 
@@ -154,12 +157,15 @@ cockpit-protocol status --workers all --json
 
 | Rule | Why |
 |------|-----|
-| `cockpit-protocol dispatch` for multi-line | Safely delivers multi-line content and confirms worker start |
+| `cockpit-queue enqueue` + state transition + `cockpit-overseer tick` | Commits mission authority before the controller delivers the brief |
 | `cockpit-protocol send` for one-liners | Clean semantic command for simple pane input |
 | `cockpit-protocol tail/watch` for observability | Uniform read path for workers and log panes |
 | `cockpit-protocol meta cockpit --json` | Discovers the active cockpit session, windows, and worker targets |
 | `cockpit-protocol status --workers all --json` | Reads worker state without manual pane-tail interpretation |
-| `cockpit-overseer dispatch --ref ...` | Keeps mission briefs by reference instead of repeated prose; injects a UUID `TRACE-ID` header |
+
+`cockpit-overseer dispatch` and `cockpit-protocol mission` are retired bypasses.
+`cockpit-protocol dispatch --bootstrap --target ...` is reserved for setup-time
+role priming and must never carry product work.
 
 ### When to Use Each Worker
 
@@ -296,15 +302,24 @@ ADR-014 ladder it actually applied, in order. Rules 7 (`live-status`) and 8
 (`pane-text`) always carry `advances-state no` — pane text is diagnostic only
 and can never dispatch, complete, or advance a mission.
 
-Exit codes: `0` when the tick dispatched, recorded an observation, redelivered
+The controller first commits the command and reserves the worker's one mission
+slot, then delivers the queue-owned `source_text` with `MISSION-ID`,
+`COMMAND-ID`, `QUEUE-ITEM-ID`, and `TRACE-ID` headers. A reserved mission with
+no worker `accepted` lifecycle evidence is redelivered with the same command ID;
+the fold creates no second event or mission.
+
+Exit codes: `0` when the tick dispatched and delivered, recorded an observation, redelivered
 a command that already stands, or found nothing new. It exits `1` in exactly two
-cases, both of which print a named diagnostic on stderr and never a traceback:
+controller cases plus explicit delivery failure, all of which print a named
+diagnostic on stderr and never a traceback:
 
 * the decision is **blocked** — the tick refuses to guess, names the exact
   repair, and records one conflict observation;
 * the dispatch command was committed but **did not claim the worker's mission
   slot** — the fold, not the tick, decides who holds a slot, so the tick reports
   what the fold recorded and creates no second mission.
+* tmux delivery failed after commit — the durable reservation remains and the
+  next tick redelivers the same command after the target is restored.
 
 Ticking again over the same evidence persists nothing, so a recurrent wake
 terminates instead of re-investigating.

@@ -90,10 +90,22 @@ Fix brief from worker-test:
   action: <what needs to change>
 MISSION
 
-cockpit-protocol dispatch \
-  --target "<session>:worker-dev" \
-  --message-file /tmp/worker-mission.txt
+FIX_QI_ID="$(cockpit-queue enqueue \
+  --approved \
+  --title "Fix <TC-ID>" \
+  --text "$(cat /tmp/worker-mission.txt)")"
+printf 'queued fix as %s\n' "$FIX_QI_ID"
+
+# Stop here while another item is active. After this mission reports a terminal
+# lifecycle and the overseer settles the current queue item:
+cockpit-queue start-next
+cockpit-queue transition "$FIX_QI_ID" <implementing|fixing> --reason "triaged E2E failure"
+cockpit-overseer tick
 ```
+
+Use `implementing` to route an app/spec fix to `worker-dev`, or `fixing` to
+route non-obvious diagnosis to `worker-fix`. Never activate the queued fix while
+the current item is still active.
 
 ---
 

@@ -103,12 +103,12 @@ Usage:
   cockpit-protocol meta windows [--session SESSION]
   cockpit-protocol meta resolve-target --worker <worker-name> [--session SESSION]
   cockpit-protocol meta cockpit [--session SESSION] [--json]
-  cockpit-protocol dispatch (--target <session:window> | --worker <worker-name> [--session SESSION]) (--message <text> | --message-file <path>) [--force]
+  cockpit-protocol dispatch --bootstrap --target <session:window> (--message <text> | --message-file <path>) [--force]
   cockpit-protocol send (--target <session:window> | --worker <worker-name> [--session SESSION]) --text <text>
   cockpit-protocol tail (--target <session:window> | --worker <worker-name> [--session SESSION]) [--lines 20]
   cockpit-protocol watch (--target <session:window> | --worker <worker-name> [--session SESSION]) [--lines 20] [--interval 2]
   cockpit-protocol status [--workers all|worker-dev,worker-test] [--session SESSION] [--json]
-  cockpit-protocol mission --worker <worker-name> --id <mission-id> [--template <name>] (--message <text> | --message-file <path>) [--force]
+  cockpit-protocol mission ...  # retired; enqueue product work and run cockpit-overseer tick
   cockpit-protocol nudge --worker <worker-name> --trace-id <trace-id> --kind resend-report
   cockpit-protocol report --worker <worker-name> [--trace-id <trace-id>] [--format text|markdown]
   cockpit-protocol wait-report --worker <worker-name> [--trace-id <trace-id>] [--timeout 180]
@@ -130,12 +130,19 @@ func cmdDispatch(args []string) error {
 	session := fs.String("session", "", "tmux session for --worker resolution")
 	message := fs.String("message", "", "inline mission text")
 	messageFile := fs.String("message-file", "", "mission file path")
+	bootstrap := fs.Bool("bootstrap", false, "allow setup-time worker priming only")
 	force := fs.Bool("force", false, "dispatch even when worker pane looks busy")
 	enterDelay := fs.Int("enter-delay", 1, "seconds to wait before Enter")
 	confirmDelay := fs.Int("confirm-delay", 4, "seconds to wait before status check")
 	confirmLines := fs.Int("confirm-lines", 8, "lines captured for status check")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if !*bootstrap {
+		return errors.New("direct mission dispatch is retired; enqueue product work with cockpit-queue and run cockpit-overseer tick")
+	}
+	if strings.TrimSpace(*worker) != "" {
+		return errors.New("--bootstrap requires an explicit --target and cannot address a managed worker mission")
 	}
 
 	resolvedTarget, workerAddressed, err := resolveCommandTarget(*target, *worker, *session)
@@ -438,41 +445,7 @@ func cmdStatus(args []string) error {
 }
 
 func cmdMission(args []string) error {
-	fs := flag.NewFlagSet("mission", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	worker := fs.String("worker", "", "worker name")
-	session := fs.String("session", "", "tmux session")
-	id := fs.String("id", "", "mission id")
-	template := fs.String("template", "", "mission template name")
-	message := fs.String("message", "", "inline mission text")
-	messageFile := fs.String("message-file", "", "mission file path")
-	force := fs.Bool("force", false, "dispatch even when worker pane looks busy")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" || *id == "" {
-		return errors.New("--worker and --id are required")
-	}
-	if (*message == "") == (*messageFile == "") {
-		return errors.New("use exactly one of --message or --message-file")
-	}
-	content := *message
-	if *messageFile != "" {
-		b, err := os.ReadFile(*messageFile)
-		if err != nil {
-			return err
-		}
-		content = string(b)
-	}
-	var b strings.Builder
-	b.WriteString("MISSION-ID: " + *id + "\n")
-	if *template != "" {
-		b.WriteString("MISSION-TEMPLATE: " + *template + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(strings.TrimRight(content, "\n"))
-	b.WriteString("\n")
-	return dispatchContent(*worker, *session, b.String(), *force, 1, 4, 8)
+	return errors.New("mission is retired because it bypasses durable controller state; enqueue product work with cockpit-queue and run cockpit-overseer tick")
 }
 
 func cmdNudge(args []string) error {
@@ -646,54 +619,6 @@ func cmdReply(args []string) error {
 	}
 	path := fmt.Sprintf("/tmp/%s-answer.txt", *worker)
 	return os.WriteFile(path, []byte(*answer+"\n"), 0o600)
-}
-
-func dispatchContent(worker string, session string, content string, force bool, enterDelay int, confirmDelay int, confirmLines int) error {
-	target, err := resolveWorkerTarget(worker, session)
-	if err != nil {
-		return err
-	}
-	if !force {
-		if err := refuseBusyWorker(target, worker); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(content) == "" {
-		return errors.New("mission content is empty")
-	}
-	tmp, err := os.CreateTemp("", "cockpit-mission-*.txt")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if _, err := tmux("load-buffer", tmpPath); err != nil {
-		return err
-	}
-	if _, err := tmux("paste-buffer", "-t", target); err != nil {
-		return err
-	}
-	time.Sleep(time.Duration(enterDelay) * time.Second)
-	if _, err := tmux("send-keys", "-t", target, "", "Enter"); err != nil {
-		return err
-	}
-	time.Sleep(time.Duration(confirmDelay) * time.Second)
-	out, err := captureTail(target, confirmLines)
-	if err != nil {
-		return err
-	}
-	fmt.Print(out)
-	if !workerStarted(out) {
-		return errors.New("worker start not confirmed (missing working status marker)")
-	}
-	return nil
 }
 
 func resolveCommandTarget(target string, worker string, session string) (string, bool, error) {

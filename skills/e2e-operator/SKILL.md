@@ -121,7 +121,7 @@ If unhealthy → cockpit problem. Check port-forward window. Do not dispatch.
 | **Spec bug** | stale selector, wrong mock, timing | dispatch to `worker-dev` |
 | **Flaky** | passes on retry | note in `e2e/flaky-known.md`; dispatch to `worker-fix` |
 
-### Step 5 — Dispatch fix brief (`cockpit-protocol` pattern)
+### Step 5 — Queue and dispatch a fix brief
 
 ```bash
 cat > /tmp/worker-mission.txt << 'MISSION'
@@ -135,16 +135,28 @@ Fix brief from worker-test:
   action: <what needs to change>
   verify with: ./e2e/run-audit.sh --scope "@TC-XXX-NNN" --label "fix-verify"
 MISSION
-cockpit-protocol dispatch \
-  --target "<session>:worker-dev" \
-  --message-file /tmp/worker-mission.txt
+FIX_QI_ID="$(cockpit-queue enqueue \
+  --approved \
+  --title "Fix <TC-ID>" \
+  --text "$(cat /tmp/worker-mission.txt)")"
+printf 'queued fix as %s\n' "$FIX_QI_ID"
+
+# Only after the current mission has emitted a terminal lifecycle event and its
+# queue item is settled:
+cockpit-queue start-next
+cockpit-queue transition "$FIX_QI_ID" <implementing|fixing> --reason "triaged E2E failure"
+cockpit-overseer tick
 rm /tmp/worker-mission.txt
 ```
 
 ### Dispatch constraints (worker-test must enforce)
 
 - **One brief per worker per dispatch** — never send two TCs to the same worker in one message
-- **Check worker is idle before dispatching** — use `cockpit-protocol status --workers all --json`, `cockpit-protocol tail`, or `cockpit-overseer status`; if the worker is busy, queue the brief and wait
+- **Let durable state decide worker availability** — queue the brief and let `cockpit-overseer tick` refuse or defer while the worker's mission slot is claimed
+- **Never activate a sibling fix item while another queue item is active** —
+  enqueue it, report its QI-ID, and wait for the overseer to settle the current
+  mission/item before `start-next`
+- Use `implementing` for `worker-dev` and `fixing` for `worker-fix`
 - **Never chain briefs inline** — do not write "fix TC-001, then fix TC-002"; send TC-001, wait for DONE, then send TC-002
 - **Separate app-bug briefs by root cause** — if two TCs share a root cause, send one brief covering both; if they have different root causes, send two separate briefs in separate turns
 - **Carry the trace UUID forward** — every follow-up brief or answer should keep the same `TRACE-ID` unless you intentionally start a new dialog; use `cockpit-trace show <uuid>` to inspect the thread

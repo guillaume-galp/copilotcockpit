@@ -87,23 +87,19 @@ EOF
 	echo "$output" | grep -q "steady"
 }
 
-@test "cockpit-overseer dispatch sends the referenced brief" {
+@test "cockpit-overseer dispatch refuses the retired direct mission bypass" {
 	local brief="$BATS_TEST_TMPDIR/mission.txt"
-	local archive_dir="$HOME/.config/cockpit-overseer/archive"
 	cat > "$brief" <<'EOF'
 MISSION-ID: M-123
 TASK: trim loop traffic
 EOF
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-overseer" dispatch --session ulysses --window worker-dev --ref "$brief" --label M-123
-	[ "$status" -eq 0 ]
-	echo "$output" | grep -q "dispatched M-123"
-	echo "$output" | grep -q "trace="
-	head -1 "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" | grep -Eq '^TRACE-ID: [0-9a-f-]{36}$'
-	grep -q "TASK: trim loop traffic" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
-	grep -q '"action": "dispatch"' "$archive_dir/index.jsonl"
-	grep -q '"trace_id":' "$archive_dir/index.jsonl"
-	grep -q 'trim loop traffic' "$archive_dir/sessions/ulysses.jsonl"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "direct dispatch is retired"
+	echo "$output" | grep -Fq "cockpit-queue enqueue"
+	echo "$output" | grep -Fq "cockpit-overseer tick"
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" ]
 }
 
 @test "cockpit-overseer refuses legacy mutation when no explicit control root exists" {

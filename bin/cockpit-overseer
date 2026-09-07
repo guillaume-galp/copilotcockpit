@@ -4,10 +4,10 @@ cockpit-overseer — compact overseer helper for delta-only cockpit loops.
 
 Subcommands:
   start     Atomically initialize and validate the explicit VP3 control store.
-  tick      Reconcile durable evidence and take at most one action, then exit.
+  tick      Persist and deliver at most one controller-owned action, then exit.
   loop      Print only changed worker pane tails since the last snapshot.
   status    Print a one-shot compact snapshot without updating state.
-  dispatch  Paste a mission brief into a worker pane from a reference file.
+  dispatch  Refuse the retired direct mission-dispatch bypass.
   reset     Clear stored pane state for a session or all sessions.
 
 State is stored at ~/.config/cockpit-overseer/state.json.
@@ -23,21 +23,26 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from uuid import uuid4
 
 from cockpit_control import (
     CONTROLLER_LIVE_REACHABLE,
     CONTROLLER_LIVE_UNOBSERVED,
     CONTROLLER_LIVE_UNREACHABLE,
+    CONTROLLER_ACTION_DISPATCH,
     CONTROLLER_PANE_UNOBSERVED,
+    MISSION_FOLD_RETAINED_DUPLICATE,
+    MISSION_SLOT_RESERVED,
     ControllerDiagnostic,
+    ControllerTickResult,
     ControlStoreError,
+    PortableControlLock,
     controller_tick,
+    fold_mission_state,
     initialize_control_store,
+    inspect_control_events,
     report_controller_tick,
     resolve_control_root,
     validate_control_authority,
@@ -103,10 +108,6 @@ def estimated_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
-def generate_trace_id() -> str:
-    return str(uuid4())
-
-
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -156,15 +157,82 @@ def latest_parent_trace_id(text: str) -> str:
     return latest_match(text, PARENT_TRACE_ID_PATTERN)
 
 
-def decorate_dispatch_brief(trace_id: str, parent_trace_id: str, brief: str) -> str:
-    lines = [f"TRACE-ID: {trace_id}"]
-    if parent_trace_id:
-        lines.append(f"PARENT-TRACE-ID: {parent_trace_id}")
-    lines.append("")
-    body = brief.rstrip("\n")
+def controller_dispatch_brief(result: ControllerTickResult) -> str:
+    """Render the queue-owned brief for the command the controller committed."""
+
+    action = result.action
+    if (
+        action.kind != CONTROLLER_ACTION_DISPATCH
+        or action.command_id is None
+        or action.mission_id is None
+        or action.queue_item_id is None
+        or action.trace_id is None
+        or action.worker_id is None
+    ):
+        raise RuntimeError("controller result does not contain a complete dispatch command")
+    item = result.evidence.active_item(action.queue_item_id)
+    if item is None:
+        raise RuntimeError(
+            f"queue item {action.queue_item_id} is no longer active; "
+            "the durable dispatch remains reserved"
+        )
+    lines = [
+        f"MISSION-ID: {action.mission_id}",
+        f"COMMAND-ID: {action.command_id}",
+        f"QUEUE-ITEM-ID: {action.queue_item_id}",
+        f"TRACE-ID: {action.trace_id}",
+        f"TARGET-WORKER: {action.worker_id}",
+        f"TITLE: {item.title}",
+        "",
+    ]
+    body = item.source_text.rstrip("\n")
     if body:
         lines.append(body)
     return "\n".join(lines) + "\n"
+
+
+def deliver_controller_dispatch(
+    result: ControllerTickResult,
+    session: str,
+) -> None:
+    """Deliver one already-durable controller command to its worker pane."""
+
+    if not session:
+        raise RuntimeError(
+            "no tmux session is available; set TMUX_SESSION and rerun "
+            "`cockpit-overseer tick` to redeliver the committed command"
+        )
+    action = result.action
+    payload = controller_dispatch_brief(result)
+    target = f"{session}:{action.worker_id}"
+    with PortableControlLock(result.root, command="cockpit-overseer deliver"):
+        _metadata, history = inspect_control_events(result.root)
+        state = fold_mission_state(history.events)
+        slot = state.worker_slots.get(str(action.worker_id))
+        if (
+            slot is None
+            or slot["state"] != MISSION_SLOT_RESERVED
+            or slot["mission_id"] != action.mission_id
+            or slot["command_id"] != action.command_id
+            or slot["queue_item_id"] != action.queue_item_id
+            or action.mission_id in state.missions
+        ):
+            raise RuntimeError(
+                f"mission {action.mission_id} is no longer awaiting delivery; "
+                "no tmux input was sent"
+            )
+        with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
+            fh.write(payload)
+            brief_path = fh.name
+        try:
+            tmux("load-buffer", brief_path)
+            tmux("paste-buffer", "-t", target)
+            tmux("send-keys", "-t", target, "", "Enter")
+        finally:
+            try:
+                os.unlink(brief_path)
+            except FileNotFoundError:
+                pass
 
 
 def current_session() -> str:
@@ -373,100 +441,62 @@ def pane_diagnostics(session: str, windows: List[str]) -> List[ControllerDiagnos
 
 
 def cmd_tick(args: argparse.Namespace) -> int:
-    """Run one bounded controller tick and report exactly what it decided."""
+    """Run one bounded controller tick, then deliver its durable dispatch."""
 
     session = args.session or current_session()
     windows = args.window or list(DEFAULT_WINDOWS)
     try:
-        return report_controller_tick(
-            controller_tick(
-                resolve_control_root().path,
-                diagnostics=pane_diagnostics(session, windows),
-                as_of=args.as_of,
-                dry_run=args.dry_run,
-            )
+        result = controller_tick(
+            resolve_control_root().path,
+            diagnostics=pane_diagnostics(session, windows),
+            as_of=args.as_of,
+            dry_run=args.dry_run,
         )
+        delivery_error = None
+        delivered = False
+        if (
+            result.action.kind == CONTROLLER_ACTION_DISPATCH
+            and not result.dry_run
+            and (
+                result.applied
+                or result.fold_outcome == MISSION_FOLD_RETAINED_DUPLICATE
+            )
+            and not (result.command is not None and result.command.conflicted)
+        ):
+            try:
+                deliver_controller_dispatch(result, session)
+                delivered = True
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                delivery_error = str(exc)
+        status = report_controller_tick(result)
+        if delivery_error is not None:
+            print(
+                "cockpit-overseer: dispatch command "
+                f"{result.action.command_id} is durable but delivery to "
+                f"{session or '-'}:{result.action.worker_id} failed: {delivery_error} "
+                "[repair: restore the tmux target and rerun `cockpit-overseer tick`]",
+                file=sys.stderr,
+            )
+            return 1
+        if delivered:
+            print(
+                f"delivery command {result.action.command_id} worker "
+                f"{result.action.worker_id} target {session}:{result.action.worker_id}"
+            )
+        return status
     except ControlStoreError as exc:
         print(f"cockpit-overseer: {exc}", file=sys.stderr)
         return 1
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
-    args.session = args.session or current_session()
-    if not args.session:
-        raise SystemExit("dispatch requires --session or an active tmux session")
-    if not args.ref and not args.message:
-        raise SystemExit("dispatch requires --ref or --message")
-
-    if args.ref:
-        brief = Path(args.ref).read_text()
-    else:
-        brief = args.message or ""
-
-    trace_id = args.trace_id or generate_trace_id()
-    before = ""
-    try:
-        before = capture(args.session, args.window)
-    except RuntimeError:
-        before = ""
-    parent_trace_id = args.parent_trace_id or latest_trace_id(before)
-    dispatch_payload = decorate_dispatch_brief(trace_id, parent_trace_id, brief)
-
-    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
-        fh.write(dispatch_payload)
-        brief_path = fh.name
-
-    try:
-        tmux("load-buffer", brief_path)
-        tmux("paste-buffer", "-t", f"{args.session}:{args.window}")
-        time.sleep(1)
-        subprocess.run(
-            ["tmux", "send-keys", "-t", f"{args.session}:{args.window}", "", "Enter"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    finally:
-        try:
-            os.unlink(brief_path)
-        except FileNotFoundError:
-            pass
-
-    archive_snapshot(
-        args.session,
-        args.window,
-        "dispatch",
-        dispatch_payload,
-        {
-            "hash": fingerprint(dispatch_payload),
-            "run_id": latest_match(before, r"(RUN-[0-9]{8}-[0-9]{6}(?:-[A-Za-z0-9._-]+)?)"),
-            "status": "dispatch",
-            "line_count": len(dispatch_payload.splitlines()),
-            "estimated_tokens": estimated_tokens(dispatch_payload),
-            "aic_used": latest_match(before, r"(AIC used[: ]+[0-9]+)"),
-            "trace_id": trace_id,
-            "parent_trace_id": parent_trace_id,
-        },
-        "n/a",
-        {
-            "brief_raw": brief,
-            "brief_bytes": len(dispatch_payload.encode("utf-8")),
-            "brief_lines": len(dispatch_payload.splitlines()),
-            "brief_tokens_est": estimated_tokens(dispatch_payload),
-            "pane_before": before,
-            "pane_before_hash": fingerprint(before),
-            "pane_before_lines": len(before.splitlines()),
-            "ref": args.ref or "",
-            "label": args.label or "",
-        },
+    print(
+        "cockpit-overseer: direct dispatch is retired because it bypasses durable "
+        "mission state; enqueue the brief with `cockpit-queue enqueue`, transition "
+        "it to an implementable state, then run `cockpit-overseer tick`",
+        file=sys.stderr,
     )
-
-    if args.label:
-        print(f"dispatched {args.label} -> {args.session}:{args.window} [trace={trace_id}]")
-    else:
-        print(f"dispatched -> {args.session}:{args.window} [trace={trace_id}]")
-    return 0
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -526,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     reset.add_argument("-s", "--session", default="")
     reset.set_defaults(func=cmd_reset)
 
-    dispatch = sub.add_parser("dispatch", help="send a mission brief to a worker")
+    dispatch = sub.add_parser("dispatch", help="retired direct mission-dispatch bypass")
     dispatch.add_argument("-s", "--session", required=True)
     dispatch.add_argument("-w", "--window", required=True)
     dispatch.add_argument("-r", "--ref", help="mission brief file to send")

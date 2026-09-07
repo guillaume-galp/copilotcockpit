@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -883,6 +884,59 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
 
     for holder, slot in evidence.state.claimed_slots:
         if slot["queue_item_id"] == item.item_id:
+            observed = evidence.observation(slot["mission_id"])
+            controller = evidence.controller
+            if (
+                holder == worker_id
+                and slot["state"] == MISSION_SLOT_RESERVED
+                and observed is None
+                and controller is not None
+                and controller["outcome"] == CONTROLLER_DISPATCHED
+                and controller["queue_item_id"] == item.item_id
+                and controller["worker_id"] == worker_id
+                and controller["mission_id"] == slot["mission_id"]
+                and controller["command_id"] == slot["command_id"]
+            ):
+                # A reservation with no worker acceptance is an uncertain
+                # delivery. Reissue the same deterministic command; the fold
+                # retains it as a duplicate, so retries never mint a second
+                # event, mission, or slot claim.
+                trace_id = _controller_derived_uuid(
+                    evidence.control_id,
+                    CONTROLLER_TRACE_DERIVATION,
+                    slot["mission_id"],
+                )
+                return ControllerAction(
+                    kind=CONTROLLER_ACTION_DISPATCH,
+                    outcome=CONTROLLER_DISPATCHED,
+                    reason=CONTROLLER_REASON_IMPLEMENTABLE,
+                    state_key=controller["state_key"],
+                    queue_item_id=item.item_id,
+                    worker_id=worker_id,
+                    mission_id=slot["mission_id"],
+                    command_id=slot["command_id"],
+                    trace_id=trace_id,
+                    payload_digest=command_payload_digest(
+                        {
+                            "brief_digest": "sha256:"
+                            + hashlib.sha256(
+                                json.dumps(
+                                    {"source_text": item.source_text, "title": item.title},
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                            "command_type": COMMAND_TYPE_MISSION_DISPATCH,
+                            "mission_id": slot["mission_id"],
+                            "queue_item_id": item.item_id,
+                            "queue_item_state": item.state,
+                            "trace_id": trace_id,
+                            "worker_id": worker_id,
+                        },
+                        "controller dispatch payload",
+                    ),
+                    evidence_refs=references,
+                )
             # The freshness the worker has itself declared is part of *which*
             # situation this is, not decoration on it.  Reaching here at all
             # means the mission was fresh at this moment, so a worker that went
@@ -892,7 +946,6 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             # than one that collapses into an older, expired look and is never
             # written down.  Evidence that does not restore freshness never
             # reaches this branch, so it can never re-key an episode either.
-            observed = evidence.observation(slot["mission_id"])
             return _controller_observation_action(
                 evidence,
                 CONTROLLER_REASON_MISSION_IN_PROGRESS,
@@ -962,6 +1015,14 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
         trace_id=trace_id,
         payload_digest=command_payload_digest(
             {
+                "brief_digest": "sha256:"
+                + hashlib.sha256(
+                    json.dumps(
+                        {"source_text": item.source_text, "title": item.title},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
                 "command_type": COMMAND_TYPE_MISSION_DISPATCH,
                 "mission_id": mission_id,
                 "queue_item_id": item.item_id,
@@ -1560,6 +1621,7 @@ class ControllerTick:
             _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), self.root
         )
         roots = metadata["canonical_roots"]
+        stored_command = read_command_slots(self.root).get(str(action.command_id))
         envelope = build_command_envelope(
             command_id=str(action.command_id),
             command_type=COMMAND_TYPE_MISSION_DISPATCH,
@@ -1573,8 +1635,37 @@ class ControllerTick:
             queue_root=roots["queue_root"],
             planning_root=roots["planning_root"],
             implementation_roots=tuple(roots["implementation_roots"]),
-            created_at=self.as_of,
+            created_at=(
+                self.as_of
+                if stored_command is None
+                else stored_command["envelope"]["created_at"]
+            ),
         )
+        existing = evidence.state.worker_slots.get(str(action.worker_id))
+        if (
+            existing is not None
+            and existing["state"] == MISSION_SLOT_RESERVED
+            and existing["mission_id"] == action.mission_id
+            and existing["command_id"] == action.command_id
+            and existing["queue_item_id"] == action.queue_item_id
+            and stored_command is not None
+            and _command_conflict_reason(stored_command["envelope"], envelope) is None
+        ):
+            return ControllerTickResult(
+                root=self.root,
+                outcome=CONTROLLER_TICK_UNCHANGED,
+                action=action,
+                evidence=evidence,
+                diagnostics=self.diagnostics,
+                applied=False,
+                fold_outcome=MISSION_FOLD_RETAINED_DUPLICATE,
+                controller=evidence.controller,
+                publication=None,
+                command=None,
+                conflict=None,
+                queue_fault=self.queue_fault,
+                dry_run=self.dry_run,
+            )
         record = build_controller_dispatch(
             command_id=str(action.command_id),
             mission_id=str(action.mission_id),
@@ -2140,6 +2231,14 @@ def report_controller_tick(
         )
         return 1
     if result.action.kind == CONTROLLER_ACTION_DISPATCH and not result.applied:
+        if result.command is not None and result.command.conflicted:
+            print(
+                f"{prefix}: the dispatch command {result.action.command_id} conflicts "
+                "with the stored command envelope; the conflict is durable and no "
+                "brief was delivered",
+                file=os.sys.stderr,
+            )
+            return 1
         if result.fold_outcome == MISSION_FOLD_RETAINED_DUPLICATE:
             # Retrying an uncertain delivery of the same command ID is the
             # architecture section 17 rule, not a failure: the stored dispatch is
