@@ -473,3 +473,5 @@ TH1 accepted by user. Locked. v0.1.0 ready to tag.
 
 - 2026-09-07T15:45:00+01:00 — TH4 THEME GATE ARTIFACTS: release notes created at `docs/plan/RELEASE-TH4.md`, active TH4 issue templates archived, final gate evidence recorded, and branch-local cold-install method clarified after rejecting published-v0.9.0 `latest` as branch evidence. — copilotcockpit
 
+- 2026-09-07T15:55:00+01:00 — TH4 PRODUCT-OWNER REVALIDATION ACCEPTED: VP4 success criteria accepted after clarified runbook context; branch-local candidate cold-install is valid pre-merge evidence, and published `latest` v0.9.0 is not applicable because behavior-preserving `refactor:` merge requires no release. — copilotcockpit
+
