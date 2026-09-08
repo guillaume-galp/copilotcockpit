@@ -128,9 +128,11 @@ _require_absolute_root: Callable[..., Path]
 publish_control_event: Callable[..., Any]
 inspect_control_events: Callable[..., Any]
 fold_mission_state: Callable[..., Any]
+mission_command_correlation_fault: Callable[..., Optional[str]]
 utc_timestamp: Callable[[], str]
 CommittedEvent: Any
 EventPublicationResult: Any
+PortableControlLock: Any
 
 
 @dataclass(frozen=True)
@@ -478,6 +480,9 @@ def apply_command_acknowledgement(
     slot = slots.get(command_id)
     if slot is None:
         return False, COMMAND_FOLD_RETAINED_UNKNOWN
+    if (slot["envelope"]["target"]["kind"] == "worker"
+        and acknowledgement["acknowledged_by"] != slot["envelope"]["target"]["id"]):
+        return False, COMMAND_FOLD_RETAINED_ORDER
 
     entry = {
         "acknowledgement": dict(acknowledgement),
@@ -518,6 +523,9 @@ def fold_commands(
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         envelope = event_command_envelope(event.record, label)
         if envelope is not None:
+            if mission_command_correlation_fault(event.record, slots) is not None:
+                outcomes[event.event_id] = (False, COMMAND_FOLD_RETAINED_ORDER)
+                continue
             outcomes[event.event_id] = apply_command_envelope(slots, envelope, event)
             continue
         acknowledgement = event_command_acknowledgement(event.record, label)
@@ -582,7 +590,8 @@ def dispatch_acceptance_fault(
         or slot["mission_id"] != envelope["mission_id"]
         or slot["queue_item_id"] != envelope["queue_item_id"]
         or slot["command_id"] != envelope["command_id"]
-        or envelope["mission_id"] in missions
+        or (envelope["mission_id"] in missions and
+            missions[envelope["mission_id"]]["lifecycle"]["state"] != "pending-dispatch")
     ):
         return "dispatch acceptance requires its own reserved, unaccepted mission slot"
     deadline = envelope["deadline_at"]
@@ -782,6 +791,26 @@ def acknowledge_command(
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
 ) -> CommandRecordResult:
+    # Reject malformed/non-applicable receipts without creating lock debris.
+    # Revalidate under the lock before publication to close the race.
+    preview = _acknowledge_command_locked(
+        root, acknowledgement, actor, command, timeout_seconds, poll_seconds, True, None,
+    )
+    if dry_run:
+        return preview
+    with PortableControlLock(
+        root, command=command, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds,
+    ) as lock:
+        return _acknowledge_command_locked(
+            root, acknowledgement, actor, command, timeout_seconds, poll_seconds, dry_run, lock,
+        )
+
+
+def _acknowledge_command_locked(
+    root: Path, acknowledgement: Mapping[str, Any], actor: Optional[str],
+    command: str, timeout_seconds: Optional[float], poll_seconds: float,
+    dry_run: bool, lock: Optional[Any],
+) -> CommandRecordResult:
     validated = validate_command_acknowledgement(dict(acknowledgement))
     actor = _require_identifier(
         {"actor": actor if actor is not None else validated["acknowledged_by"]},
@@ -797,6 +826,9 @@ def acknowledge_command(
             f"command acknowledgement names command {command_id}, which this control "
             "root has never registered"
         )
+    if (slot["envelope"]["target"]["kind"] == "worker"
+        and validated["acknowledged_by"] != slot["envelope"]["target"]["id"]):
+        raise ControlStoreError("only the correlated target worker can acknowledge this command")
     if slot["envelope"]["command_type"] == "mission-dispatch" and outcome == COMMAND_ACCEPTED:
         raise ControlStoreError("use cockpit-control accept-dispatch for atomic worker acceptance")
     stored_digest = slot["envelope"]["payload_digest"]
@@ -824,6 +856,7 @@ def acknowledge_command(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         dry_run=dry_run,
+        held_lock=lock,
     )
     slots, outcomes = _folded_commands_after_publication(publication)
     applied, fold_outcome = outcomes.get(

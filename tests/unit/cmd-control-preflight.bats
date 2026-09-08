@@ -885,10 +885,10 @@ with open(path, "w") as handle:
 
 	export COCKPIT_QUEUE_ROOT="$queue"
 	run "$CONTROL_BIN" preflight
-	[ "$status" -eq 0 ]
+	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "queue ready ok: the declared queue root $queue exists"
 	echo "$output" | grep -Fq "declared-paths ready ok: 2 declared root(s) exist and are writable"
-	echo "$output" | grep -Fq "worker-capability advisory configuration: control.json declares legacy capabilities.control_store 0"
+	echo "$output" | grep -Fq "worker-capability operationally-blocked configuration: control.json declares legacy capabilities.control_store 0"
 	echo "$output" | grep -Fq "legacy-observed"
 
 	export COCKPIT_QUEUE_ROOT="$BATS_TEST_TMPDIR/other-queue"

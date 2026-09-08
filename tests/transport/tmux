@@ -2,6 +2,10 @@
 # Safe default for suites without a purpose-built tmux transport.
 case "${1:-}" in
 display-message) printf '%s\n' test-cockpit ;;
-capture-pane|load-buffer|paste-buffer|send-keys) ;;
+capture-pane)
+    [ "${COCKPIT_TEST_TMUX_UNREACHABLE:-0}" != 1 ] || exit 1
+    printf '%s' "${COCKPIT_TEST_PANE:-}"
+    ;;
+load-buffer|paste-buffer|send-keys) ;;
 *) printf 'test tmux: unsupported operation %s\n' "${1:-}" >&2; exit 1 ;;
 esac

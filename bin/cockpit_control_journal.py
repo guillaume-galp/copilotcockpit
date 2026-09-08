@@ -50,6 +50,7 @@ _validated_seconds: Callable[..., float]
 _require_string: Callable[..., str]
 validate_root_metadata: Callable[..., Dict[str, Any]]
 validate_event: Callable[..., Dict[str, Any]]
+validate_mission_command_publication: Callable[..., None]
 build_ledger_projection: Callable[..., Dict[str, Any]]
 ControlLedgerProjection: Any
 PortableControlLock: Any
@@ -427,6 +428,7 @@ class ControlEventPublication:
             self.pending_debris = history.pending
             revision = history.latest_revision + 1
             record = self._build_record(control_id, revision)
+            validate_mission_command_publication(record, history)
             filename = _event_filename(revision, record["event_id"])
             candidate_path = self.pending_path / filename
             committed_path = self.events_path / filename

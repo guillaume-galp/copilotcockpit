@@ -128,6 +128,13 @@ cc_ack() {
 	[ "$status" -eq 0 ]
 }
 
+# A replacement request alone never stops accepted work. Test workers explicitly
+# acknowledge inspection/application before tests inspect the replacement slot.
+cc_apply_replacement() {
+	cc_ack "$1" accepted "$2"
+	cc_ack "$1" applied "$2" --result "test:cooperative-replacement"
+}
+
 @test "a mission question is a durable command correlated to the active mission and its trace" {
 	local root="$BATS_TEST_TMPDIR/mission-question"
 	cc_mission_store "$root"
@@ -484,7 +491,7 @@ print("the fold refuses every uncorrelated answer")
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "command $prompt type mission-access-prompt mission $mission"
 	echo "$output" | grep -Fq "dialog $prompt kind access-prompt state pending"
-	echo "$output" | grep -Fq "boundaries $prompt control-root declared queue-root - planning-root - implementation-roots 1 runtime deploy:none"
+	echo "$output" | grep -Fq "boundaries $prompt control-root declared queue-root declared planning-root declared implementation-roots 1 runtime deploy:none"
 
 	# The response kind is derived from the prompt, so an access prompt is always
 	# resolved by an access-prompt response and never by an ordinary reply.
@@ -694,7 +701,10 @@ print("the fold refuses every uncorrelated answer")
 		--evidence "queue:QI-8" --payload '{"replace":"now"}'
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "command $replacement type mission-replace mission $mission queue-item QI-8 target worker/worker-dev trace $replacement_trace"
-	echo "$output" | grep -Fq "mission replacement $replacement replacing mission $mission with $replacement_mission on worker worker-dev is recorded (replaced)"
+	echo "$output" | grep -Fq "mission replacement $replacement replacing mission $mission with $replacement_mission on worker worker-dev is recorded (requested)"
+	cc_apply_replacement "$replacement" worker-dev
+	run "$CONTROL_BIN" mission-status
+	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "slot worker-dev mission $replacement_mission queue-item QI-8 state reserved command $replacement replaces $mission conflicts 0"
 
 	# The prior mission ends in the existing `replaced` lifecycle state, linked
@@ -865,6 +875,7 @@ print("the second active slot was refused and recorded")
 		--mission "$prior" --replacement-mission "$current" --queue-item QI-20 \
 		--trace "$(cc_uuid)" --reason "the queue item was superseded" \
 		--payload '{"replace":"first"}' >/dev/null
+	cc_apply_replacement "$held_replacement" worker-dev
 	cc_emit --state accepted --worker worker-dev --mission "$current" --queue-item QI-20 \
 		--trace "$(cc_uuid)" --sequence 1 --fresh-for 3600
 
@@ -874,6 +885,7 @@ print("the second active slot was refused and recorded")
 		--mission "$reserved_prior" --replacement-mission "$reserved" --queue-item QI-22 \
 		--trace "$(cc_uuid)" --reason "the queue item was superseded" \
 		--payload '{"replace":"reserved"}' >/dev/null
+	cc_apply_replacement "$other_replacement" worker-ops
 	run "$CONTROL_BIN" mission-status
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "slot worker-dev mission $current queue-item QI-20 state active"
@@ -1036,14 +1048,17 @@ for process in processes:
 for code, stdout, stderr in results:
     assert "Traceback" not in stderr, stderr
 
-succeeded = [index for index, result in enumerate(results) if result[0] == 0]
-assert len(succeeded) == 1, [(result[0], result[1]) for result in results]
-winner = attempts[succeeded[0]]
-assert "is recorded (replaced)" in results[succeeded[0]][1]
-for index, result in enumerate(results):
-    if index == succeeded[0]:
-        continue
-    assert "the mission slot conflict is recorded" in result[1], result[1]
+assert all(code == 0 for code, _, _ in results), results
+assert cockpit_control.read_mission_state(root).worker_slots["worker-dev"]["mission_id"] == mission
+# Requests can race, but application receipts serialize on the control lock.
+# Only the first cooperative application can reserve a replacement slot.
+winner = attempts[0]
+for command_id, _, _ in attempts:
+    digest = cockpit_control.read_command_slots(root)[command_id]["envelope"]["payload_digest"]
+    for outcome in ("accepted", "applied"):
+        cockpit_control.acknowledge_command(root, cockpit_control.build_command_acknowledgement(
+            command_id, digest, outcome, "worker-dev", result_refs=["test:cooperative-replacement"],
+        ))
 
 control_id = json.loads((root / cockpit_control.CONTROL_METADATA_NAME).read_text())["control_id"]
 state = cockpit_control.fold_mission_state(
@@ -1164,8 +1179,8 @@ cancellations = ledger[cockpit_control.LEDGER_MISSION_CANCELLATIONS_FIELD]
 assert sorted(cancellations) == [cancel], sorted(cancellations)
 
 slot = ledger[cockpit_control.LEDGER_MISSION_SLOTS_FIELD]["worker-dev"]
-assert slot["mission_id"] == replacement_mission, slot
-assert slot["replaces"] == mission and slot["conflicts"] == [], slot
+assert slot["mission_id"] == mission, slot
+assert slot["state"] == cockpit_control.MISSION_SLOT_ACTIVE and slot["conflicts"] == [], slot
 
 # Each managed command was registered exactly once and each redelivery is a
 # duplicate acknowledgement rather than a second application.
@@ -1485,7 +1500,7 @@ events[-1].write_text(Path(sys.argv[3]).read_text())
 	run python3 -c '
 import sys
 
-prefixes = ("cockpit-control:", "dialog ", "cancellation ", "slot ", "mission-conflict ")
+prefixes = ("cockpit-control:", "dialog ", "cancellation ", "replacement ", "slot ", "mission-conflict ")
 lines = [line for line in sys.stdin.read().splitlines() if line]
 assert lines, lines
 for line in lines:
@@ -1535,7 +1550,7 @@ print("%d mission record line(s) are all well formed" % len(lines))
 		--mission "$mission" --replacement-mission "$(cc_uuid)" --queue-item QI-15 \
 		--trace "$(cc_uuid)" --reason "obsolete" --payload '{"r":1}'
 	[ "$status" -eq 0 ]
-	echo "$output" | grep -Fq "would be recorded (replaced)"
+	echo "$output" | grep -Fq "would be recorded (requested)"
 
 	run "$CONTROL_BIN" mission-status --as-of 2026-01-01T00:00:00.000000Z
 	[ "$status" -eq 0 ]
@@ -1575,6 +1590,7 @@ print("%d mission record line(s) are all well formed" % len(lines))
 	"$CONTROL_BIN" replace-mission --command-id "$replacement" --worker worker-dev \
 		--mission "$mission" --replacement-mission "$replacement_mission" --queue-item QI-16 \
 		--trace "$(cc_uuid)" --reason "obsolete" --payload '{"r":1}' >/dev/null
+	cc_apply_replacement "$replacement" worker-dev
 
 	# Destroy every derived byte: the projection and the compatibility view.
 	rm -f "$root/ledger.json" "$root/events.jsonl"
@@ -1700,6 +1716,7 @@ path.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 		--mission "$prior" --replacement-mission "$reserved" --queue-item QI-30 \
 		--trace "$(cc_uuid)" --reason "the queue item was superseded" \
 		--payload '{"replace":"reserved"}' >/dev/null
+	cc_apply_replacement "$replacement" worker-dev
 	run "$CONTROL_BIN" mission-status
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "slot worker-dev mission $reserved queue-item QI-30 state reserved"
@@ -1861,6 +1878,7 @@ print("no lifecycle event bled a mission across the single slot")
 		--mission "$replaced" --replacement-mission "$replacement" --queue-item QI-32 \
 		--trace "$trace_b" --reason "the queue item was superseded" \
 		--payload '{"replace":"orphan"}' >/dev/null
+	cc_apply_replacement "$replace_id" worker-qa
 
 	run "$CONTROL_BIN" mission-status
 	[ "$status" -eq 0 ]

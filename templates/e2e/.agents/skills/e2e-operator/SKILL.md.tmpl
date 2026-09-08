@@ -32,8 +32,16 @@ project-content questions. Include the graph path in fix briefs when useful.
 - Last run details: `e2e/runs/RUN-*.yaml`
 - Test specs: `e2e/tests/*.spec.ts`
 
-## Worker question file
+## Durable test mission contract
 
-- Worker question file: `/tmp/worker-<role>-question.txt`
-
-Prefer this file over assumptions from global defaults.
+Follow global `worker-test` / `e2e-cockpit` for the receipt and question/ACK flow.
+FIFO plus tick dispatches work at sequence 0 without heartbeat; run the exact
+`accept-dispatch` receipt, start only on `accepted` / `start_work=true`
+(sequence 1), then `heartbeat` running sequence 2. Duplicate is not a test rerun.
+`ask` / `access-prompt` use private typed body refs; `pending` / `read-question`
+return durable mission-status JSON. Only explicit human replies; `hold --answers`
+does not approve. Inspect `status.pending_commands` / `command-status`;
+accepted-worker cancel/replace requires accepted then applied ACK with matching
+digest and typed `--result` after safely stopping. Reuse IDs/digests, journal no
+secrets, and keep lifecycle separate from pane diagnosis. No raw `send`/`nudge`
+mission, approval or cancel shortcuts.

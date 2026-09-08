@@ -1005,24 +1005,24 @@ print("queue vocabulary agrees")
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 2 ]
 }
 
-@test "AC3 an undeclared queue root blocks and an unexported one observes, each once" {
+@test "AC3 an undeclared queue root blocks even without an export, each once" {
 	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/undeclared-control"
 	unset COCKPIT_QUEUE_ROOT
 	run "$CONTROL_BIN" init
 	[ "$status" -eq 0 ]
 
 	# A mission created without a queue boundary has no product-work authority
-	# to read at all. That is something to record, not something to escalate.
+	# to read at all. Missing work boundaries are an operational blocker.
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
-	[ "$status" -eq 0 ]
-	echo "$output" | grep -Fq "tick recorded action record-observation outcome observed reason no-queue-root-declared"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "tick recorded action record-observation outcome blocked reason queue-root-undeclared"
 	echo "$output" | grep -Fq "precedence 2 queue-state authoritative queue unobserved"
 	cc_absent_output "^dispatch command"
-	cc_absent_output "dispatch is blocked"
+	echo "$output" | grep -Fq "dispatch is blocked"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
 
 	cc_tick --as-of 2026-09-04T10:01:00.000000Z
-	[ "$status" -eq 0 ]
+	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "tick unchanged action none"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
 

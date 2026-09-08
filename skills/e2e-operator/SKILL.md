@@ -12,6 +12,19 @@ TC-IDs, and chapter names.
 
 You never fix code yourself. You diagnose, classify, and hand off.
 
+For a dispatched test mission, follow `worker-test`'s `accept-dispatch` receipt:
+dispatch sequence 0 has no heartbeat; only `accepted` / `start_work=true` starts
+work (sequence 1), then `heartbeat` running sequence 2. Duplicate receipts do
+not authorize re-running tests. Follow global `e2e-cockpit` and the
+[README operator walkthrough](../../README.md#durable-operator-walkthrough)
+for `ask` / `access-prompt`, `pending` / `read-question` (mission-status JSON),
+explicit human-only `reply` / correlated `hold`, and pending command ACKs.
+Inspect `status.pending_commands` and `command-status` for those requests.
+Accepted-worker cancel/replace needs accepted then applied ACK with the stored
+digest and typed `--result` after safely stopping the run. Keep secrets out of
+journal bodies, preserve IDs/digests on retry, and distinguish lifecycle from
+pane diagnosis. Never use raw `send`/`nudge` for mission, approval or cancel.
+
 ---
 
 ## Your Tools
@@ -124,8 +137,7 @@ If unhealthy → cockpit problem. Check port-forward window. Do not dispatch.
 ### Step 5 — Queue and dispatch a fix brief
 
 ```bash
-cat > /tmp/worker-mission.txt << 'MISSION'
-Fix brief from worker-test:
+FIX_BRIEF='Fix brief from worker-test:
   TRACE-ID: <uuid>
   TC: <TC-ID>
   spec: e2e/tests/<file>.spec.ts
@@ -133,20 +145,19 @@ Fix brief from worker-test:
   log clue: <relevant service log line if any>
   classification: <app bug | spec bug | flaky>
   action: <what needs to change>
-  verify with: ./e2e/run-audit.sh --scope "@TC-XXX-NNN" --label "fix-verify"
-MISSION
+  verify with: ./e2e/run-audit.sh --scope "@TC-XXX-NNN" --label "fix-verify"'
 FIX_QI_ID="$(cockpit-queue enqueue \
   --approved \
   --title "Fix <TC-ID>" \
-  --text "$(cat /tmp/worker-mission.txt)")"
+  --text "$FIX_BRIEF")"
 printf 'queued fix as %s\n' "$FIX_QI_ID"
 
 # Only after the current mission has emitted a terminal lifecycle event and its
 # queue item is settled:
 cockpit-queue start-next
-cockpit-queue transition "$FIX_QI_ID" <implementing|fixing> --reason "triaged E2E failure"
+# Use fixing instead of implementing when routing to worker-fix.
+cockpit-queue transition "$FIX_QI_ID" implementing --reason "triaged E2E failure"
 cockpit-overseer tick
-rm /tmp/worker-mission.txt
 ```
 
 ### Dispatch constraints (worker-test must enforce)
@@ -157,7 +168,8 @@ rm /tmp/worker-mission.txt
   enqueue it, report its QI-ID, and wait for the overseer to settle the current
   mission/item before `start-next`
 - Use `implementing` for `worker-dev` and `fixing` for `worker-fix`
-- **Never chain briefs inline** — do not write "fix TC-001, then fix TC-002"; send TC-001, wait for DONE, then send TC-002
+- **Never chain briefs inline** — do not write "fix TC-001, then fix TC-002";
+  wait for correlated terminal lifecycle and a released slot before the next tick
 - **Separate app-bug briefs by root cause** — if two TCs share a root cause, send one brief covering both; if they have different root causes, send two separate briefs in separate turns
 - **Carry the trace UUID forward** — every follow-up brief or answer should keep the same `TRACE-ID` unless you intentionally start a new dialog; use `cockpit-trace show <uuid>` to inspect the thread
 
@@ -214,9 +226,13 @@ the failure so the overseer can move the queue item through
 
 ## Scheduling Awakenings
 
-To schedule a deferred test run or reminder, use the **`cockpit-wake`** skill.
-Trigger phrases: "wake me at X", "schedule a morning check", "set a recurring run".
-Always pass the exact session name — retrieve it with:
+Queue a deferred test request first; a **`cockpit-wake` CLI** schedule observes
+that mission via controller ticks, not pasted test commands. Follow the global
+`e2e-cockpit` scheduler example: a ready control root and `--mission`,
+`--queue-item`, `--owner`, `--intent`, `--stop-condition` are required.
+`--dry-run` is read-only; `stop` aliases `cancel`, including fired recurring jobs.
+Legacy schedules need explicit stop, supported bootstrap and reschedule;
+`migrate` diagnoses only. Always pass the exact session name — retrieve it with:
 ```bash
 cockpit-protocol meta current-session
 ```

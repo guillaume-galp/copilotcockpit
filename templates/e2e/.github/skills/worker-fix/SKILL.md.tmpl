@@ -10,6 +10,21 @@ description: "Troubleshooter worker role in the @@APP_NAME@@ cockpit. Deep-dives
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific investigation commands.
 
+## Durable investigation contract
+
+Follow global `worker-fix` / `e2e-cockpit`: FIFO/tick only. Dispatch sequence 0
+has no heartbeat; run the exact `accept-dispatch`, start only on `accepted` /
+`start_work=true` (sequence 1), then `heartbeat` running sequence 2. Duplicates
+never restart a fix. Use `ask` / `access-prompt` with private typed body refs;
+`pending` / `read-question` return durable mission-status JSON. Only explicit
+human replies; `hold --answers` does not approve. Inspect
+`status.pending_commands` / `command-status`; accepted-worker cancel/replace
+needs accepted then applied ACK with matching digest and typed `--result`
+after safely stopping/applying. Reuse IDs/digests; keep secret-bearing logs out
+of the journal. Lifecycle and pane diagnosis are separate; no raw `send`/`nudge`
+mission, approval or cancel shortcuts. Uninstrumented prompts need explicit
+reporting; unaccepted recovery needs operator inspection, not worker killing.
+
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
 before broad text search to map failing behavior to related code, architecture,

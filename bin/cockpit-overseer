@@ -244,7 +244,8 @@ def deliver_controller_dispatch(
             or slot["mission_id"] != action.mission_id
             or slot["command_id"] != action.command_id
             or slot["queue_item_id"] != action.queue_item_id
-            or action.mission_id in state.missions
+            or (action.mission_id in state.missions and
+                state.missions[action.mission_id]["lifecycle"]["state"] != "pending-dispatch")
         ):
             raise RuntimeError(
                 f"mission {action.mission_id} is no longer awaiting delivery; "

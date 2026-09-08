@@ -18,6 +18,11 @@ CC_UNINSTALL="$CC_REPO_ROOT/uninstall.sh"
 cc_setup_fake_home() {
 	export PATH="$CC_REPO_ROOT/tests/transport:$PATH"
 	export HOME="$BATS_TEST_TMPDIR/home"
+	export XDG_CONFIG_HOME="$HOME/.config"
+	export XDG_CACHE_HOME="$HOME/.cache"
+	export XDG_DATA_HOME="$HOME/.local/share"
+	export XDG_STATE_HOME="$HOME/.local/state"
+	export GOCACHE="$XDG_CACHE_HOME/go-build"
 	mkdir -p "$HOME"
 	# Hard guard: refuse to proceed if HOME is anything but the sandbox. This
 	# makes an accidental real-HOME mutation impossible even if a future edit

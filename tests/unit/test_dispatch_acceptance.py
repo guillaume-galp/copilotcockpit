@@ -33,7 +33,13 @@ class DispatchAcceptanceTests(unittest.TestCase):
         self.root = self.base / "control"
         self.queue = self.base / "queue"
         self.queue.mkdir()
-        self.env = dict(os.environ, COCKPIT_CONTROL_ROOT=str(self.root),
+        home = self.base / "home"
+        home.mkdir()
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("COCKPIT_", "TMUX", "XDG_", "GO"))}
+        self.env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+                        XDG_CACHE_HOME=str(home / ".cache"),
+                        COCKPIT_CONTROL_ROOT=str(self.root),
                         COCKPIT_QUEUE_ROOT=str(self.queue))
         self.env["PATH"] = str(ROOT / "tests/transport") + os.pathsep + self.env["PATH"]
         self.environment = patch.dict(os.environ, self.env)
@@ -226,7 +232,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
         state = cc.read_mission_state(self.root)
         self.assertFalse(state.lifecycle_outcomes[publication.event_id][0])
         self.assertEqual(state.worker_slots, before.worker_slots)
-        self.assertFalse(state.missions)
+        self.assertTrue(all(m["lifecycle"]["state"] == "pending-dispatch" for m in state.missions.values()))
         self.assertFalse(state.contested_slots)
         self.assertTrue(self.accept().start_work)
 
@@ -298,7 +304,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
         )
         state = cc.read_mission_state(root)
         self.assertFalse(state.lifecycle_outcomes[publication.event_id][0])
-        self.assertFalse(state.missions)
+        self.assertTrue(all(m["lifecycle"]["state"] == "pending-dispatch" for m in state.missions.values()))
         self.assertEqual(state.worker_slots, before.worker_slots)
         action = test[2]
         self.assertTrue(cc.accept_dispatch(
@@ -376,7 +382,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
         with self.assertRaises(cc.ControlStoreError):
             self.accept(as_of=self.at(300))
         state = cc.fold_mission_state(self.history())
-        self.assertFalse(state.missions)
+        self.assertTrue(all(m["lifecycle"]["state"] == "pending-dispatch" for m in state.missions.values()))
         self.assertEqual(state.worker_slots["worker-dev"]["state"], "reserved")
 
     def test_accept_just_before_deadline_wins_against_stale_retry(self):
@@ -425,7 +431,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
                                                "accepted", "worker-fix", acknowledged_at=self.at(1))
         cc.publish_control_event(self.root, "worker-lifecycle-accepted", actor="worker-fix",
                                  payload={"worker_lifecycle": lifecycle, "command_acknowledgement": ack})
-        self.assertFalse(cc.fold_mission_state(self.history()).missions)
+        self.assertEqual(cc.read_mission_state(self.root).missions[self.envelope["mission_id"]]["lifecycle"]["state"], "pending-dispatch")
         self.assertEqual(cc.read_command_slots(self.root)[e["command_id"]]["status"], "registered")
         self.assertTrue(self.accept().start_work)
 
@@ -443,7 +449,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
                                  payload={"worker_lifecycle": lifecycle})
         cc.publish_control_event(self.root, "command-acknowledged-accepted",
                                  payload={"command_acknowledgement": ack})
-        self.assertFalse(cc.fold_mission_state(self.history()).missions)
+        self.assertEqual(cc.read_mission_state(self.root).missions[self.envelope["mission_id"]]["lifecycle"]["state"], "pending-dispatch")
         self.assertEqual(cc.read_command_slots(self.root)[e["command_id"]]["status"], "registered")
         self.assertTrue(self.accept().start_work)
 
@@ -489,13 +495,20 @@ class DispatchAcceptanceTests(unittest.TestCase):
     def test_replaced_mission_receipt_cannot_claim_replacement_slot(self):
         self.accept()
         e = self.envelope
+        command_id = str(uuid4())
         self.run_cli(
-            "cockpit-control", "replace-mission", "--command-id", str(uuid4()),
+            "cockpit-control", "replace-mission", "--command-id", command_id,
             "--worker", "worker-dev", "--mission", e["mission_id"],
             "--replacement-mission", str(uuid4()), "--queue-item", self.item,
             "--trace", e["trace_id"], "--reason", "explicit replacement",
             "--payload", "{}",
         )
+        self.assertEqual(cc.read_mission_state(self.root).missions[e["mission_id"]]["lifecycle"]["state"], "accepted")
+        for outcome in ("accepted", "applied"):
+            cc.acknowledge_command(self.root, cc.build_command_acknowledgement(
+                command_id, cc.command_payload_digest({}), outcome, "worker-dev",
+                result_refs=["file:worker/cooperative-receipt"],
+            ))
         self.assertEqual(cc.read_mission_state(self.root).missions[e["mission_id"]]["lifecycle"]["state"],
                          "replaced")
         with self.assertRaises(cc.ControlStoreError):
@@ -612,7 +625,7 @@ class DispatchAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self.history()), 1)
         self.assertEqual(cc.read_command_slots(self.root)[self.envelope["command_id"]]["status"],
                          "registered")
-        self.assertFalse(cc.read_mission_state(self.root).missions)
+        self.assertEqual(cc.read_mission_state(self.root).missions[self.envelope["mission_id"]]["lifecycle"]["state"], "pending-dispatch")
 
     def test_missing_committed_receipt_is_not_reaccepted_from_a_shortened_journal(self):
         self.accept()

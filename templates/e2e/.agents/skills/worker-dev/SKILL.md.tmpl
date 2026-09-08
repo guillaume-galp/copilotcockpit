@@ -32,6 +32,16 @@ implementation patterns.
 - Working tree: `.`
 - Harness scripts: `e2e/run-audit.sh`, `e2e/run-playwright.sh`
 
-## Worker question file
+## Durable development contract
 
-- Question file: `/tmp/worker-worker-dev-question.txt`
+Follow global `worker-dev` / `e2e-cockpit`: FIFO/tick only. Dispatch sequence 0
+has no heartbeat; run the exact `accept-dispatch`, start only on `accepted` /
+`start_work=true` (sequence 1), then `heartbeat` running sequence 2. Duplicates
+never restart implementation. `ask` / `access-prompt` use private typed body
+refs; `pending` / `read-question` return durable mission-status JSON. Only
+explicit human replies; `hold --answers` leaves the prompt unapproved.
+Inspect `status.pending_commands` and `command-status`; accepted-worker
+cancel/replace needs accepted then applied ACK with matching digest and typed
+`--result` after actual safe application. Reuse IDs/digests; journal no secrets.
+Lifecycle is separate from pane diagnosis. No raw `send`/`nudge` for normal
+mission, approval or cancel; uninstrumented prompts need explicit reporting.

@@ -80,6 +80,21 @@ e2e/
 | 6 | **One fix per turn** — fix one failing test, verify it, then proceed to the next. |
 | 7 | **Always use `run-audit.sh`** for tracked runs — it records the audit trail. |
 
+## Durable cockpit contract
+
+Follow global `e2e-cockpit` and the role overlay: normal missions enter
+`cockpit-queue` plus `cockpit-overseer tick`. `dispatch --bootstrap` is setup-only;
+raw `send`/`nudge` are diagnostic or explicitly human-requested exceptions, never
+normal mission, approval or cancel operations. Run the exact `accept-dispatch`
+receipt and start only on `accepted` / `start_work=true` (sequence 1; dispatch 0
+has no heartbeat), then `heartbeat` running sequence 2. Duplicates never restart.
+`ask` / `access-prompt` explicitly report prompts; `pending` / `read-question`
+return durable mission-status JSON. Only explicit human replies; correlated
+`hold --answers` is not approval. Inspect `status.pending_commands` /
+`command-status`; accepted-worker cancel/replace requires accepted then applied
+ACK with matching digest and typed `--result`. Reuse IDs/digests, journal no
+secrets, and keep durable lifecycle separate from pane diagnosis.
+
 ---
 
 ## Code intelligence

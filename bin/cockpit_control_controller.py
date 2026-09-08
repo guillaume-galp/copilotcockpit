@@ -588,7 +588,7 @@ def select_recovery_action(evidence: ControllerEvidence) -> Optional[ControllerA
     for worker_id, slot in evidence.state.claimed_slots:
         mission_id = slot["mission_id"]
         observation = evidence.observation(mission_id)
-        if observation is None or observation.terminal:
+        if observation is None or observation.terminal or observation.state == LIFECYCLE_PENDING_DISPATCH:
             # A reserved slot whose worker has not accepted yet has no declared
             # freshness at all, so there is nothing to observe as expired.  The
             # `terminal` half of this guard is deliberately unreachable from a
@@ -849,6 +849,22 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             ),
         )
 
+    # An explicit unanswered dialog is not worker silence. In particular an
+    # operator hold outranks heartbeat-based recovery and never authorizes an
+    # automatic answer, permission grant, cancellation, or replacement.
+    for entry in evidence.state.dialogs.values():
+        dialog = entry["dialog"]
+        slot = evidence.state.worker_slots.get(dialog["worker_id"])
+        if (entry["state"] in ("pending", "held") and slot is not None
+            and slot["state"] == MISSION_SLOT_ACTIVE and slot["mission_id"] == dialog["mission_id"]
+            and (entry["state"] == "held" or evidence.active_item(dialog["queue_item_id"]) is not None)):
+            return _controller_observation_action(
+                evidence, CONTROLLER_REASON_MISSION_IN_PROGRESS,
+                {"prompt_command_id": dialog["command_id"], "dialog_state": entry["state"]},
+                mission_id=dialog["mission_id"], queue_item_id=dialog["queue_item_id"],
+                worker_id=dialog["worker_id"], command_id=dialog["command_id"],
+            )
+
     # Rules 3 and 6 again: a mission the control plane still believes is running
     # while its declared freshness has expired, or whose product work has left
     # the active set, is owed exactly one bounded recovery action.  It is never
@@ -897,12 +913,31 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
     for holder, slot in claims:
         if slot["queue_item_id"] == item.item_id:
             observed = evidence.observation(slot["mission_id"])
+            if observed is not None and observed.state == LIFECYCLE_PENDING_DISPATCH:
+                observed = None
             controller = evidence.controller
             stored = next(
                 (entry for entry in evidence.commands
                  if entry["envelope"]["command_id"] == slot["command_id"]),
                 None,
             )
+            if (holder == worker_id and slot["state"] == MISSION_SLOT_RESERVED
+                and slot["replaces"] is not None and stored is not None
+                and stored["envelope"]["command_type"] == COMMAND_TYPE_MISSION_REPLACE
+                and stored["status"] == COMMAND_APPLIED):
+                mission_id = slot["mission_id"]
+                trace_id = _controller_derived_uuid(evidence.control_id, CONTROLLER_TRACE_DERIVATION, mission_id)
+                return ControllerAction(
+                    kind=CONTROLLER_ACTION_DISPATCH, outcome=CONTROLLER_DISPATCHED,
+                    reason=CONTROLLER_REASON_IMPLEMENTABLE,
+                    state_key=controller_state_key({"replacement_mission_id": mission_id}),
+                    queue_item_id=item.item_id, worker_id=worker_id, mission_id=mission_id,
+                    command_id=_controller_derived_uuid(evidence.control_id, CONTROLLER_COMMAND_DERIVATION, mission_id),
+                    trace_id=trace_id,
+                    payload_digest=dispatch_payload_digest(item, mission_id, worker_id, trace_id),
+                    deadline_at=_shifted_timestamp(evidence.as_of, DISPATCH_ACCEPTANCE_SECONDS),
+                    evidence_refs=references,
+                )
             dispatch_reservation = (
                 stored is None
                 or stored["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
@@ -1134,6 +1169,7 @@ def accept_dispatch(
             or boundaries["runtime_boundaries"]
             or not roots["queue_root"] or not roots["planning_root"]
             or not roots["implementation_roots"]
+            or not has_lifecycle_capability(metadata)
             or slot is None or slot["mission_id"] != mission_id
             or slot["command_id"] != command_id or slot["queue_item_id"] != queue_item_id
             or any(holder == worker_id for holder, _slot, _conflict in state.contested_slots)
@@ -1547,6 +1583,10 @@ class ControllerTick:
         ledger_revision = observation.ledger_revision
         ledger_reason = observation.ledger_reason
         declared, exported, fault = self._resolved_queue_root(metadata)
+        roots = metadata["canonical_roots"]
+        if (not roots["planning_root"] or not roots["implementation_roots"]
+            or not has_lifecycle_capability(metadata)):
+            fault = CONTROLLER_REASON_ROOT_UNDECLARED
 
         # Step 4: read product-work authority and worker state.
         queue: Optional[QueueObservation] = None
@@ -1701,10 +1741,6 @@ class ControllerTick:
                 evidence_refs=action.evidence_refs,
                 requested_at=self.as_of,
             )
-            declarations = {
-                "active_queue_item_id": action.queue_item_id,
-                "active_mission_id": action.replacement_mission_id,
-            }
         envelope = build_command_envelope(
             command_id=str(action.command_id),
             command_type=command_type,
@@ -1778,6 +1814,9 @@ class ControllerTick:
             observation = self._repaired_projection(observation, lock)
         metadata = observation.metadata
         roots = metadata["canonical_roots"]
+        if (not roots["planning_root"] or not roots["implementation_roots"]
+            or not has_lifecycle_capability(metadata)):
+            raise ControlStoreError("operationally-blocked: dispatch requires declared lifecycle capability and boundaries")
         state = fold_mission_state(observation.history.events)
         commands, _outcomes = fold_commands(observation.history.events)
         stored_command = commands.get(str(action.command_id))
@@ -1803,14 +1842,21 @@ class ControllerTick:
             and existing["command_id"] == action.command_id
             and existing["queue_item_id"] == action.queue_item_id
         )
+        replacement_reservation = (
+            existing is not None and existing["state"] == MISSION_SLOT_RESERVED
+            and existing["mission_id"] == action.mission_id and existing["replaces"] is not None
+            and commands.get(existing["command_id"], {}).get("status") == COMMAND_APPLIED
+            and commands[existing["command_id"]]["envelope"]["command_type"] == COMMAND_TYPE_MISSION_REPLACE
+        )
         if (
             any(
                 (holder == action.worker_id or slot["queue_item_id"] == action.queue_item_id)
-                and not (holder == action.worker_id and same_reservation)
+                and not (holder == action.worker_id and (same_reservation or replacement_reservation))
                 for holder, slot in state.claimed_slots
             )
             or state.contested_slots
-            or action.mission_id in state.missions
+            or (action.mission_id in state.missions and
+                state.missions[action.mission_id]["lifecycle"]["state"] != LIFECYCLE_PENDING_DISPATCH)
             or (stored_command is not None and (
                 not same_reservation or stored_command["status"] != COMMAND_STATUS_REGISTERED
                 or stored_command["conflicts"]
@@ -1949,7 +1995,8 @@ class ControllerTick:
                     slot is None or slot["state"] != MISSION_SLOT_RESERVED
                     or slot["mission_id"] != action.mission_id
                     or slot["command_id"] != action.command_id
-                    or action.mission_id in current.missions
+                    or (action.mission_id in current.missions and
+                        current.missions[action.mission_id]["lifecycle"]["state"] != LIFECYCLE_PENDING_DISPATCH)
                 ):
                     raise ControlStoreError(
                         "dispatch reservation changed during acceptance observation; "

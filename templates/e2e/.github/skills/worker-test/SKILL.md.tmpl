@@ -11,6 +11,20 @@ description: "E2E Test Operator worker role in the @@APP_NAME@@ cockpit. Runs go
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific run commands and key paths.
 
+## Durable test contract
+
+Follow global `worker-test` / `e2e-cockpit`: FIFO/tick only. Dispatch sequence 0
+has no heartbeat; run the exact `accept-dispatch`, start only on `accepted` /
+`start_work=true` (sequence 1), then `heartbeat` running sequence 2. Duplicates
+never rerun tests. Use `ask` / `access-prompt` with private typed body refs;
+`pending` / `read-question` return durable mission-status JSON. Only explicit
+human replies; `hold --answers` does not approve. Inspect
+`status.pending_commands` / `command-status`; accepted-worker cancel/replace
+needs accepted then applied ACK with matching digest and typed `--result`
+after safely stopping the run. Reuse IDs/digests; journal no secrets.
+Lifecycle is separate from pane diagnosis. No raw `send`/`nudge` mission,
+approval or cancel shortcuts; uninstrumented prompts need explicit reporting.
+
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 include `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
 guidance in fix briefs when it helps worker-dev or worker-fix orient quickly.

@@ -29,6 +29,7 @@ LIFECYCLE_CANCELLED = "cancelled"
 LIFECYCLE_REPLACED = "replaced"
 
 WORKER_LIFECYCLE_STATES = (
+    LIFECYCLE_PENDING_DISPATCH,
     LIFECYCLE_ACCEPTED,
     LIFECYCLE_RUNNING,
     LIFECYCLE_BLOCKED,
@@ -185,6 +186,16 @@ class WorkerLifecycleObservation:
         return self.observation == LIFECYCLE_OBSERVATION_STALE
 
 
+def has_lifecycle_capability(metadata: Mapping[str, Any]) -> bool:
+    """Require explicit supported integer versions, never truthy legacy flags."""
+
+    capabilities = metadata.get("capabilities", {})
+    return all(
+        type(capabilities.get(key)) is int and capabilities[key] == 1
+        for key in ("worker_lifecycle", "command_protocol")
+    )
+
+
 def _require_evidence_refs(record: Mapping[str, Any], label: str, *, required: bool) -> List[str]:
     return _require_typed_references(
         record, "evidence_refs", label, required=required, noun="evidence"
@@ -243,7 +254,11 @@ def validate_worker_lifecycle(record: Any, label: str = "worker lifecycle") -> D
     _require_identifier(data, "queue_item_id", label)
     _require_uuid(data, "trace_id", label)
     _require_optional_uuid(data, "parent_trace_id", label)
-    _require_positive_integer(data, "sequence", label)
+    if state == LIFECYCLE_PENDING_DISPATCH:
+        if type(data["sequence"]) is not int or data["sequence"] != 0:
+            raise ControlStoreError(f"{label} pending-dispatch requires sequence 0")
+    else:
+        _require_positive_integer(data, "sequence", label)
 
     if _require_optional_string(data, "reason", label) is None:
         if state in WORKER_LIFECYCLE_REASON_REQUIRED:
@@ -292,6 +307,14 @@ def event_worker_lifecycle(record: Mapping[str, Any], label: str) -> Optional[Di
         payload[WORKER_LIFECYCLE_PAYLOAD_FIELD], f"{label} payload.{WORKER_LIFECYCLE_PAYLOAD_FIELD}"
     )
     expected = f"{WORKER_LIFECYCLE_EVENT_PREFIX}{lifecycle['state']}"
+    if lifecycle["state"] == LIFECYCLE_PENDING_DISPATCH:
+        dispatch = payload.get("controller_dispatch")
+        if event_type != "command-registered" or not isinstance(dispatch, dict) or any(
+            lifecycle[key] != dispatch.get(key)
+            for key in ("mission_id", "worker_id", "queue_item_id", "trace_id", "parent_trace_id")
+        ):
+            raise ControlStoreError(f"{label} pending-dispatch requires its controller dispatch")
+        return lifecycle
     if event_type != expected:
         raise ControlStoreError(
             f"{label} declares lifecycle state {lifecycle['state']!r} but event_type "
@@ -382,6 +405,8 @@ def record_worker_lifecycle(
     dry_run: bool = False,
 ) -> LifecycleRecordResult:
     validated = validate_worker_lifecycle(dict(lifecycle), "worker lifecycle")
+    if validated["state"] == LIFECYCLE_PENDING_DISPATCH:
+        raise ControlStoreError("pending-dispatch is published only by the FIFO controller")
     accepting = validated["state"] == LIFECYCLE_ACCEPTED
     with (PortableControlLock(
         root, command=command, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds,
@@ -452,7 +477,9 @@ def _observed_slot(slot: Mapping[str, Any], now: datetime, as_of: str) -> Worker
     reason: Optional[str] = None
     recovery: Optional[str] = None
     recoverable = False
-    if not terminal:
+    if state == LIFECYCLE_PENDING_DISPATCH:
+        observation = LIFECYCLE_PENDING_DISPATCH
+    elif not terminal:
         expiry = _parsed_timestamp(lifecycle["fresh_until"], "fresh_until", "worker lifecycle")
         if now > expiry:
             observation = LIFECYCLE_OBSERVATION_STALE

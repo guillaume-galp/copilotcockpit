@@ -9,6 +9,20 @@ description: "Operate the @@APP_NAME@@ E2E governance layer: run tests, read aud
 > `run-audit.sh` usage, audit-trail reading, TC-ID mapping, triage, and report format.
 > This file adds `@@APP_NAME@@`-specific paths, URLs, and chapter references.
 
+## Durable test mission contract
+
+Follow global `worker-test` / `e2e-cockpit` for receipt and question/ACK usage.
+FIFO plus tick dispatches work at sequence 0 without heartbeat; run the exact
+`accept-dispatch` receipt, start only on `accepted` / `start_work=true`
+(sequence 1), then `heartbeat` running sequence 2. Duplicate is not a test rerun.
+`ask` / `access-prompt` use private typed body refs; `pending` / `read-question`
+return durable mission-status JSON. Only explicit human replies;
+`hold --answers` does not approve. Inspect `status.pending_commands` /
+`command-status`; accepted-worker cancel/replace requires accepted then applied
+ACK with matching digest and typed `--result` after safely stopping. Reuse
+IDs/digests, journal no secrets, and keep lifecycle separate from pane diagnosis.
+No raw `send`/`nudge` mission, approval or cancel shortcuts.
+
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
 before broad text search for codebase, architecture, file-relationship, and

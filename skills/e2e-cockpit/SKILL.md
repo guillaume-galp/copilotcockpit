@@ -33,10 +33,9 @@ project-specific topology (URLs, k8s context, service names, port numbers).
 
 ### The Golden Rule
 
-**Default dispatch target = tmux worker pane. Always.**
-
-Background agents (`task` tool) are a last resort — only when all worker panes
-are busy AND the task cannot wait.
+**Product work enters FIFO and is delivered by `cockpit-overseer tick`.**
+The controller targets a managed worker pane; a busy cockpit means queue and
+wait, not a background-agent or direct-pane bypass.
 
 ### Required Tooling (no raw tmux commands)
 
@@ -64,11 +63,16 @@ Protocol verbs:
 
 | Verb | Purpose |
 |------|---------|
-| `dispatch` | Multi-line mission to a worker pane + start confirmation |
-| `send` | Single-line command/message to a pane |
+| `dispatch --bootstrap` | Setup-only role priming, never product work |
+| `send` / `nudge` | Raw input: diagnostic or explicitly human-requested exception, not mission/approval/cancel |
 | `tail` | Read latest pane output |
 | `watch` | Poll pane output for live observability / log tails |
-| `pending` / `read-question` / `reply` | Worker question exchange |
+| `accept-dispatch` / `heartbeat` | Atomic receipt, then `record-lifecycle` freshness |
+| `ask` / `raise-question` / `access-prompt` | Explicit durable prompt with correlated IDs and typed body refs |
+| `pending` / `read-question` | Durable mission-status JSON: inspect dialog states, slots and command IDs |
+| `reply` / `answer-question` / `hold` | Relay explicit human decisions correlated with `--answers`; hold never approves |
+| `cancel-mission` / `replace-mission` / `acknowledge-command` | Cooperative control with accepted then applied worker ACK and typed result |
+| `recover-dispatch` | Operator-inspected unaccepted reservation release, not a worker kill |
 | `meta cockpit --json` | Discover active cockpit session, windows, and workers |
 | `status --workers all --json` | Read worker state without manual pane tails |
 
@@ -132,20 +136,15 @@ Do **NOT**:
 ### Dispatch — Reliable Pattern
 
 ```bash
-# Persist the multi-line mission before delivery.
-cat >/tmp/worker-mission.txt <<'EOF'
-<multi-line mission brief>
-EOF
+# Persist the reviewed brief before delivery; keep secrets out of queue/trace text.
 QI_ID="$(cockpit-queue enqueue \
   --approved \
   --title "<short mission title>" \
-  --text "$(cat /tmp/worker-mission.txt)")"
+  --text "<one mission: scope, paths, constraints, verification and report format>")"
+# Only when no other queue item is active:
 cockpit-queue start-next
 cockpit-queue transition "$QI_ID" implementing --reason "ready for worker-dev"
-cockpit-overseer tick
-
-# Single-line command
-cockpit-protocol send --target "<session>:<window>" --text "git status"
+cockpit-overseer tick --session "<session>"
 
 # Worker shortcut command (session resolves from --session, TMUX_SESSION,
 # current tmux session, or single-cockpit auto-detection)
@@ -158,7 +157,7 @@ cockpit-protocol status --workers all --json
 | Rule | Why |
 |------|-----|
 | `cockpit-queue enqueue` + state transition + `cockpit-overseer tick` | Commits mission authority before the controller delivers the brief |
-| `cockpit-protocol send` for one-liners | Clean semantic command for simple pane input |
+| Durable dialog/control commands | Never paste approvals, cancellation, or additional work as one-liners |
 | `cockpit-protocol tail/watch` for observability | Uniform read path for workers and log panes |
 | `cockpit-protocol meta cockpit --json` | Discovers the active cockpit session, windows, and worker targets |
 | `cockpit-protocol status --workers all --json` | Reads worker state without manual pane-tail interpretation |
@@ -192,32 +191,14 @@ If the session is stale or over budget, switch to minimal mode:
 cockpit-overseer loop --session "<session>" --mode minimal
 ```
 
-If the worker must be reset, use this clear/re-prime flow:
-
-```bash
-# 1. Clear session context
-cockpit-protocol send --target "<session>:<window>" --text "/clear"
-sleep 3
-
-# 2. Verify AIC reset
-cockpit-protocol tail --target "<session>:<window>" --lines 120 | grep "AIC used"
-# expect: Session: 0 AIC used
-
-# 3. Re-prime with role skill (essential — /clear wipes all loaded skills)
-PRIME="Please invoke the worker-dev skill and the e2e-cockpit skill to reload your role context."
-cockpit-protocol send --target "<session>:<window>" --text "$PRIME"
-
-# 4. Wait for prime to settle, then dispatch mission
-sleep 15 && cockpit-protocol tail --target "<session>:<window>" --lines 120 | grep "AIC used"
-# expect: Session: ~10–20 AIC used (skills loaded, ready)
-```
-
-Minimal mode means status-only: no deep triage, no repeated tail reads, no extra
-context loading. Clear/re-prime only when the worker is truly stale and idle.
-
-If a worker session has been cleared, re-prime it once and then keep the next
-mission brief short. Do not replay the full cockpit protocol unless the worker lost
-role context.
+Minimal mode means status-only: no deep triage or repeated tail reads. Context
+cost is not authority to clear a pane. Inspect `mission-status` and
+`command-status`; accepted work must stop cooperatively through
+`cancel-mission` or `replace-mission` and its worker ACKs before any
+human-requested session reset. Unaccepted reservations use inspected recovery
+below. A reset never proves cancellation or frees a slot. After context loss,
+reload role guidance and observe durable state; a duplicate receipt does not
+authorize starting again.
 
 ---
 
@@ -230,11 +211,24 @@ cockpit-protocol pending
 ```
 
 If any exist:
-1. Read: `cockpit-protocol read-question --worker worker-<name>`
-2. Relay to user via `ask_user` tool (or inline if trivial)
-3. Write answer: `cockpit-protocol reply --worker worker-<name> --answer "<answer>"`
+1. Read `cockpit-protocol read-question --worker worker-<name>`: this is
+   mission-status JSON, not a temporary-file inbox. Inspect each dialog state.
+2. Relay the referenced prompt to the human; never infer even a "trivial" answer.
+3. Use `reply` / `answer-question` only for the explicit human answer, or `hold`
+   for an explicit hold. Supply a new response `--command-id`, `--answers`
+   naming the pending prompt command, `--by operator`, `--trace`, `--category`,
+   `--body-ref TYPE:VALUE` and `--payload JSON` or `--digest sha256:...`.
 
-Workers block waiting for the answer file — never leave them hanging.
+Hold keeps the prompt unresolved and grants no permission. A reply is a durable
+command, not automatic approval or keystrokes. Workers inspect pending commands
+and acknowledge accepted then applied with the matching digest and a typed
+`--result`. Keep command IDs/digests stable on retry. Prompt/answer/result bodies
+stay in private artifacts, not full secrets in the journal or CLI arguments.
+Uninstrumented pane prompts are diagnostic only: ask the worker/operator to
+report them explicitly via `ask` / `access-prompt`, never answer from pane text.
+
+See [README — Durable operator walkthrough](../../README.md#durable-operator-walkthrough)
+for complete CLI examples and the worker ACK sequence.
 
 ---
 
@@ -271,18 +265,23 @@ Before any queue command, set the queue root explicitly. Never rely on the
 current directory, because a machine may host multiple independent FIFO queues:
 
 ```bash
-export COCKPIT_QUEUE_ROOT="<repo-or-cockpit>/docs/queue"
-export COCKPIT_CONTROL_ROOT="<absolute-repo-or-cockpit>/.cockpit/control"
-tmux set-environment -t "<session>" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
-tmux set-environment -t "<session>" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"
+export COCKPIT_QUEUE_ROOT="/absolute/project/docs/cockpit-queue"
+export COCKPIT_CONTROL_ROOT="/absolute/project/docs/cockpit-control"
+cockpit-control init --queue-root "$COCKPIT_QUEUE_ROOT" \
+  --planning-root "/absolute/project/docs/plan" \
+  --implementation-root "/absolute/project"
+cockpit-control preflight
 ```
 
 Generated cockpit launchers should set this tmux session environment when the
 session starts. `cockpit-queue` may read `COCKPIT_QUEUE_ROOT` from the shell or
 from the current tmux session environment, but it must never infer it from `cwd`.
-Before VP3 controller work, run `cockpit-overseer start`; it requires an absolute
-`COCKPIT_CONTROL_ROOT` from the shell, or (only when absent from the shell) the
-active tmux session. Never derive the control root from `cwd`.
+For an initialized unbound store, use `cockpit-control bind-roots` with those
+same root arguments. Bare `cockpit-overseer start` / `init` establishes only
+structure; missing work boundaries/capability make preflight
+`operationally-blocked`. Never hand-edit metadata/events. Existing installed
+launchers and overlays are project-owned: have their owner explicitly review
+root exports and tmux injection, not overwrite them during toolkit updates.
 
 ### Controller tick
 
@@ -303,23 +302,37 @@ ADR-014 ladder it actually applied, in order. Rules 7 (`live-status`) and 8
 and can never dispatch, complete, or advance a mission.
 
 The controller first commits the command and reserves the worker's one mission
-slot, then delivers the queue-owned `source_text` with `MISSION-ID`,
+slot with `pending-dispatch` sequence 0 and no heartbeat, then delivers the
+queue-owned `source_text` with `MISSION-ID`,
 `COMMAND-ID`, `QUEUE-ITEM-ID`, and `TRACE-ID` headers, boundaries, digest,
 acceptance deadline and the exact `cockpit-control accept-dispatch` command.
 The worker must run that receipt before work: only JSON `outcome=accepted` and
 `start_work=true` authorizes starting. It commits the command acknowledgement
 and lifecycle sequence 1 in one event. A duplicate receipt returns
 `start_work=false`, never permission to repeat work after a restart.
+The worker then emits `heartbeat` / `record-lifecycle --state running` sequence 2
+with matching mission/worker/queue/trace and renews freshness monotonically.
 
 A reserved, unaccepted dispatch is redelivered with the same command ID and
 digest only before its immutable five-minute acceptance deadline. At expiry,
 ticks stop delivery and record `dispatch-acceptance-expired` once for unchanged
 evidence; the slot remains reserved, not failed or automatically replaced.
 Missing-deadline legacy reservations are `dispatch-acceptance-unsupported`.
-Inspect the command and worker and escalate for an explicit decision. This
-slice does not release unaccepted reservations: `replace-mission` requires an
-accepted lifecycle and queue disposition alone does not free the slot. Never
-forge acceptance or edit immutable events to unblock it.
+Inspect `command-status`, `mission-status` and the worker. For either expired
+or legacy missing-deadline dispatch, only after confirming no worker is executing
+the reservation may the operator use:
+
+```bash
+cockpit-protocol recover-dispatch --dispatch-command "<dispatch-uuid>" \
+  --command-id "<recovery-uuid>" --worker worker-dev --inspect-safe \
+  --by operator --reason "inspection confirms no executing worker" \
+  --evidence "file:/private/mission/inspection"
+```
+
+Reuse that recovery ID and inspection on retry. Recovery fences late receipts;
+it does not kill a worker, forge acceptance/ACKs, start work or settle the queue.
+Accepted work requires cooperative cancellation/replacement; uncertain
+inspection stays blocked. Queue disposition alone does not release a reservation.
 
 Exit codes: `0` when the tick dispatched and delivered, recorded an observation, redelivered
 a command that already stands, or found nothing new. It exits `1` in exactly two
@@ -354,10 +367,10 @@ Two things are never repaired automatically:
 * malformed authoritative journal data under `events/`.
 
 Both stop the tick before it derives one fact, commit nothing, change not one
-byte, and print the exact repair. For a malformed committed event that repair is
-always `cockpit-control preflight` to name the file, then restoring or
-correcting that one file yourself: cockpit-control never rewrites, reorders, or
-removes committed authority.
+byte, and print the diagnostic. Use `cockpit-control preflight` to name the file
+and escalate for operator investigation/restoration from verified evidence.
+Never hand-edit history to make a mission appear accepted or terminal:
+cockpit-control never rewrites, reorders, or removes committed authority.
 
 ### Bounded recovery and conflicts
 
@@ -387,17 +400,18 @@ set, the ladder is only `cancel -> escalate`: the controller asks the worker to
 stop and **never** reopens the queue item. `escalate` blocks, names the decision
 it needs from you, and stops for good.
 
-When two active missions claim one worker, the mission that claimed the slot
-first *in committed revision order* is kept — never the one with the newest or
-oldest timestamp. Dispatch stops, the conflict is escalated once, and the
-refused claim is retained as durable evidence. Dispatch resumes when the
-**duplicate** mission the refusal names ends: request that with
-`cockpit-control cancel-mission` and have its worker record the lifecycle
-events the printed repair names. Those are computed from the transition table,
-not assumed — `cancelled` has no edge from `accepted`, so a duplicate a worker
-has only accepted is ended by recording `running` and then `cancelled`. Never
-end the retained mission — that is the mission the control plane is keeping,
-and the block clears without touching it.
+Cancellation/replacement of accepted work is cooperative, including recovery
+requests: the owning worker must acknowledge the registered command as
+`accepted`, actually stop/apply it, then acknowledge `applied` with the matching
+digest and a typed result reference. A timeout, pane marker or overseer request
+does not prove the worker stopped. Do not manufacture lifecycle events to free
+a slot. Contested slots block dispatch; inspect the named conflict and escalate
+for an explicit disposition without disturbing the retained mission.
+
+Keep durable `lifecycle` separate from operational `status` (`available`,
+`working`, `awaiting-approval`, `held`, `blocked`, `unreachable`). Check
+`reachable`, freshness, and `pending_commands` independently. Pane diagnostics
+cannot override a durable prompt, completion or slot claim.
 
 ### Queue intake
 
@@ -515,11 +529,8 @@ failure found →
   ```bash
   cockpit-protocol tail --target "<session>:<window>" --lines 20
   ```
-- Track active missions: one sentence per worker, updated in your head or SQL.
-- Poll workers via `cockpit-overseer loop`; avoid repeated full pane-tail dumps.
-- Track active missions with short IDs, not pasted briefs.
-- Poll workers via `cockpit-overseer loop`; avoid repeated full pane-tail dumps.
-- Track active missions with short IDs, not pasted briefs.
+- Track missions with `mission-status` / `command-status`; SQL or memory is
+  scratch state only. Poll compact status rather than repeating pane dumps.
 
 ### Budget guardrail
 
@@ -536,7 +547,8 @@ guessing from pane feel.
 `~/.config/cockpit-overseer/archive/`. Each record captures the tmux session,
 window, action, UUID trace, parent trace, summary, pane hash, estimated tokens,
 and the raw brief or pane snapshot so you can reconstruct a mission after the
-fact.
+fact. These diagnostic archives are not mission authority; never include secrets
+in briefs or paste secret-bearing prompt bodies into trace output.
 
 Use `cockpit-trace show <trace-id>` for one dialog or `cockpit-trace tree
 <trace-id>` for a stitched family. If the same mission can be explained from the
@@ -544,16 +556,24 @@ trace, do not burn extra tokens to rediscover it.
 
 ## Scheduling Awakenings
 
-To schedule a future wakeup or recurring reminder for this cockpit, use the
-**`cockpit-wake`** skill. Trigger phrases: "wake me at X", "schedule a morning
-check at X", "remind me at X to Y", "set a recurring check", "list awakenings",
-"cancel awakening".
+Use the **`cockpit-wake` CLI** for a future or recurring controller tick, not
+arbitrary reminders or pane input. Queue deferred product/test work first.
 
 Always pass the **exact tmux session name** of this cockpit when scheduling:
 ```bash
-cockpit-wake schedule --once "07:15" -s <THIS-SESSION> -w overseer -m "…"
+cockpit-wake schedule --once "07:15" -s "<THIS-SESSION>" -w overseer \
+  -m "Observe mission progress" --mission "<mission-uuid>" --queue-item "<QI-ID>" \
+  --owner operator --intent "bounded oversight" --stop-condition "mission terminal"
 ```
 Retrieve the session name with: `cockpit-protocol meta current-session`
+All five intent arguments are required, as is a ready `COCKPIT_CONTROL_ROOT`.
+The schedule stores structured control root and target session/window and
+restores them for a bounded tick. `-m` is an inbox note, never pasted input.
+Use `--cron "*/5 * * * *"` instead of `--once` for recurrence; `--dry-run` is
+read-only. `cockpit-wake stop <id>` aliases `cancel`, including fired recurring
+jobs. Legacy `list`/`stop`/`cancel` work without a root. `migrate` diagnoses only:
+no bootstrap, corrupt-state renaming, or job rewriting. Explicitly stop legacy
+schedules, bootstrap/bind roots and pass preflight, then reschedule.
 
 ---
 
@@ -580,7 +600,8 @@ causes mission bleed — the worker conflates two missions and does both badly.
 
 ### Dispatch tracking (mandatory)
 
-Before every dispatch, mentally (or in SQL) record:
+Before every tick, inspect durable mission slots and command state. A mental
+or SQL summary is only a convenience:
 
 ```
 worker-test  : <mission summary> — STATUS: active | idle
@@ -588,13 +609,15 @@ worker-dev   : <mission summary> — STATUS: active | idle
 worker-fix   : <mission summary> — STATUS: active | idle
 ```
 
-Only dispatch to a worker whose STATUS is **idle**.
+Only the controller may dispatch into a free durable slot; "idle" pane text or
+a scratch summary is not authority.
 
 ### Sequencing missions to the same worker
 
 When a worker finishes one mission and you have a follow-up:
-1. Wait for the worker to report done with `cockpit-protocol wait-report --worker <worker> --trace-id <trace-id>` or confirm idle with `cockpit-protocol status --workers all --json`
-2. Send the next mission as a **new, clean dispatch** — do not append to a previous message
+1. Verify terminal lifecycle evidence and the released slot with `mission-status`;
+   `wait-report` and pane status alone are insufficient
+2. Let FIFO plus the next controller tick deliver a **new, clean dispatch**
 3. Never pre-load a follow-up mission in the same dispatch ("after you commit, then do X")
    — workers execute top-to-bottom and will start X before the commit is clean
 
@@ -612,5 +635,6 @@ You MAY dispatch to multiple workers simultaneously **only if**:
 - Worker's AIC climbs unusually fast (>200 AIC / turn)
 - Commit is missing or malformed
 
-**Recovery:** Send a STOP message, ask the worker to finish and report on the
-current task only, then wait before sending the next mission.
+**Recovery:** Inspect durable state, request `cancel-mission` or
+`replace-mission` when appropriate, and await the owning worker's accepted then
+applied ACK with typed result evidence. Never substitute a raw STOP message.

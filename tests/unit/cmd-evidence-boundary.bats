@@ -48,29 +48,13 @@ EOF
     chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
 }
 
-cc_declare_queue_root() {
-    python3 -c '
-import json
-import sys
-
-path = sys.argv[1] + "/control.json"
-with open(path) as handle:
-    record = json.load(handle)
-record["canonical_roots"]["queue_root"] = sys.argv[2]
-record["queue_root"] = sys.argv[2]
-with open(path, "w") as handle:
-    handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-' "$1" "$2"
-}
-
 cc_cockpit() {
     export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/$1-control"
     export COCKPIT_QUEUE_ROOT="$BATS_TEST_TMPDIR/$1-queue"
     mkdir -p "$COCKPIT_QUEUE_ROOT"
-    "$CONTROL_BIN" init >/dev/null
-    cc_declare_queue_root "$COCKPIT_CONTROL_ROOT" "$COCKPIT_QUEUE_ROOT"
-    run "$CONTROL_BIN" replay-ledger
-    [ "$status" -eq 0 ]
+    "$CONTROL_BIN" init --queue-root "$COCKPIT_QUEUE_ROOT" \
+        --planning-root "$BATS_TEST_TMPDIR/$1-planning" \
+        --implementation-root "$BATS_TEST_TMPDIR/$1-implementation" >/dev/null
 }
 
 cc_active_item() {

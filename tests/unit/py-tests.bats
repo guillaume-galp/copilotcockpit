@@ -1,19 +1,14 @@
 #!/usr/bin/env bats
 
+load helper
+
+setup() {
+  cc_setup_fake_home
+}
+
 @test "python unit tests via unittest" {
-  run python3 -m unittest \
-    tests.unit.test_typed_contracts \
-    tests.unit.test_control_command_seam \
-    tests.unit.test_control_root_schema_seam \
-    tests.unit.test_control_lock_seam \
-    tests.unit.test_control_journal_seam \
-    tests.unit.test_control_projection_seam \
-    tests.unit.test_control_lifecycle_seam \
-    tests.unit.test_control_mission_control_seam \
-    tests.unit.test_control_controller_seam \
-    tests.unit.test_dispatch_acceptance \
-    tests.unit.test_control_wake_seam \
-    tests.unit.test_control_cli_adapter_seam \
-    tests.unit.test_th4_e4_us3_conformance
+  cd "$CC_REPO_ROOT"
+  run python3 -m unittest discover -s tests/unit -p 'test_*.py'
+  printf '%s\n' "$output"
   [ "$status" -eq 0 ]
 }

@@ -152,7 +152,7 @@ EOF
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q '"session": "portal-local"'
 	echo "$output" | grep -q '"status": "available"'
-	echo "$output" | grep -q '"status": "working"'
+	echo "$output" | grep -q '"observation": "working"'
 	echo "$output" | grep -q '"report": "WORKER-DEV DONE"'
 }
 
@@ -199,14 +199,18 @@ EOF
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" ask \
 		--worker "$worker" \
-		--blocked-on "root validation" \
-		--question "Should not persist?"
+		--command-id 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af8 \
+		--mission 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af9 \
+		--queue-item QI-root-test --trace 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af7 \
+		--category root-validation --body-ref note:question --payload '{}'
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is required"
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" reply \
-		--worker "$worker" \
-		--answer "Should not persist."
+		--command-id 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af6 \
+		--answers 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af8 \
+		--by operator --trace 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af5 \
+		--category root-validation --body-ref note:answer --payload '{}'
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is required"
 
