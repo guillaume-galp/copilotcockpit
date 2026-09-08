@@ -14,7 +14,7 @@ practice with a clear test gate at every step and a bounded escalation path.
 It is the **8th repo-managed skill**, installed to
 `~/.copilot/skills/copilotcockpit-dev/SKILL.md` by `bootstrap.sh global`.
 
-> Authoritative spec: **ADR-008** (this skill mirrors it faithfully); see also
+> Authoritative spec: **ADR-008** (with the release-trigger correction below); see also
 > architecture §9 (dev workflow / test strategy) and ADR-007 (tag → release).
 > This ADR owns **idea → tag**; ADR-007 owns **tag → release**.
 
@@ -155,11 +155,14 @@ Category 5 runs **only** in the release workflow — never locally.
 10. **Commit the bump directly to `main`** (the *only* allowed direct-to-`main`
     commit) and push:
     ```bash
-    git commit -am "chore: bump version to v0.2.0 [skip ci]"
+    git commit -am "chore: bump version to v0.2.0"
     git push origin main
     ```
-    The `[skip ci]` marker stops `ci.yml` from re-running on this push (it only
-    touches `VERSION`/`CHANGELOG.md`).
+    Do **not** use `[skip ci]` or another workflow-skip marker on a commit that
+    will receive a release tag. GitHub applies that marker to tag-triggered
+    `push` workflows too, so it suppresses `release.yml`, not just branch CI.
+    This corrects ADR-008's original skip-marker guidance. Allow branch CI to
+    run normally.
 11. **Tag and push the tag:**
     ```bash
     git tag -a v0.2.0 -m "Release v0.2.0"
