@@ -36,6 +36,8 @@ _Nothing yet._
   fenced cancellation against new execution, and retained the `stop` alias.
 - Closed concurrent dispatch/acceptance races, foreign acknowledgement
   correlation gaps, and new legacy-form replacement bypasses.
+- Corrected the release runbook to omit workflow-skip markers from version
+  commits, so the tag-driven release pipeline is not suppressed.
 
 ### Operator adoption
 - Retired direct mission-dispatch bypasses in favor of queue/controller delivery;
