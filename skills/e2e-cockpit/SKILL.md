@@ -304,9 +304,22 @@ and can never dispatch, complete, or advance a mission.
 
 The controller first commits the command and reserves the worker's one mission
 slot, then delivers the queue-owned `source_text` with `MISSION-ID`,
-`COMMAND-ID`, `QUEUE-ITEM-ID`, and `TRACE-ID` headers. A reserved mission with
-no worker `accepted` lifecycle evidence is redelivered with the same command ID;
-the fold creates no second event or mission.
+`COMMAND-ID`, `QUEUE-ITEM-ID`, and `TRACE-ID` headers, boundaries, digest,
+acceptance deadline and the exact `cockpit-control accept-dispatch` command.
+The worker must run that receipt before work: only JSON `outcome=accepted` and
+`start_work=true` authorizes starting. It commits the command acknowledgement
+and lifecycle sequence 1 in one event. A duplicate receipt returns
+`start_work=false`, never permission to repeat work after a restart.
+
+A reserved, unaccepted dispatch is redelivered with the same command ID and
+digest only before its immutable five-minute acceptance deadline. At expiry,
+ticks stop delivery and record `dispatch-acceptance-expired` once for unchanged
+evidence; the slot remains reserved, not failed or automatically replaced.
+Missing-deadline legacy reservations are `dispatch-acceptance-unsupported`.
+Inspect the command and worker and escalate for an explicit decision. This
+slice does not release unaccepted reservations: `replace-mission` requires an
+accepted lifecycle and queue disposition alone does not free the slot. Never
+forge acceptance or edit immutable events to unblock it.
 
 Exit codes: `0` when the tick dispatched and delivered, recorded an observation, redelivered
 a command that already stands, or found nothing new. It exits `1` in exactly two
@@ -319,7 +332,8 @@ diagnostic on stderr and never a traceback:
   slot** — the fold, not the tick, decides who holds a slot, so the tick reports
   what the fold recorded and creates no second mission.
 * tmux delivery failed after commit — the durable reservation remains and the
-  next tick redelivers the same command after the target is restored.
+  next tick redelivers the same command after the target is restored, but only
+  before the acceptance deadline.
 
 Ticking again over the same evidence persists nothing, so a recurrent wake
 terminates instead of re-investigating.

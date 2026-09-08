@@ -16,6 +16,7 @@ CC_UNINSTALL="$CC_REPO_ROOT/uninstall.sh"
 # cc_setup_fake_home — point HOME at an isolated, writable dir inside the test's
 # private tmp dir, and assert the override actually took effect (defence in depth).
 cc_setup_fake_home() {
+	export PATH="$CC_REPO_ROOT/tests/transport:$PATH"
 	export HOME="$BATS_TEST_TMPDIR/home"
 	mkdir -p "$HOME"
 	# Hard guard: refuse to proceed if HOME is anything but the sandbox. This
@@ -28,6 +29,28 @@ cc_setup_fake_home() {
 		return 1
 		;;
 	esac
+}
+
+# Accept the stored controller envelope at an explicit test-clock instant.
+cc_accept_dispatch() {
+	python3 - "$CC_REPO_ROOT/bin" "$COCKPIT_CONTROL_ROOT" "$@" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import cockpit_control as cc
+root, mission, at, until = Path(sys.argv[2]), *sys.argv[3:]
+envelope = next(entry["envelope"] for entry in cc.read_command_slots(root).values()
+                if entry["envelope"]["mission_id"] == mission
+                and entry["envelope"]["command_type"] == "mission-dispatch")
+seconds = (cc._parsed_timestamp(until, "until", "fixture") -
+           cc._parsed_timestamp(at, "at", "fixture")).total_seconds()
+result = cc.accept_dispatch(
+    root, envelope["command_id"], mission, envelope["target"]["id"],
+    envelope["queue_item_id"], envelope["trace_id"], envelope["payload_digest"],
+    fresh_for=str(seconds), as_of=at,
+)
+assert result.start_work, result
+PY
 }
 
 # cc_make_project_dir — create and echo a fresh, empty target dir for `e2e`.

@@ -153,3 +153,52 @@ the durable lifecycle record.
 This report does not change UDM application code, UDM profile semantics, or
 Autopilot's product backlog schema. The companion Autopilot issue owns the
 backlog-to-queue adapter and cross-workspace mission-packet requirements.
+
+## Worker Acceptance Slice
+
+Controller dispatch envelopes now declare an immutable acceptance deadline,
+five minutes after dispatch creation. Redelivery reuses that deadline, command
+ID and digest; it never extends the window. At or after the deadline, a tick
+records `blocked / dispatch-acceptance-expired` once for unchanged evidence and
+stops sending input. The reservation remains held. This is an observation of
+silence, not a worker failure, cancellation, replacement, or new mission.
+An operator must inspect the command and worker and decide explicit recovery
+or queue disposition. Reservation release is not part of this slice:
+`replace-mission` currently requires an accepted lifecycle, and queue disposition
+alone does not release a worker reservation. Leave it blocked rather than
+fabricating acceptance to enable replacement or editing immutable events.
+
+Each delivered brief includes the boundaries, digest, deadline and exact
+shell-quoted receipt command:
+
+```bash
+COCKPIT_CONTROL_ROOT=/absolute/control cockpit-control accept-dispatch \
+  --command-id <uuid> --mission <uuid> --worker worker-dev \
+  --queue-item <id> --trace <uuid> --payload-digest sha256:<digest> \
+  --fresh-for 300
+```
+
+The receipt validates the registered dispatch, canonical boundaries, current
+queue brief/state, worker slot and correlation before publishing a single
+`worker-lifecycle-accepted` event containing both `worker_lifecycle` (sequence 1)
+and `command_acknowledgement` (accepted). The journal rename commits both or
+neither; projections are replayable. Acceptance and final transport validation
+share the portable control lock. A receipt cannot accept another worker's
+slot, a changed payload, or a terminal/replaced mission.
+
+The CLI returns JSON. Only `outcome=accepted` with `start_work=true` permits a
+new execution. A repeat returns `duplicate`, `start_work=false` and the original
+receipt event ID without publishing or refreshing lifecycle state. Dry-run
+returns `would-accept`, `start_work=false` without writing. If the worker loses
+the first response or restarts after accepting, this protocol deliberately
+does not infer whether work began: duplicates require observation/explicit
+recovery, never a second execution. Workers next emit `running` sequence 2 and
+renew freshness under the existing lifecycle protocol.
+
+Old reservations without a deadline are diagnosed as
+`dispatch-acceptance-unsupported`; no timeout or successful acceptance is
+fabricated. Existing immutable history remains readable, but pending legacy
+handoffs require explicit operator recovery rather than event rewriting.
+This slice does not implement interactive approval prompts, wake migration,
+legacy launcher migration, automatic mission replacement, or exactly-once
+external side effects.

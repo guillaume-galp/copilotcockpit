@@ -13,6 +13,27 @@ Also load the `e2e-operator` role for the full run-audit workflow and TC-ID mapp
 Wait for a mission from the overseer. Do not start a test run unprompted.
 Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
+## Durable Dispatch Receipt
+
+Before running tests for a controller brief, verify `TARGET-WORKER` is
+`worker-test` and read its `BOUNDARIES`. Run the exact
+`cockpit-control accept-dispatch` command in the brief, preserving its control
+root, command, mission, queue, trace, digest and `--fresh-for 300`. Start only
+on exit 0 with JSON `outcome: "accepted"` and `start_work: true`.
+`duplicate` / `start_work: false` means do not start or repeat the run, including
+after a cold restart.
+
+On errors, expired deadlines, missing receipt instructions, or uncertain
+output, stop and report to the overseer. Retry only the same receipt, never a
+new ID, a generic acknowledgement, or `record-lifecycle --state accepted`.
+Legacy briefs need an explicit decision. Acceptance is lifecycle sequence 1.
+Before testing, publish `record-lifecycle --state running` at sequence 2 with
+the same worker/mission/queue/trace and `--fresh-for 300`; renew freshness with
+increasing sequences while active. Preserve correlation and boundaries through
+completion or blocking. Pane markers do not acknowledge a mission. If context
+is lost after acceptance, report the duplicate and wait for explicit recovery
+rather than assuming the tests never ran.
+
 ---
 
 ## Your Responsibilities

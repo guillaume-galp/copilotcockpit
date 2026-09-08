@@ -68,6 +68,10 @@ path = sys.argv[1] + "/control.json"
 with open(path) as handle:
     record = json.load(handle)
 record["canonical_roots"]["queue_root"] = sys.argv[2]
+record["canonical_roots"]["planning_root"] = sys.argv[1] + "-planning"
+record["canonical_roots"]["implementation_roots"] = [sys.argv[1] + "-implementation"]
+record["planning_root"] = record["canonical_roots"]["planning_root"]
+record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
 record["queue_root"] = sys.argv[2]
 with open(path, "w") as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -135,9 +139,7 @@ cc_running_mission() {
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	CC_MISSION="$(cc_slot_mission)"
-	cc_emit --state accepted --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
-		--trace "$2" --sequence 1 --heartbeat-at 2026-09-04T10:01:00.000000Z \
-		--fresh-until "$3"
+	cc_accept_dispatch "$CC_MISSION" 2026-09-04T10:01:00.000000Z "$3"
 	cc_emit --state running --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
 		--trace "$2" --sequence 2 --heartbeat-at 2026-09-04T10:02:00.000000Z \
 		--fresh-until "$3"

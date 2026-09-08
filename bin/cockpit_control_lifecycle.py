@@ -7,6 +7,7 @@ and heartbeat freshness observation.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +133,7 @@ _require_absolute_root: Callable[..., Path]
 publish_control_event: Callable[..., Any]
 inspect_control_events: Callable[..., Any]
 fold_mission_state: Callable[..., Any]
+PortableControlLock: Callable[..., Any]
 utc_timestamp: Callable[[], str]
 CommittedEvent: Any
 EventPublicationResult: Any
@@ -380,16 +382,36 @@ def record_worker_lifecycle(
     dry_run: bool = False,
 ) -> LifecycleRecordResult:
     validated = validate_worker_lifecycle(dict(lifecycle), "worker lifecycle")
-    publication = publish_control_event(
-        root,
-        f"{WORKER_LIFECYCLE_EVENT_PREFIX}{validated['state']}",
-        actor=actor or validated["worker_id"],
-        payload={WORKER_LIFECYCLE_PAYLOAD_FIELD: validated},
-        command=command,
-        timeout_seconds=timeout_seconds,
-        poll_seconds=poll_seconds,
-        dry_run=dry_run,
-    )
+    accepting = validated["state"] == LIFECYCLE_ACCEPTED
+    with (PortableControlLock(
+        root, command=command, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds,
+    ) if accepting and not dry_run else nullcontext(None)) as lock:
+        if accepting:
+            _metadata, history = inspect_control_events(root)
+            for event in history.events:
+                envelope = event.record["payload"].get("command_envelope")
+                if (
+                    envelope is not None and envelope["command_type"] == "mission-dispatch"
+                    and envelope["mission_id"] == validated["mission_id"]
+                ):
+                    if envelope["deadline_at"] is None:
+                        raise ControlStoreError(
+                            "dispatch has no acceptance deadline; explicit operator recovery is required"
+                        )
+                    raise ControlStoreError(
+                        "use cockpit-control accept-dispatch for atomic worker acceptance"
+                    )
+        publication = publish_control_event(
+            root,
+            f"{WORKER_LIFECYCLE_EVENT_PREFIX}{validated['state']}",
+            actor=actor or validated["worker_id"],
+            payload={WORKER_LIFECYCLE_PAYLOAD_FIELD: validated},
+            command=command,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=poll_seconds,
+            dry_run=dry_run,
+            held_lock=lock,
+        )
 
     try:
         _metadata, history = inspect_control_events(publication.root)

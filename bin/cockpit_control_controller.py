@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from uuid import UUID, uuid5
@@ -15,6 +16,7 @@ DEFAULT_CONTROLLER_TICK_COMMAND = "cockpit-overseer tick"
 DEFAULT_LOCK_POLL_SECONDS = 0.05
 CONTROLLER_LEDGER_CURRENT = "current"
 CONTROLLER_TICK_ACTOR = "cockpit-overseer"
+DISPATCH_ACCEPTANCE_SECONDS = 300
 
 
 class ControlStoreError(RuntimeError):
@@ -109,6 +111,7 @@ class ControllerEvidence:
     # publish an explicit architecture-boundary event when it records the
     # blocked observation.  It is `None` in the normal case.
     boundary_blocker: Optional[Dict[str, Any]]
+    commands: Tuple[Dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         """Refuse a derived-state classification outside the closed vocabulary."""
@@ -882,20 +885,55 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             evidence_refs=references,
         )
 
-    for holder, slot in evidence.state.claimed_slots:
+    # Older phase reservations remain held, but cannot mask accepted work on
+    # the worker the queue currently calls for. Recovery was considered above.
+    claims = sorted(
+        evidence.state.claimed_slots,
+        key=lambda claim: (
+            not (claim[0] == worker_id and claim[1]["state"] == MISSION_SLOT_ACTIVE),
+            claim[0],
+        ),
+    )
+    for holder, slot in claims:
         if slot["queue_item_id"] == item.item_id:
             observed = evidence.observation(slot["mission_id"])
             controller = evidence.controller
+            stored = next(
+                (entry for entry in evidence.commands
+                 if entry["envelope"]["command_id"] == slot["command_id"]),
+                None,
+            )
+            dispatch_reservation = (
+                stored is None
+                or stored["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+            )
+            if slot["state"] == MISSION_SLOT_RESERVED and observed is None and dispatch_reservation:
+                envelope = None if stored is None else stored["envelope"]
+                deadline = None if envelope is None else envelope["deadline_at"]
+                reason = None
+                if (
+                    deadline is None or envelope["command_type"] != COMMAND_TYPE_MISSION_DISPATCH
+                    or stored["status"] != COMMAND_STATUS_REGISTERED or stored["conflicts"]
+                ):
+                    reason = CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED
+                elif _parsed_timestamp(evidence.as_of, "as_of", "tick") >= _parsed_timestamp(
+                    deadline, "deadline_at", "dispatch"
+                ):
+                    reason = CONTROLLER_REASON_ACCEPTANCE_EXPIRED
+                if reason is not None:
+                    return _controller_observation_action(
+                        evidence, reason,
+                        {"command_id": slot["command_id"], "deadline_at": deadline},
+                        queue_item_id=item.item_id, worker_id=holder,
+                        mission_id=slot["mission_id"], command_id=slot["command_id"],
+                        evidence_refs=references + (f"command:{slot['command_id']}",),
+                    )
             if (
                 holder == worker_id
                 and slot["state"] == MISSION_SLOT_RESERVED
                 and observed is None
                 and controller is not None
-                and controller["outcome"] == CONTROLLER_DISPATCHED
-                and controller["queue_item_id"] == item.item_id
-                and controller["worker_id"] == worker_id
-                and controller["mission_id"] == slot["mission_id"]
-                and controller["command_id"] == slot["command_id"]
+                and dispatch_reservation
             ):
                 # A reservation with no worker acceptance is an uncertain
                 # delivery. Reissue the same deterministic command; the fold
@@ -916,25 +954,8 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
                     mission_id=slot["mission_id"],
                     command_id=slot["command_id"],
                     trace_id=trace_id,
-                    payload_digest=command_payload_digest(
-                        {
-                            "brief_digest": "sha256:"
-                            + hashlib.sha256(
-                                json.dumps(
-                                    {"source_text": item.source_text, "title": item.title},
-                                    sort_keys=True,
-                                    separators=(",", ":"),
-                                ).encode("utf-8")
-                            ).hexdigest(),
-                            "command_type": COMMAND_TYPE_MISSION_DISPATCH,
-                            "mission_id": slot["mission_id"],
-                            "queue_item_id": item.item_id,
-                            "queue_item_state": item.state,
-                            "trace_id": trace_id,
-                            "worker_id": worker_id,
-                        },
-                        "controller dispatch payload",
-                    ),
+                    payload_digest=dispatch_payload_digest(item, slot["mission_id"], worker_id, trace_id),
+                    deadline_at=deadline,
                     evidence_refs=references,
                 )
             # The freshness the worker has itself declared is part of *which*
@@ -1013,27 +1034,148 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
         mission_id=mission_id,
         command_id=command_id,
         trace_id=trace_id,
-        payload_digest=command_payload_digest(
-            {
-                "brief_digest": "sha256:"
-                + hashlib.sha256(
-                    json.dumps(
-                        {"source_text": item.source_text, "title": item.title},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest(),
-                "command_type": COMMAND_TYPE_MISSION_DISPATCH,
-                "mission_id": mission_id,
-                "queue_item_id": item.item_id,
-                "queue_item_state": item.state,
-                "trace_id": trace_id,
-                "worker_id": worker_id,
-            },
-            "controller dispatch payload",
+        payload_digest=dispatch_payload_digest(item, mission_id, worker_id, trace_id),
+        deadline_at=_shifted_timestamp(
+            evidence.as_of, DISPATCH_ACCEPTANCE_SECONDS,
+            label="dispatch", noun="acceptance deadline",
         ),
         evidence_refs=references,
     )
+
+
+def dispatch_payload_digest(
+    item: QueueItemObservation, mission_id: str, worker_id: str, trace_id: str,
+) -> str:
+    return command_payload_digest(
+        {
+            "brief_digest": "sha256:" + hashlib.sha256(
+                json.dumps(
+                    {"source_text": item.source_text, "title": item.title},
+                    sort_keys=True, separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "command_type": COMMAND_TYPE_MISSION_DISPATCH,
+            "mission_id": mission_id, "queue_item_id": item.item_id,
+            "queue_item_state": item.state, "trace_id": trace_id, "worker_id": worker_id,
+        },
+        "controller dispatch payload",
+    )
+
+
+@dataclass(frozen=True)
+class DispatchAcceptanceResult:
+    outcome: str
+    command_id: str
+    mission_id: str
+    start_work: bool
+    event_id: Optional[str]
+
+
+def accept_dispatch(
+    root: Path, command_id: str, mission_id: str, worker_id: str,
+    queue_item_id: str, trace_id: str, payload_digest: str,
+    *, fresh_for: str, dry_run: bool = False, as_of: Optional[str] = None,
+) -> DispatchAcceptanceResult:
+    """Claim work once, with a joint receipt under the transport's control lock."""
+
+    root = _require_absolute_root(str(root), "configured")
+    # Validate even duplicate requests before looking up or changing any state.
+    now = as_of if as_of is not None else utc_timestamp()
+    fresh_seconds = _parsed_freshness_seconds(fresh_for)
+    fresh_until = _shifted_timestamp(now, fresh_seconds, label="acceptance", noun="freshness")
+    lifecycle = build_worker_lifecycle(
+        LIFECYCLE_ACCEPTED, worker_id, mission_id, queue_item_id, trace_id, 1,
+        heartbeat_at=now, fresh_until=fresh_until,
+    )
+    acknowledgement = build_command_acknowledgement(
+        command_id, payload_digest, COMMAND_ACCEPTED, worker_id, acknowledged_at=now,
+    )
+    with (nullcontext(None) if dry_run else PortableControlLock(
+        root, command="cockpit-control accept-dispatch"
+    )) as lock:
+        if as_of is None:
+            now = utc_timestamp()
+            lifecycle["heartbeat_at"] = now
+            lifecycle["fresh_until"] = _shifted_timestamp(now, fresh_seconds)
+            acknowledgement["acknowledged_at"] = now
+        validate_control_authority(root, CONTROLLER_JOURNAL_REPAIR)
+        metadata, history = inspect_control_events(root)
+        _revision, projection_reason = _classify_published_ledger(
+            root, metadata["control_id"],
+            _serialized_record(build_ledger_projection(metadata, history.events)).encode("utf-8"),
+        )
+        if projection_reason == PROJECTION_REASON_AHEAD:
+            raise ControlStoreError(
+                "dispatch acceptance cannot rewind missing committed history [repair: "
+                + CONTROLLER_LEDGER_AHEAD_REPAIR.format(
+                    ledger=LEDGER_NAME, journal=history.latest_revision,
+                ) + "]"
+            )
+        state = fold_mission_state(history.events)
+        commands, _outcomes = fold_commands(history.events)
+        command = commands.get(command_id)
+        if command is None:
+            raise ControlStoreError("dispatch command is not registered in this control root")
+        envelope = command["envelope"]
+        slot = state.worker_slots.get(worker_id)
+        roots = metadata["canonical_roots"]
+        boundaries = envelope["boundaries"]
+        if (
+            envelope["command_type"] != COMMAND_TYPE_MISSION_DISPATCH
+            or envelope["target"] != {"kind": COMMAND_TARGET_WORKER, "id": worker_id}
+            or envelope["payload_digest"] != payload_digest
+            or any(envelope[key] != lifecycle[key] for key in (
+                "mission_id", "queue_item_id", "trace_id", "parent_trace_id"
+            ))
+            or boundaries["control_root"] != str(root)
+            or any(boundaries[key] != roots[key] for key in (
+                "queue_root", "planning_root", "implementation_roots"
+            ))
+            or boundaries["runtime_boundaries"]
+            or not roots["queue_root"] or not roots["planning_root"]
+            or not roots["implementation_roots"]
+            or slot is None or slot["mission_id"] != mission_id
+            or slot["command_id"] != command_id or slot["queue_item_id"] != queue_item_id
+            or any(holder == worker_id for holder, _slot, _conflict in state.contested_slots)
+            or command["conflicts"]
+        ):
+            raise ControlStoreError("dispatch receipt mismatches its identity, digest, slot, or boundaries")
+        queue = observe_queue(Path(roots["queue_root"]))
+        item = next((item for item in queue.active if item.item_id == queue_item_id), None)
+        if queue.paused or item is None or item.worker_id != worker_id:
+            raise ControlStoreError("dispatch queue item is paused, terminal, or no longer implementable")
+        if dispatch_payload_digest(item, mission_id, worker_id, trace_id) != payload_digest:
+            raise ControlStoreError("dispatch queue brief or state no longer matches the command digest")
+        if command["status"] == COMMAND_ACCEPTED:
+            mission = state.missions.get(mission_id)
+            receipt = next(
+                (entry for entry in command["acknowledgements"]
+                 if entry["acknowledgement"]["outcome"] == COMMAND_ACCEPTED),
+                None,
+            )
+            if (
+                slot["state"] != MISSION_SLOT_ACTIVE or mission is None
+                or mission["lifecycle"]["state"] not in WORKER_LIFECYCLE_ACTIVE_STATES
+                or receipt is None
+                or not state.lifecycle_outcomes.get(receipt["event_id"], (False, ""))[0]
+            ):
+                raise ControlStoreError("dispatch has no live, correlated acceptance; explicit recovery required")
+            return DispatchAcceptanceResult("duplicate", command_id, mission_id, False, receipt["event_id"])
+        fault = dispatch_acceptance_fault(command, acknowledgement, lifecycle, slot, state.missions)
+        if fault is not None:
+            raise ControlStoreError(fault)
+        if dry_run:
+            return DispatchAcceptanceResult("would-accept", command_id, mission_id, False, None)
+        publication = publish_control_event(
+            root, f"{WORKER_LIFECYCLE_EVENT_PREFIX}{LIFECYCLE_ACCEPTED}",
+            actor=worker_id,
+            payload={
+                WORKER_LIFECYCLE_PAYLOAD_FIELD: lifecycle,
+                COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD: acknowledgement,
+            },
+            command="cockpit-control accept-dispatch", held_lock=lock,
+        )
+        return DispatchAcceptanceResult("accepted", command_id, mission_id, True, publication.event_id)
 
 
 def build_controller_dispatch(
@@ -1340,7 +1482,7 @@ class ControllerTick:
     def _repaired_projection(
         self,
         observation: ControllerJournalObservation,
-        lock: PortableControlLock,
+        lock: Optional[PortableControlLock],
     ) -> ControllerJournalObservation:
         """Rebuild derived state from the committed journal, or refuse to.
 
@@ -1478,6 +1620,7 @@ class ControllerTick:
             ledger_repair=observation.repair,
             repaired_from=observation.repaired_from,
             boundary_blocker=boundary_blocker,
+            commands=tuple(commands.values()),
         )
 
     def _validated_authority(self) -> Dict[str, Any]:
@@ -1617,11 +1760,74 @@ class ControllerTick:
     ) -> ControllerTickResult:
         """Persist the one dispatch command this tick selected, exactly once."""
 
-        metadata = validate_root_metadata(
-            _load_json(self.root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), self.root
-        )
+        with (nullcontext(None) if self.dry_run else PortableControlLock(
+            self.root, self.command, timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        )) as lock:
+            return self._dispatch_locked(action, evidence, lock)
+
+    def _dispatch_locked(
+        self,
+        action: ControllerAction,
+        evidence: ControllerEvidence,
+        lock: Optional[PortableControlLock],
+    ) -> ControllerTickResult:
+        self._validated_authority()
+        observation = self._observed_journal()
+        if not observation.settled:
+            observation = self._repaired_projection(observation, lock)
+        metadata = observation.metadata
         roots = metadata["canonical_roots"]
-        stored_command = read_command_slots(self.root).get(str(action.command_id))
+        state = fold_mission_state(observation.history.events)
+        commands, _outcomes = fold_commands(observation.history.events)
+        stored_command = commands.get(str(action.command_id))
+        declared, _exported, fault = self._resolved_queue_root(metadata)
+        if fault is not None or declared is None:
+            raise ControlStoreError("dispatch queue authority changed; rerun tick; no command was committed")
+        queue = observe_queue(Path(declared))
+        if (
+            queue.paused or len(queue.active) != 1
+            or queue.active[0].item_id != action.queue_item_id
+            or queue.active[0].worker_id != action.worker_id
+            or dispatch_payload_digest(
+                queue.active[0], str(action.mission_id), str(action.worker_id), str(action.trace_id)
+            ) != action.payload_digest
+        ):
+            raise ControlStoreError("dispatch queue evidence changed; rerun tick; no command was committed")
+
+        existing = state.worker_slots.get(str(action.worker_id))
+        same_reservation = (
+            existing is not None
+            and existing["state"] == MISSION_SLOT_RESERVED
+            and existing["mission_id"] == action.mission_id
+            and existing["command_id"] == action.command_id
+            and existing["queue_item_id"] == action.queue_item_id
+        )
+        if (
+            any(
+                (holder == action.worker_id or slot["queue_item_id"] == action.queue_item_id)
+                and not (holder == action.worker_id and same_reservation)
+                for holder, slot in state.claimed_slots
+            )
+            or state.contested_slots
+            or action.mission_id in state.missions
+            or (stored_command is not None and (
+                not same_reservation or stored_command["status"] != COMMAND_STATUS_REGISTERED
+                or stored_command["conflicts"]
+            ))
+        ):
+            raise ControlStoreError("dispatch claim changed; rerun tick; no command was committed")
+
+        # Concurrent initial ticks derive the same identity, not the same
+        # clock. Only the first publication owns the immutable time window.
+        if stored_command is not None:
+            action = replace(action, deadline_at=stored_command["envelope"]["deadline_at"])
+        if action.deadline_at is None or _parsed_timestamp(
+            self.as_of, "as_of", "tick"
+        ) >= _parsed_timestamp(action.deadline_at, "deadline_at", "dispatch"):
+            raise ControlStoreError(
+                "dispatch acceptance deadline changed or expired; rerun tick; no command was committed"
+            )
         envelope = build_command_envelope(
             command_id=str(action.command_id),
             command_type=COMMAND_TYPE_MISSION_DISPATCH,
@@ -1635,19 +1841,15 @@ class ControllerTick:
             queue_root=roots["queue_root"],
             planning_root=roots["planning_root"],
             implementation_roots=tuple(roots["implementation_roots"]),
+            deadline_at=action.deadline_at,
             created_at=(
                 self.as_of
                 if stored_command is None
                 else stored_command["envelope"]["created_at"]
             ),
         )
-        existing = evidence.state.worker_slots.get(str(action.worker_id))
         if (
-            existing is not None
-            and existing["state"] == MISSION_SLOT_RESERVED
-            and existing["mission_id"] == action.mission_id
-            and existing["command_id"] == action.command_id
-            and existing["queue_item_id"] == action.queue_item_id
+            same_reservation
             and stored_command is not None
             and _command_conflict_reason(stored_command["envelope"], envelope) is None
         ):
@@ -1659,7 +1861,7 @@ class ControllerTick:
                 diagnostics=self.diagnostics,
                 applied=False,
                 fold_outcome=MISSION_FOLD_RETAINED_DUPLICATE,
-                controller=evidence.controller,
+                controller=dict(state.controller) or None,
                 publication=None,
                 command=None,
                 conflict=None,
@@ -1691,6 +1893,7 @@ class ControllerTick:
                 "active_queue_item_id": action.queue_item_id,
                 "active_mission_id": action.mission_id,
             },
+            held_lock=lock,
         )
         outcome = CONTROLLER_TICK_WOULD_DISPATCH if self.dry_run else CONTROLLER_TICK_DISPATCHED
         if not result.applied:
@@ -1731,16 +1934,46 @@ class ControllerTick:
             evidence_refs=action.evidence_refs,
             observed_at=self.as_of,
         )
-        publication = publish_control_event(
-            self.root,
-            f"{CONTROLLER_OBSERVATION_EVENT_PREFIX}{action.outcome}",
-            actor=CONTROLLER_TICK_ACTOR,
-            payload={CONTROLLER_OBSERVATION_PAYLOAD_FIELD: record},
-            command=self.command,
-            timeout_seconds=self.timeout_seconds,
-            poll_seconds=self.poll_seconds,
-            dry_run=self.dry_run,
+        acceptance_block = action.reason in (
+            CONTROLLER_REASON_ACCEPTANCE_EXPIRED, CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
         )
+        with (PortableControlLock(
+            self.root, self.command, timeout_seconds=self.timeout_seconds,
+            poll_seconds=self.poll_seconds,
+        ) if acceptance_block and not self.dry_run else nullcontext(None)) as lock:
+            if lock is not None:
+                _metadata, history = inspect_control_events(self.root)
+                current = fold_mission_state(history.events)
+                slot = current.worker_slots.get(str(action.worker_id))
+                if (
+                    slot is None or slot["state"] != MISSION_SLOT_RESERVED
+                    or slot["mission_id"] != action.mission_id
+                    or slot["command_id"] != action.command_id
+                    or action.mission_id in current.missions
+                ):
+                    raise ControlStoreError(
+                        "dispatch reservation changed during acceptance observation; "
+                        "rerun tick; no blocked observation was committed"
+                    )
+                if current.controller.get("state_key") == action.state_key:
+                    return ControllerTickResult(
+                        root=self.root, outcome=CONTROLLER_TICK_UNCHANGED,
+                        action=action, evidence=evidence, diagnostics=self.diagnostics,
+                        applied=False, fold_outcome=CONTROLLER_FOLD_RETAINED_UNCHANGED,
+                        controller=dict(current.controller), publication=None,
+                        command=None, conflict=None, queue_fault=self.queue_fault, dry_run=False,
+                    )
+            publication = publish_control_event(
+                self.root,
+                f"{CONTROLLER_OBSERVATION_EVENT_PREFIX}{action.outcome}",
+                actor=CONTROLLER_TICK_ACTOR,
+                payload={CONTROLLER_OBSERVATION_PAYLOAD_FIELD: record},
+                command=self.command,
+                timeout_seconds=self.timeout_seconds,
+                poll_seconds=self.poll_seconds,
+                dry_run=self.dry_run,
+                held_lock=lock,
+            )
         state = fold_mission_state(_committed_events_after_publication(publication))
         applied, fold_outcome = state.mission_outcomes.get(
             publication.event_id, (False, CONTROLLER_FOLD_RETAINED_UNCHANGED)
@@ -2171,6 +2404,7 @@ def controller_blocking_repair(result: ControllerTickResult) -> str:
         declared=evidence.declared_queue_root or "-",
         exported=evidence.exported_queue_root or "-",
         worker=action.worker_id or "-",
+        command=action.command_id or "-",
         mission=action.mission_id or "-",
         queue_item=action.queue_item_id or "-",
         duplicate=duplicate or "-",

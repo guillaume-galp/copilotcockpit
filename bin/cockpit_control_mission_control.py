@@ -368,6 +368,7 @@ def register_mission_command(
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
     declarations: Optional[Mapping[str, Any]] = None,
+    held_lock: Optional[Any] = None,
 ) -> MissionControlResult:
     result = register_command(
         root,
@@ -379,6 +380,7 @@ def register_mission_command(
         dry_run=dry_run,
         correlated_record={record_field: dict(record)},
         declarations=declarations,
+        held_lock=held_lock,
     )
     state = fold_mission_state(_committed_events_after_publication(result.publication))
     applied, outcome = state.mission_outcomes.get(

@@ -160,6 +160,10 @@ path = sys.argv[1] + "/control.json"
 with open(path) as handle:
     record = json.load(handle)
 record["canonical_roots"]["queue_root"] = sys.argv[2]
+record["canonical_roots"]["planning_root"] = sys.argv[1] + "-planning"
+record["canonical_roots"]["implementation_roots"] = [sys.argv[1] + "-implementation"]
+record["planning_root"] = record["canonical_roots"]["planning_root"]
+record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
 record["queue_root"] = sys.argv[2]
 with open(path, "w") as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -588,7 +592,7 @@ ledger["active_queue_item_id"] = "QI-forged"
 with open(path, "w") as handle:
     handle.write(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 ' "$COCKPIT_CONTROL_ROOT"
-	cc_tick --as-of 2026-09-04T10:05:00.000000Z
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from divergent"
 	echo "$output" | grep -Eq "^precedence 5 ledger-projection derived revision [0-9]+ current repair repaired$"
@@ -604,7 +608,7 @@ with open(path, "w") as handle:
 	# architecture section 17 rebuilds it from the journal by exactly the same
 	# replay. The rebuild is byte-identical to the clean projection.
 	printf 'not a projection\n' >"$COCKPIT_CONTROL_ROOT/ledger.json"
-	cc_tick --as-of 2026-09-04T10:10:00.000000Z
+	cc_tick --as-of 2026-09-04T10:02:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from corrupt"
 	echo "$output" | grep -Fq "events-committed 0"
@@ -614,7 +618,7 @@ with open(path, "w") as handle:
 
 	# The rebuildable compatibility view is repaired by the same one replay.
 	printf '{"torn":\n' >"$COCKPIT_CONTROL_ROOT/events.jsonl"
-	cc_tick --as-of 2026-09-04T10:15:00.000000Z
+	cc_tick --as-of 2026-09-04T10:03:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from derived-view"
 	echo "$output" | grep -Fq "events-committed 0"
@@ -729,8 +733,7 @@ print("every classification is read exactly once")
 	trace="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 
 	# The worker durably accepts and runs the mission it was dispatched.
-	cc_emit --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace "$trace" --sequence 1 --fresh-for 3600
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_emit --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace "$trace" --sequence 2 --fresh-for 3600
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "running" ]
@@ -800,7 +803,7 @@ with open(path, "w") as handle:
     handle.write(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 ' "$COCKPIT_CONTROL_ROOT"
 
-	cc_tick --as-of 2026-09-04T10:05:00.000000Z
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from divergent"
 	echo "$output" | grep -Fq "redelivery of command"
@@ -1326,8 +1329,7 @@ print("fold", state.mission_outcomes[result.event_id][1])
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
-	cc_emit --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 88888888-8888-8888-8888-888888888888 --sequence 1 --fresh-for 3600
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_tick --as-of 2026-09-04T10:05:00.000000Z
 	[ "$status" -eq 0 ]
 	projected="$(cat "$COCKPIT_CONTROL_ROOT/ledger.json")"

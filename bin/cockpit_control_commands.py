@@ -127,6 +127,7 @@ _parsed_timestamp: Callable[..., Any]
 _require_absolute_root: Callable[..., Path]
 publish_control_event: Callable[..., Any]
 inspect_control_events: Callable[..., Any]
+fold_mission_state: Callable[..., Any]
 utc_timestamp: Callable[[], str]
 CommittedEvent: Any
 EventPublicationResult: Any
@@ -390,7 +391,12 @@ def event_command_acknowledgement(
         f"{label} payload.{COMMAND_ACKNOWLEDGEMENT_PAYLOAD_FIELD}",
     )
     expected = f"{COMMAND_ACKNOWLEDGEMENT_EVENT_PREFIX}{acknowledgement['outcome']}"
-    if event_type != expected:
+    joint_acceptance = (
+        event_type == "worker-lifecycle-accepted"
+        and acknowledgement["outcome"] == COMMAND_ACCEPTED
+        and "worker_lifecycle" in payload
+    )
+    if event_type != expected and not joint_acceptance:
         raise ControlStoreError(
             f"{label} declares acknowledgement outcome {acknowledgement['outcome']!r} but "
             f"event_type {event_type!r}; expected event_type {expected!r}"
@@ -507,6 +513,7 @@ def fold_commands(
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Tuple[bool, str]]]:
     slots: Dict[str, Dict[str, Any]] = {}
     outcomes: Dict[str, Tuple[bool, str]] = {}
+    lifecycle_outcomes = None
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
         envelope = event_command_envelope(event.record, label)
@@ -515,10 +522,80 @@ def fold_commands(
             continue
         acknowledgement = event_command_acknowledgement(event.record, label)
         if acknowledgement is not None:
+            slot = slots.get(acknowledgement["command_id"])
+            joint = "worker_lifecycle" in event.record["payload"]
+            managed_acceptance = (
+                slot is not None
+                and slot["envelope"]["command_type"] == "mission-dispatch"
+                and slot["envelope"]["deadline_at"] is not None
+                and acknowledgement["outcome"] == COMMAND_ACCEPTED
+            )
+            if joint or managed_acceptance:
+                if lifecycle_outcomes is None:
+                    lifecycle_outcomes = fold_mission_state(events).lifecycle_outcomes
+                if not joint or not lifecycle_outcomes.get(event.event_id, (False, ""))[0]:
+                    outcomes[event.event_id] = (False, COMMAND_FOLD_RETAINED_ORDER)
+                    continue
             outcomes[event.event_id] = apply_command_acknowledgement(
                 slots, acknowledgement, event
             )
     return slots, outcomes
+
+
+def dispatch_acceptance_fault(
+    command: Optional[Mapping[str, Any]],
+    acknowledgement: Optional[Mapping[str, Any]],
+    lifecycle: Mapping[str, Any],
+    slot: Optional[Mapping[str, Any]],
+    missions: Mapping[str, Mapping[str, Any]],
+) -> Optional[str]:
+    """Validate both halves of a first dispatch receipt before either folds."""
+
+    if command is None or acknowledgement is None:
+        return "dispatch acceptance requires its registered command and acknowledgement"
+    envelope = command["envelope"]
+    if (
+        envelope["command_type"] != "mission-dispatch"
+        or envelope["target"]["kind"] != COMMAND_TARGET_WORKER
+        or command["status"] != COMMAND_STATUS_REGISTERED
+        or command["conflicts"]
+        or acknowledgement["outcome"] != COMMAND_ACCEPTED
+        or acknowledgement["command_id"] != envelope["command_id"]
+        or acknowledgement["payload_digest"] != envelope["payload_digest"]
+        or acknowledgement["acknowledged_by"] != envelope["target"]["id"]
+        or lifecycle["worker_id"] != envelope["target"]["id"]
+        or any(lifecycle[field] != envelope[field] for field in (
+            "mission_id", "queue_item_id", "trace_id", "parent_trace_id"
+        ))
+        or lifecycle["state"] != "accepted"
+        or lifecycle["sequence"] != 1
+    ):
+        return "dispatch acceptance has mismatched identity, digest, or command state"
+    if (
+        slot is None or slot["state"] != "reserved"
+        or any(
+            entry["revision"] >= slot["revision"]
+            and entry["mission_id"] in missions
+            and missions[entry["mission_id"]]["lifecycle"]["state"] in ("accepted", "running", "blocked")
+            for entry in slot["conflicts"]
+        )
+        or slot["mission_id"] != envelope["mission_id"]
+        or slot["queue_item_id"] != envelope["queue_item_id"]
+        or slot["command_id"] != envelope["command_id"]
+        or envelope["mission_id"] in missions
+    ):
+        return "dispatch acceptance requires its own reserved, unaccepted mission slot"
+    deadline = envelope["deadline_at"]
+    if deadline is None:
+        return "dispatch has no acceptance deadline; explicit operator recovery is required"
+    accepted_at = _parsed_timestamp(acknowledgement["acknowledged_at"], "acknowledged_at", "acceptance")
+    if (
+        accepted_at < _parsed_timestamp(envelope["created_at"], "created_at", "dispatch")
+        or accepted_at >= _parsed_timestamp(deadline, "deadline_at", "dispatch")
+        or lifecycle["heartbeat_at"] != acknowledgement["acknowledged_at"]
+    ):
+        return "dispatch acceptance is outside its acceptance deadline"
+    return None
 
 
 def build_command_envelope(
@@ -635,6 +712,7 @@ def register_command(
     dry_run: bool = False,
     correlated_record: Optional[Mapping[str, Any]] = None,
     declarations: Optional[Mapping[str, Any]] = None,
+    held_lock: Optional[Any] = None,
 ) -> CommandRecordResult:
     validated = validate_command_envelope(dict(envelope))
     actor = _require_identifier({"actor": actor}, "actor", "command delivery")
@@ -676,6 +754,7 @@ def register_command(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         dry_run=dry_run,
+        held_lock=held_lock,
     )
     slots, outcomes = _folded_commands_after_publication(publication)
     applied, outcome = outcomes.get(
@@ -718,6 +797,8 @@ def acknowledge_command(
             f"command acknowledgement names command {command_id}, which this control "
             "root has never registered"
         )
+    if slot["envelope"]["command_type"] == "mission-dispatch" and outcome == COMMAND_ACCEPTED:
+        raise ControlStoreError("use cockpit-control accept-dispatch for atomic worker acceptance")
     stored_digest = slot["envelope"]["payload_digest"]
     if validated["payload_digest"] != stored_digest and outcome != COMMAND_REJECTED:
         raise ControlStoreError(

@@ -12,6 +12,27 @@ Your overseer is in the `overseer` tmux window and will send you missions.
 Wait for a mission. Do not start work until one arrives.
 Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
+## Durable Dispatch Receipt
+
+Before acting on a controller brief, verify `TARGET-WORKER` is `worker-dev`
+and read its `BOUNDARIES`. Run the exact `cockpit-control accept-dispatch`
+command embedded in the brief, including its control root, command, mission,
+queue, trace, digest and `--fresh-for 300`. Only exit 0 with JSON
+`outcome: "accepted"` and `start_work: true` authorizes starting work.
+`duplicate` / `start_work: false` never authorizes another run, including after
+a cold restart. A lost response is uncertain: retry the same receipt, never
+invent an ID or use `record-lifecycle --state accepted` / a generic
+acknowledgement as a substitute. Errors, expired deadlines, missing receipt
+instructions, and legacy briefs require an overseer decision, not work.
+
+Acceptance atomically records lifecycle sequence 1 and the command receipt.
+Before work, publish `record-lifecycle --state running` at sequence 2 with the
+same worker/mission/queue/trace and `--fresh-for 300`; renew freshness with
+strictly increasing sequences while active. Preserve correlation and declared
+boundaries through completion or blocking. Pane markers are diagnostic only.
+If a duplicate receipt is returned after context loss, report it and wait for
+explicit recovery; do not assume the previously accepted work never started.
+
 ---
 
 ## Your Responsibilities

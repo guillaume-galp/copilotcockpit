@@ -9,6 +9,7 @@ and error semantics stay compatible while behavior moves behind this module.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
@@ -244,6 +245,7 @@ class ControlEventPublication:
         timeout_seconds: Optional[float] = None,
         poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
         dry_run: bool = False,
+        held_lock: Optional[Any] = None,
     ) -> None:
         self.root = _require_absolute_root(str(root), "configured")
         self.events_path = self.root / EVENTS_DIR_NAME
@@ -261,6 +263,7 @@ class ControlEventPublication:
             allow_zero=False,
         )
         self.dry_run = bool(dry_run)
+        self.held_lock = held_lock
         self.lock: Optional[Any] = None
         self.record: Optional[Dict[str, Any]] = None
         self.revision: Optional[int] = None
@@ -408,12 +411,16 @@ class ControlEventPublication:
         _require_directory(self.events_path, EVENTS_DIR_NAME)
         _require_directory(self.pending_path, PENDING_DIR_NAME)
 
-        with PortableControlLock(
+        if self.held_lock is not None and (
+            self.held_lock.owner is None or self.held_lock.root != self.root
+        ):
+            raise ControlStoreError("event publication requires the held control lock for this root")
+        with (nullcontext(self.held_lock) if self.held_lock is not None else PortableControlLock(
             self.root,
             self.command,
             timeout_seconds=self.timeout_seconds,
             poll_seconds=self.poll_seconds,
-        ) as lock:
+        )) as lock:
             self.lock = lock
             metadata, history = inspect_control_events(self.root)
             control_id = metadata["control_id"]
@@ -488,6 +495,7 @@ def publish_control_event(
     timeout_seconds: Optional[float] = None,
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
+    held_lock: Optional[Any] = None,
 ) -> EventPublicationResult:
     """Commit one immutable event under the held control lock."""
 
@@ -500,4 +508,5 @@ def publish_control_event(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         dry_run=dry_run,
+        held_lock=held_lock,
     ).run()

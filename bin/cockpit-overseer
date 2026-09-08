@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -41,8 +42,12 @@ from cockpit_control import (
     PortableControlLock,
     controller_tick,
     fold_mission_state,
+    fold_commands,
+    dispatch_payload_digest,
     initialize_control_store,
     inspect_control_events,
+    observe_queue,
+    utc_timestamp,
     report_controller_tick,
     resolve_control_root,
     validate_control_authority,
@@ -157,7 +162,7 @@ def latest_parent_trace_id(text: str) -> str:
     return latest_match(text, PARENT_TRACE_ID_PATTERN)
 
 
-def controller_dispatch_brief(result: ControllerTickResult) -> str:
+def controller_dispatch_brief(result: ControllerTickResult, envelope: dict) -> str:
     """Render the queue-owned brief for the command the controller committed."""
 
     action = result.action
@@ -182,6 +187,28 @@ def controller_dispatch_brief(result: ControllerTickResult) -> str:
         f"QUEUE-ITEM-ID: {action.queue_item_id}",
         f"TRACE-ID: {action.trace_id}",
         f"TARGET-WORKER: {action.worker_id}",
+        f"PAYLOAD-DIGEST: {envelope['payload_digest']}",
+        f"ACCEPT-BEFORE: {envelope['deadline_at']}",
+        "BOUNDARIES: " + json.dumps(envelope["boundaries"], sort_keys=True),
+        "",
+        "Before doing any work, run this receipt command exactly:",
+        "env " + shlex.quote(f"COCKPIT_CONTROL_ROOT={result.root}") + " "
+        + " ".join(shlex.quote(arg) for arg in (
+            "cockpit-control", "accept-dispatch",
+            "--command-id", str(action.command_id),
+            "--mission", str(action.mission_id),
+            "--worker", str(action.worker_id),
+            "--queue-item", str(action.queue_item_id),
+            "--trace", str(action.trace_id),
+            "--payload-digest", envelope["payload_digest"],
+            "--fresh-for", "300",
+        )),
+        "Start work ONLY on exit 0 with JSON outcome=accepted and start_work=true.",
+        "duplicate/start_work=false means do not start or repeat work, even after restart.",
+        "On error or uncertain output, stop and report to the overseer; do not bypass acceptance.",
+        "Acceptance is lifecycle sequence 1. Publish running/heartbeats with increasing",
+        "sequences and the same mission/worker/queue/trace before freshness expires.",
+        "",
         f"TITLE: {item.title}",
         "",
     ]
@@ -194,6 +221,7 @@ def controller_dispatch_brief(result: ControllerTickResult) -> str:
 def deliver_controller_dispatch(
     result: ControllerTickResult,
     session: str,
+    as_of: Optional[str] = None,
 ) -> None:
     """Deliver one already-durable controller command to its worker pane."""
 
@@ -203,11 +231,12 @@ def deliver_controller_dispatch(
             "`cockpit-overseer tick` to redeliver the committed command"
         )
     action = result.action
-    payload = controller_dispatch_brief(result)
     target = f"{session}:{action.worker_id}"
     with PortableControlLock(result.root, command="cockpit-overseer deliver"):
-        _metadata, history = inspect_control_events(result.root)
+        metadata, history = inspect_control_events(result.root)
         state = fold_mission_state(history.events)
+        commands, _outcomes = fold_commands(history.events)
+        command = commands.get(str(action.command_id))
         slot = state.worker_slots.get(str(action.worker_id))
         if (
             slot is None
@@ -221,6 +250,30 @@ def deliver_controller_dispatch(
                 f"mission {action.mission_id} is no longer awaiting delivery; "
                 "no tmux input was sent"
             )
+        if command is None:
+            raise RuntimeError("dispatch command is missing; no tmux input was sent")
+        envelope = command["envelope"]
+        deadline = envelope["deadline_at"]
+        now = datetime.fromisoformat((as_of or utc_timestamp()).replace("Z", "+00:00"))
+        if (
+            deadline is None
+            or now >= datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+            or command["status"] != "registered" or command["conflicts"]
+            or any(holder == action.worker_id for holder, _slot, _conflict in state.contested_slots)
+            or envelope["payload_digest"] != action.payload_digest
+            or any(envelope["boundaries"][key] != metadata["canonical_roots"][key]
+                   for key in ("queue_root", "planning_root", "implementation_roots"))
+        ):
+            raise RuntimeError("dispatch acceptance expired or contract changed; no tmux input was sent")
+        queue = observe_queue(Path(envelope["boundaries"]["queue_root"]))
+        item = next((item for item in queue.active if item.item_id == action.queue_item_id), None)
+        if (
+            queue.paused or item is None or item.worker_id != action.worker_id
+            or dispatch_payload_digest(item, action.mission_id, action.worker_id, action.trace_id)
+            != envelope["payload_digest"]
+        ):
+            raise RuntimeError("dispatch queue brief or authority changed; no tmux input was sent")
+        payload = controller_dispatch_brief(result, envelope)
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
             fh.write(payload)
             brief_path = fh.name
@@ -464,7 +517,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
             and not (result.command is not None and result.command.conflicted)
         ):
             try:
-                deliver_controller_dispatch(result, session)
+                deliver_controller_dispatch(result, session, as_of=args.as_of)
                 delivered = True
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 delivery_error = str(exc)

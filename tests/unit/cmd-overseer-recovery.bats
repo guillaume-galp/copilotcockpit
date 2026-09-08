@@ -133,6 +133,10 @@ path = sys.argv[1] + "/control.json"
 with open(path) as handle:
     record = json.load(handle)
 record["canonical_roots"]["queue_root"] = sys.argv[2]
+record["canonical_roots"]["planning_root"] = sys.argv[1] + "-planning"
+record["canonical_roots"]["implementation_roots"] = [sys.argv[1] + "-implementation"]
+record["planning_root"] = record["canonical_roots"]["planning_root"]
+record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
 record["queue_root"] = sys.argv[2]
 with open(path, "w") as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -205,9 +209,7 @@ cc_running_mission() {
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	CC_MISSION="$(cc_slot_mission)"
-	cc_emit --state accepted --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
-		--trace "$2" --sequence 1 --heartbeat-at 2026-09-04T10:01:00.000000Z \
-		--fresh-until "$3"
+	cc_accept_dispatch "$CC_MISSION" 2026-09-04T10:01:00.000000Z "$3"
 	cc_emit --state running --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
 		--trace "$2" --sequence 2 --heartbeat-at 2026-09-04T10:02:00.000000Z \
 		--fresh-until "$3"
@@ -263,9 +265,7 @@ cc_expired_cockpit() {
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	CC_MISSION="$(cc_slot_mission)"
-	cc_emit --state accepted --worker worker-dev --mission "$CC_MISSION" --queue-item "$CC_ITEM" \
-		--trace 11111111-1111-4111-8111-111111111111 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:00:00.000000Z --fresh-until 2026-09-04T10:02:00.000000Z
+	cc_accept_dispatch "$CC_MISSION" 2026-09-04T10:00:00.000000Z 2026-09-04T10:02:00.000000Z
 	CC_SEQUENCE=2
 }
 
@@ -1278,7 +1278,7 @@ print(
 	# longer describes the claim the slot now holds.
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"]["worker-dev"]["conflicts"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["conflicts"][0]["mission_id"]')" = "$intruder" ]
-	cc_tick --as-of 2026-09-04T10:35:00.000000Z
+	cc_tick --as-of 2026-09-04T10:34:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "contested 0"
 	cc_absent_output "worker-mission-conflict"

@@ -893,8 +893,12 @@ CONTROLLER_REASON_WORKER_BUSY = "worker-busy"
 CONTROLLER_REASON_WORKER_CONFLICT = "worker-mission-conflict"
 CONTROLLER_REASON_RECOVERY_AWAITING = "awaiting-recovery-response"
 CONTROLLER_REASON_RECOVERY_ESCALATED = "bounded-recovery-escalated"
+CONTROLLER_REASON_ACCEPTANCE_EXPIRED = "dispatch-acceptance-expired"
+CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED = "dispatch-acceptance-unsupported"
 CONTROLLER_DISPATCH_REASONS = (CONTROLLER_REASON_IMPLEMENTABLE,)
 CONTROLLER_OBSERVATION_REASONS = (
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_MISSION_IN_PROGRESS,
     CONTROLLER_REASON_NOT_IMPLEMENTABLE,
@@ -962,6 +966,8 @@ CONTROLLER_EPISODE_REASONS = CONTROLLER_RECOVERY_REASONS + (
 # They are still recorded exactly once and still terminate the tick cleanly;
 # `blocked` is a refusal to guess, never a loop and never a retry.
 CONTROLLER_BLOCKING_REASONS = (
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_QUEUE_AMBIGUOUS,
     CONTROLLER_REASON_QUEUE_UNREADABLE,
@@ -974,6 +980,18 @@ CONTROLLER_BLOCKING_REASONS = (
 # The exact repair each blocking reason asks a human for.  A refusal that does
 # not name its repair is not fail-closed, it is just a dead end.
 CONTROLLER_BLOCKING_REPAIRS = {
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED: (
+        "inspect command {command} and worker {worker}; acceptance expired and the "
+        "reservation is retained; an operator must decide explicit recovery or queue "
+        "disposition with cockpit-queue; reservation release is not implemented by this "
+        "slice (replace-mission requires accepted lifecycle); leave it blocked, "
+        "do not fabricate worker failure, edit events, or retry delivery"
+    ),
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED: (
+        "inspect command {command} with cockpit-control command-status; this reservation "
+        "lacks a supported acceptance contract; explicit operator recovery is required, "
+        "not an invented deadline or an edit to immutable events"
+    ),
     CONTROLLER_REASON_ROOT_CONFLICT: (
         "export COCKPIT_QUEUE_ROOT to the queue root {declared} that "
         "control.json declares, or create a control root for {exported}"
@@ -5127,6 +5145,7 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
     mission_outcomes: Dict[str, Tuple[bool, str]] = {}
     slot_claims: Dict[str, Tuple[int, str]] = {}
     recovery_episodes: Dict[str, Tuple[int, bool]] = {}
+    commands: Dict[str, Dict[str, Any]] = {}
 
     def record_slot_claims(event: "CommittedEvent") -> None:
         """Stamp the revision at which each worker's current claim began.
@@ -5147,6 +5166,34 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
 
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        envelope = event_command_envelope(event.record, label)
+        acknowledgement = event_command_acknowledgement(event.record, label)
+        lifecycle = event_worker_lifecycle(event.record, label)
+        if envelope is not None:
+            apply_command_envelope(commands, envelope, event)
+        if lifecycle is not None:
+            slot = worker_slots.get(lifecycle["worker_id"])
+            # Correlate by registered mission, even when its slot claim was
+            # refused or the event names a different worker.
+            dispatch = next(
+                (command for command in commands.values()
+                 if command["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+                 and command["envelope"]["mission_id"] == lifecycle["mission_id"]
+                 and command["envelope"]["deadline_at"] is not None),
+                None,
+            )
+            managed = (
+                lifecycle["state"] == LIFECYCLE_ACCEPTED
+                and dispatch is not None
+            )
+            if acknowledgement is not None or managed:
+                receipt_command = commands.get(acknowledgement["command_id"]) if acknowledgement else dispatch
+                fault = dispatch_acceptance_fault(
+                    receipt_command, acknowledgement, lifecycle, slot, missions
+                )
+                if fault is not None:
+                    lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
+                    continue
         _fold_one_event(
             event,
             label,
@@ -5160,6 +5207,18 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
             mission_outcomes=mission_outcomes,
             episodes=recovery_episodes,
         )
+        if acknowledgement is not None:
+            acknowledged_command = commands.get(acknowledgement["command_id"])
+            requires_joint = (
+                acknowledged_command is not None
+                and acknowledged_command["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+                and acknowledged_command["envelope"]["deadline_at"] is not None
+                and acknowledgement["outcome"] == COMMAND_ACCEPTED
+            )
+            if not requires_joint or (
+                lifecycle is not None and lifecycle_outcomes.get(event.event_id, (False, ""))[0]
+            ):
+                apply_command_acknowledgement(commands, acknowledgement, event)
         record_slot_claims(event)
 
     return MissionState(
@@ -5968,6 +6027,7 @@ control_lifecycle.publish_control_event = (
 control_lifecycle.inspect_control_events = (
     lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
 )
+control_lifecycle.PortableControlLock = PortableControlLock
 control_lifecycle.fold_mission_state = (
     lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
 )
@@ -6432,6 +6492,7 @@ control_commands.inspect_control_events = (
 control_commands.utc_timestamp = lambda: utc_timestamp()
 control_commands.CommittedEvent = CommittedEvent
 control_commands.EventPublicationResult = EventPublicationResult
+control_commands.fold_mission_state = lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
 
 canonical_command_payload = control_commands.canonical_command_payload
 command_payload_digest = control_commands.command_payload_digest
@@ -6450,6 +6511,7 @@ _command_conflict_entry = control_commands._command_conflict_entry
 apply_command_envelope = control_commands.apply_command_envelope
 apply_command_acknowledgement = control_commands.apply_command_acknowledgement
 fold_commands = control_commands.fold_commands
+dispatch_acceptance_fault = control_commands.dispatch_acceptance_fault
 build_command_envelope = control_commands.build_command_envelope
 build_command_acknowledgement = control_commands.build_command_acknowledgement
 read_command_slots = control_commands.read_command_slots
@@ -12138,6 +12200,9 @@ build_controller_observation = control_controller.build_controller_observation
 _controller_dispatched_pairs = control_controller._controller_dispatched_pairs
 _correlation_counts = control_controller._correlation_counts
 controller_tick = control_controller.controller_tick
+accept_dispatch = control_controller.accept_dispatch
+DispatchAcceptanceResult = control_controller.DispatchAcceptanceResult
+dispatch_payload_digest = control_controller.dispatch_payload_digest
 _precedence_verdicts = control_controller._precedence_verdicts
 controller_precedence_lines = control_controller.controller_precedence_lines
 controller_tick_lines = control_controller.controller_tick_lines
@@ -12734,6 +12799,13 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="report the repair plan without changing any state",
     )
+    accept = subcommands.add_parser(
+        "accept-dispatch", help="atomically accept a dispatched command and claim work once",
+    )
+    for option in ("command-id", "mission", "worker", "queue-item", "trace", "payload-digest"):
+        accept.add_argument("--" + option, required=True)
+    accept.add_argument("--fresh-for", required=True, metavar="SECONDS")
+    accept.add_argument("--dry-run", action="store_true")
     lifecycle = subcommands.add_parser(
         "record-lifecycle",
         help=(
@@ -13289,6 +13361,18 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
                     dry_run=args.dry_run,
                 )
             )
+        if args.command == "accept-dispatch":
+            result = accept_dispatch(
+                resolved.path, args.command_id, args.mission, args.worker,
+                args.queue_item, args.trace, args.payload_digest,
+                fresh_for=args.fresh_for, dry_run=args.dry_run,
+            )
+            print(json.dumps({
+                "outcome": result.outcome, "command_id": result.command_id,
+                "mission_id": result.mission_id, "start_work": result.start_work,
+                "event_id": result.event_id,
+            }, sort_keys=True))
+            return 0
         if args.command == "record-lifecycle":
             return _report_lifecycle_record(
                 record_worker_lifecycle(

@@ -6,7 +6,7 @@
 #   * stubbing scheduler/tmux edges (no external services);
 #   * driving explicit lifecycle timestamps instead of waiting on wall clock.
 
-load helper
+load ../unit/helper
 
 setup() {
 	cc_setup_fake_home
@@ -131,20 +131,9 @@ EOF
 }
 
 cc_init_cockpit() {
-	"$CONTROL_BIN" init >/dev/null
-	python3 -c '
-import json
-import sys
-path = sys.argv[1] + "/control.json"
-with open(path) as handle:
-    record = json.load(handle)
-record["canonical_roots"]["queue_root"] = sys.argv[2]
-record["queue_root"] = sys.argv[2]
-with open(path, "w") as handle:
-    handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-' "$COCKPIT_CONTROL_ROOT" "$COCKPIT_QUEUE_ROOT"
-	run "$CONTROL_BIN" replay-ledger
-	[ "$status" -eq 0 ]
+	"$CONTROL_BIN" init --queue-root "$COCKPIT_QUEUE_ROOT" \
+		--planning-root "$BATS_TEST_TMPDIR/planning" \
+		--implementation-root "$BATS_TEST_TMPDIR/implementation" >/dev/null
 }
 
 cc_schedule_recurrent_wake() {
@@ -190,9 +179,7 @@ cc_emit_lifecycle() {
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
 
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 11111111-1111-4111-8111-111111111111 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T10:07:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 11111111-1111-4111-8111-111111111111 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
@@ -273,9 +260,7 @@ assert "test:RUN-TH3-E5-US3" in refs, refs
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 33333333-3333-4333-8333-333333333333 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T10:07:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 33333333-3333-4333-8333-333333333333 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
@@ -324,9 +309,7 @@ assert len(doc.get("evidence_refs", [])) >= 2, doc
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 44444444-4444-4444-8444-444444444444 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T11:01:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 44444444-4444-4444-8444-444444444444 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T11:01:00.000000Z
