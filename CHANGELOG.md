@@ -17,6 +17,35 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.9.2 — 2026-09-08
+
+### Fixed
+- Resolved BUG-001: bootstrap now binds distinct control, queue, planning and
+  implementation roots through supported commands; preflight fails closed when
+  operational boundaries or lifecycle capabilities are missing.
+- Connected controller dispatch to durable pending mission intent before pane
+  delivery, atomic worker acceptance, idempotent receipts, and immutable bounded
+  acceptance deadlines.
+- Made approval prompts, holds, responses, heartbeats, cancellation and replacement
+  durable and correlated. Accepted-worker cancellation and replacement require
+  cooperative acknowledgements; unaccepted reservations have an explicitly
+  inspected recovery path.
+- Made worker status authoritative, including awaiting-approval, held, blocked
+  and unreachable states; lost journal authority cannot appear as availability.
+- Preserved structured control-root and target identity in scheduled wakes,
+  fenced cancellation against new execution, and retained the `stop` alias.
+- Closed concurrent dispatch/acceptance races, foreign acknowledgement
+  correlation gaps, and new legacy-form replacement bypasses.
+
+### Operator adoption
+- Retired direct mission-dispatch bypasses in favor of queue/controller delivery;
+  explicit bootstrap transport remains for worker role priming only.
+- Updated managed Copilot/Codex skills, templates and public CLI guidance.
+  Existing project-owned launchers and legacy schedules require operator-led
+  adoption; immutable history is diagnosed without destructive rewriting.
+- Native approval prompts require explicit durable reporting. Worker
+  acknowledgements are cooperative evidence, not proof of process termination.
+
 ## v0.9.1 — 2026-09-07
 
 ### Changed
