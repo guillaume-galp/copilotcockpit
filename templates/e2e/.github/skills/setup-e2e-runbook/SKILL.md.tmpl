@@ -8,6 +8,17 @@ description: "Explore @@APP_NAME@@'s features and generate the Gherkin test-book
 > Load the **global** `setup-e2e-runbook` skill first for the full workflow.
 > This file records `@@APP_NAME@@`-specific paths and the existing test-book state.
 
+For dispatched runbook work, follow global `e2e-cockpit`'s receipt/status/question
+and ACK contract: FIFO/tick only, `accept-dispatch` with `accepted` /
+`start_work=true` (sequence 1; dispatch 0 has no heartbeat), then `heartbeat`
+running sequence 2. Use `ask` / `access-prompt` with private typed body refs for
+ambiguous expected behavior; `pending` / `read-question` return mission-status
+JSON. Only explicit human replies; `hold --answers` never approves. Inspect
+`status.pending_commands` / `command-status`; accepted-worker cancel/replace
+needs accepted then applied ACK with matching digest and typed `--result`.
+Reuse IDs/digests, journal no secrets, and separate lifecycle from pane diagnosis.
+No raw `send`/`nudge` mission, approval or cancel shortcuts.
+
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 query it first for feature domains, routes, navigation, API groups, and
 user-facing workflows before broad text search. Confirm generated chapters and

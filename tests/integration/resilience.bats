@@ -6,7 +6,7 @@
 #   * stubbing scheduler/tmux edges (no external services);
 #   * driving explicit lifecycle timestamps instead of waiting on wall clock.
 
-load helper
+load ../unit/helper
 
 setup() {
 	cc_setup_fake_home
@@ -55,6 +55,7 @@ case "${1:-}" in
 			cat "$state"
 			exit 0
 		fi
+		printf 'no crontab for isolated-test\n' >&2
 		exit 1
 		;;
 	-)
@@ -131,28 +132,18 @@ EOF
 }
 
 cc_init_cockpit() {
-	"$CONTROL_BIN" init >/dev/null
-	python3 -c '
-import json
-import sys
-path = sys.argv[1] + "/control.json"
-with open(path) as handle:
-    record = json.load(handle)
-record["canonical_roots"]["queue_root"] = sys.argv[2]
-record["queue_root"] = sys.argv[2]
-with open(path, "w") as handle:
-    handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
-' "$COCKPIT_CONTROL_ROOT" "$COCKPIT_QUEUE_ROOT"
-	run "$CONTROL_BIN" replay-ledger
-	[ "$status" -eq 0 ]
+	"$CONTROL_BIN" init --queue-root "$COCKPIT_QUEUE_ROOT" \
+		--planning-root "$BATS_TEST_TMPDIR/planning" \
+		--implementation-root "$BATS_TEST_TMPDIR/implementation" >/dev/null
 }
 
 cc_schedule_recurrent_wake() {
 	run "$WAKE_BIN" schedule --cron "*/5 * * * *" \
 		-s cockpit -w overseer -m "recurrent wake" \
+		--intent "bounded resilience observation" --stop-condition "mission terminal or escalation" \
 		--label "resilience" --mission "$1" --owner "overseer" --queue-item "$2"
 	[ "$status" -eq 0 ]
-	printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9]+).*/\1/p' | head -n1
+	printf '%s\n' "$output" | sed -nE 's/.*id=(wake-[0-9a-f-]+).*/\1/p' | head -n1
 }
 
 cc_active_item() {
@@ -179,7 +170,7 @@ cc_emit_lifecycle() {
 }
 
 @test "BDD1 queue-backed mission survives reset, replaces stalled worker, and clears with governed evidence" {
-	local item wake_id mission replacement
+	local item wake_id mission replacement replace_command digest trace
 	item="$(cc_active_item)"
 	wake_id="$(cc_schedule_recurrent_wake MISSION-TH3 "$item")"
 	[ -n "$wake_id" ]
@@ -190,9 +181,7 @@ cc_emit_lifecycle() {
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
 
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 11111111-1111-4111-8111-111111111111 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T10:07:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 11111111-1111-4111-8111-111111111111 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
@@ -214,22 +203,38 @@ cc_emit_lifecycle() {
 	[ "$status" -eq 0 ]
 	run "$OVERSEER_BIN" tick --as-of 2026-09-04T11:00:00.000000Z
 	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "reason awaiting-recovery-response"
 	run "$OVERSEER_BIN" tick --as-of 2026-09-04T11:10:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "reason stale-mission-replaced"
 
+	# Replacement is a request, not evidence that an unresponsive worker stopped.
+	[ "$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" = "$mission" ]
+	replace_command="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'next(k for k,v in ledger["commands"].items() if v["envelope"]["command_type"] == "mission-replace")')"
+	digest="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["commands"]["'"$replace_command"'"]["envelope"]["payload_digest"]')"
+	[ "$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["commands"]["'"$replace_command"'"]["envelope"]["parent_trace_id"]')" = "11111111-1111-4111-8111-111111111111" ]
+	run "$CONTROL_BIN" acknowledge-command --command-id "$replace_command" --digest "$digest" --outcome accepted --by worker-dev
+	[ "$status" -eq 0 ]
+	[ "$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" = "$mission" ]
+	run "$CONTROL_BIN" acknowledge-command --command-id "$replace_command" --digest "$digest" --outcome applied --by worker-dev --result file:worker/stopped
+	[ "$status" -eq 0 ]
 	replacement="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$replacement" ]
 	[ "$replacement" != "$mission" ]
 
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$replacement" --queue-item "$item" \
-		--trace 22222222-2222-4222-8222-222222222222 --sequence 1 \
-		--heartbeat-at 2026-09-04T11:01:00.000000Z --fresh-until 2026-09-04T11:40:00.000000Z
+	# The replacement must receive its own controller envelope and joint receipt.
+	run "$OVERSEER_BIN" tick --as-of 2026-09-04T11:20:00.000000Z
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "action dispatch-mission"
+	echo "$output" | grep -Fq "mission $replacement"
+	cc_accept_dispatch "$replacement" 2026-09-04T11:21:00.000000Z 2026-09-04T11:40:00.000000Z
+	trace="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$replacement"'"]["lifecycle"]["trace_id"]')"
+	[ -n "$trace" ]
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$replacement" --queue-item "$item" \
-		--trace 22222222-2222-4222-8222-222222222222 --sequence 2 \
-		--heartbeat-at 2026-09-04T11:02:00.000000Z --fresh-until 2026-09-04T11:40:00.000000Z
+		--trace "$trace" --sequence 2 \
+		--heartbeat-at 2026-09-04T11:22:00.000000Z --fresh-until 2026-09-04T11:40:00.000000Z
 	cc_emit_lifecycle --state completed --worker worker-dev --mission "$replacement" --queue-item "$item" \
-		--trace 22222222-2222-4222-8222-222222222222 --sequence 3 \
+		--trace "$trace" --sequence 3 \
 		--evidence "queue:$item" --evidence "test:RUN-TH3-E5-US3"
 
 	run "$QUEUE_BIN" transition "$item" delivered --reason "replacement finished"
@@ -273,9 +278,7 @@ assert "test:RUN-TH3-E5-US3" in refs, refs
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 33333333-3333-4333-8333-333333333333 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T10:07:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 33333333-3333-4333-8333-333333333333 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T10:07:00.000000Z
@@ -324,9 +327,7 @@ assert len(doc.get("evidence_refs", [])) >= 2, doc
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger_value "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
 	[ -n "$mission" ]
-	cc_emit_lifecycle --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 44444444-4444-4444-8444-444444444444 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:01:00.000000Z --fresh-until 2026-09-04T11:01:00.000000Z
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_emit_lifecycle --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace 44444444-4444-4444-8444-444444444444 --sequence 2 \
 		--heartbeat-at 2026-09-04T10:02:00.000000Z --fresh-until 2026-09-04T11:01:00.000000Z

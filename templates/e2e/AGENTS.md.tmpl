@@ -11,7 +11,19 @@ owned by the parent project when `bootstrap.sh e2e <dir> --no-git` is used.
 - Smoke runs are first-class: `./run-audit.sh --scope "@smoke"`.
 - Set `SKIP_DB_RESET=true` for shared databases.
 - `./run-audit.sh` and governance files are the source of audit truth.
-- Use `cockpit-protocol` for overseer↔worker pane communication and log tail observability.
+- Normal missions use `cockpit-queue` plus `cockpit-overseer tick`; use
+  `cockpit-protocol` for durable control and log/pane diagnosis. Setup-only
+  `dispatch --bootstrap` is not product dispatch; raw `send`/`nudge` are only
+  diagnostic or explicitly human-requested exceptions, never mission/approval/cancel.
+- Follow global `e2e-cockpit` and the role overlay for `accept-dispatch`:
+  start only on `accepted` / `start_work=true` (sequence 1; dispatch 0 has no
+  heartbeat), then `heartbeat` running sequence 2. Duplicates never restart work.
+- `ask` / `access-prompt` record explicit prompts; `pending` / `read-question`
+  return durable mission-status JSON. Only explicit human replies; correlated
+  `hold --answers` is not approval. Inspect `status.pending_commands` /
+  `command-status`; accepted-worker cancel/replace requires accepted then applied
+  ACK with matching digest and typed `--result`. Reuse IDs/digests; journal no
+  secrets. Durable lifecycle is separate from pane diagnosis.
 - If the parent repo has `graphify-out/graph.json` and `graphify` is available,
   use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
   before broad text search for codebase, architecture, file-relationship, and

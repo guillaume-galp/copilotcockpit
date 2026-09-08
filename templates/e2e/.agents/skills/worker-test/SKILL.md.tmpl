@@ -33,6 +33,16 @@ guidance in fix briefs when it helps worker-dev or worker-fix orient quickly.
 - Audit index: `e2e/runs/INDEX.md`
 - Per-run results: `e2e/runs/RUN-*.yaml`
 
-## Worker question file
+## Durable test contract
 
-- Question file: `/tmp/worker-worker-test-question.txt`
+Follow global `worker-test` / `e2e-cockpit`: FIFO/tick only. Dispatch sequence 0
+has no heartbeat; run the exact `accept-dispatch`, start only on `accepted` /
+`start_work=true` (sequence 1), then `heartbeat` running sequence 2. Duplicates
+never rerun tests. Use `ask` / `access-prompt` with private typed body refs;
+`pending` / `read-question` return durable mission-status JSON. Only explicit
+human replies; `hold --answers` does not approve. Inspect
+`status.pending_commands` / `command-status`; accepted-worker cancel/replace
+needs accepted then applied ACK with matching digest and typed `--result`
+after safely stopping the run. Reuse IDs/digests; journal no secrets.
+Lifecycle is separate from pane diagnosis. No raw `send`/`nudge` mission,
+approval or cancel shortcuts; uninstrumented prompts need explicit reporting.

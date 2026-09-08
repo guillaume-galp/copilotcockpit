@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -58,6 +59,9 @@ _require_absolute_root: Callable[..., Path]
 _require_uuid: Callable[..., str]
 _require_identifier: Callable[..., str]
 utc_timestamp: Callable[[], str]
+PortableControlLock: Any
+build_worker_lifecycle: Callable[..., Dict[str, Any]]
+has_lifecycle_capability: Callable[..., bool]
 
 
 @dataclass(frozen=True)
@@ -138,9 +142,10 @@ class MissionControlReport:
     cancellations: Tuple[CancellationObservation, ...]
     worker_slots: Tuple[Tuple[str, Dict[str, Any]], ...]
     mission_states: Mapping[str, str]
+    replacements: Tuple[Dict[str, Any], ...] = ()
 
     def dialog_observation(self, entry: Mapping[str, Any]) -> str:
-        if entry["state"] != MISSION_DIALOG_PENDING:
+        if entry["state"] not in (MISSION_DIALOG_PENDING, "held"):
             return MISSION_DIALOG_OBSERVATION_SETTLED
         state = self.mission_states.get(entry["dialog"]["mission_id"])
         if state in WORKER_LIFECYCLE_ACTIVE_STATES:
@@ -261,6 +266,7 @@ def build_mission_replacement(
         "reason": reason,
         "evidence_refs": list(evidence_refs),
         "requested_at": requested_at if requested_at is not None else utc_timestamp(),
+        "cooperative": True,
     }
     return validate_mission_replacement(record)
 
@@ -344,12 +350,12 @@ def require_pending_prompt(
             f"{label} answers command {answers_command_id}, which is a "
             f"{prompt['kind']!r} record rather than a prompt"
         )
-    if prompt["kind"] != MISSION_DIALOG_ANSWERS[kind]:
+    if kind != "hold" and prompt["kind"] != MISSION_DIALOG_ANSWERS[kind]:
         raise ControlStoreError(
             f"{label} of kind {kind!r} may only answer a {MISSION_DIALOG_ANSWERS[kind]!r}; "
             f"command {answers_command_id} is a {prompt['kind']!r}"
         )
-    if entry["state"] != MISSION_DIALOG_PENDING:
+    if entry["state"] not in (MISSION_DIALOG_PENDING, "held"):
         raise ControlStoreError(
             f"{label} answers command {answers_command_id}, which is already "
             f"{entry['state']} and cannot be answered again"
@@ -368,7 +374,65 @@ def register_mission_command(
     poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
     dry_run: bool = False,
     declarations: Optional[Mapping[str, Any]] = None,
+    held_lock: Optional[Any] = None,
 ) -> MissionControlResult:
+    # Admission and publication must see one committed prefix. In particular a
+    # response racing cancellation/replacement must not answer an ended mission.
+    with (nullcontext(held_lock) if held_lock is not None or dry_run else PortableControlLock(
+        root, command=command, timeout_seconds=timeout_seconds, poll_seconds=poll_seconds,
+    )) as lock:
+        return _register_mission_command_locked(
+            root, envelope, record_field, record, actor, command, timeout_seconds,
+            poll_seconds, dry_run, declarations, lock,
+        )
+
+
+def _register_mission_command_locked(
+    root: Path, envelope: Mapping[str, Any], record_field: str, record: Mapping[str, Any],
+    actor: str, command: str, timeout_seconds: Optional[float], poll_seconds: float,
+    dry_run: bool, declarations: Optional[Mapping[str, Any]], held_lock: Optional[Any],
+) -> MissionControlResult:
+    metadata, history = inspect_control_events(root)
+    if (
+        (record_field == MISSION_REPLACEMENT_PAYLOAD_FIELD
+         or (record_field == MISSION_CANCELLATION_PAYLOAD_FIELD and "reservation_recovery" not in record))
+        and not has_lifecycle_capability(metadata)
+    ):
+        raise ControlStoreError("operationally-blocked: legacy-observed workers require lifecycle capability for cancellation/replacement")
+    state = fold_mission_state(history.events)
+    commands, _ = fold_commands(history.events)
+    stored = commands.get(envelope["command_id"])
+    if stored is not None:
+        original = next(
+            (event.record["payload"].get(record_field) for event in history.events
+             if event.record["payload"].get("command_envelope", {}).get("command_id") == envelope["command_id"]),
+            None,
+        )
+        # Time defaults do not alter a retry, but references, decisions and
+        # correlation do. Never accept a changed answer under a reused digest.
+        ignore = {"raised_at", "requested_at", "acknowledge_deadline_at", "decided_at"}
+        same_envelope = all(
+            stored["envelope"][key] == value for key, value in envelope.items() if key != "created_at"
+        )
+        if same_envelope and original is not None and {
+            k: v for k, v in original.items() if k not in ignore
+        } != {k: v for k, v in record.items() if k not in ignore}:
+            raise ControlStoreError("command ID reuses different mission-control content")
+    elif record_field == MISSION_DIALOG_PAYLOAD_FIELD:
+        require_active_mission(state, record["mission_id"], record["worker_id"], record["queue_item_id"], "mission dialog")
+        if record["kind"] not in MISSION_DIALOG_PROMPT_KINDS:
+            require_pending_prompt(state, record["answers_command_id"], record["kind"], "mission answer")
+    elif record_field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        if "reservation_recovery" not in record:
+            require_active_mission(state, record["mission_id"], record["worker_id"], record["queue_item_id"], "mission cancellation")
+
+    correlated = {record_field: dict(record)}
+    if record_field == "controller_dispatch":
+        correlated["worker_lifecycle"] = build_worker_lifecycle(
+            "pending-dispatch", record["worker_id"], record["mission_id"],
+            record["queue_item_id"], record["trace_id"], 0,
+            parent_trace_id=record["parent_trace_id"],
+        )
     result = register_command(
         root,
         envelope,
@@ -377,8 +441,9 @@ def register_mission_command(
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         dry_run=dry_run,
-        correlated_record={record_field: dict(record)},
+        correlated_record=correlated,
         declarations=declarations,
+        held_lock=held_lock,
     )
     state = fold_mission_state(_committed_events_after_publication(result.publication))
     applied, outcome = state.mission_outcomes.get(
@@ -426,6 +491,8 @@ def observe_cancellation(
     recovery: Optional[str] = None
     if acknowledgement is not None:
         observation = CANCELLATION_ACKNOWLEDGED
+    elif "reservation_recovery" in cancellation:
+        observation = "reservation-released"
     else:
         deadline = _parsed_timestamp(
             cancellation["acknowledge_deadline_at"],
@@ -523,6 +590,34 @@ def observe_mission_control(
             continue
         slots.append((key, slot))
 
+    replacements = []
+    seen = set()
+    for event in history.events:
+        record = event.record["payload"].get(MISSION_REPLACEMENT_PAYLOAD_FIELD)
+        if record is None or record["command_id"] in seen:
+            continue
+        seen.add(record["command_id"])
+        if mission_id is not None and mission_id not in (record["replaced_mission_id"], record["replacement_mission_id"]):
+            continue
+        if worker_id is not None and record["worker_id"] != worker_id:
+            continue
+        if command_id is not None and record["command_id"] != command_id:
+            continue
+        command_slot = command_slots.get(record["command_id"])
+        status = None if command_slot is None else command_slot["status"]
+        prior = state.missions.get(record["replaced_mission_id"])
+        applied = (prior is not None and prior["lifecycle"]["state"] == "replaced"
+                   and prior["lifecycle"]["superseded_by_mission_id"] == record["replacement_mission_id"])
+        observation = "applied" if applied else (
+            "rejected" if status == "rejected" else "awaiting-acknowledgement"
+        )
+        if not state.mission_outcomes.get(event.event_id, (False, ""))[0]:
+            observation = "conflict-recorded"
+        elif status == "applied" and not applied:
+            observation = "conflict-recorded"
+        replacements.append({"replacement": dict(record), "command_status": status,
+                             "observation": observation, "revision": event.revision, "event_id": event.event_id})
+
     return MissionControlReport(
         root=root,
         as_of=moment,
@@ -530,4 +625,5 @@ def observe_mission_control(
         cancellations=tuple(cancellations),
         worker_slots=tuple(slots),
         mission_states={key: entry["lifecycle"]["state"] for key, entry in state.missions.items()},
+        replacements=tuple(replacements),
     )

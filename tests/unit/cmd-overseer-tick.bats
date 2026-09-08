@@ -92,6 +92,7 @@ state_dir="${BATS_TEST_TMPDIR:-/tmp}/tmux-stub"
 mkdir -p "$state_dir"
 cmd="${1:-}"
 shift || true
+payload="${1:-}"
 target=""
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -106,6 +107,31 @@ case "$cmd" in
 capture-pane)
 	file="$state_dir/$(printf '%s' "$target" | tr ':' '_').txt"
 	[ -f "$file" ] && cat "$file"
+	;;
+load-buffer)
+	if [ "${TMUX_FAIL_DELIVERY:-0}" = "1" ]; then
+		echo "simulated tmux delivery failure" >&2
+		exit 1
+	fi
+	[ -d "$COCKPIT_CONTROL_ROOT/locks/control.lock" ] &&
+		printf 'held\n' >"$state_dir/delivery-lock.txt"
+	event_count="$(find "$COCKPIT_CONTROL_ROOT/events" -name '*.json' | grep -c . || true)"
+	worker="$(sed -n 's/^TARGET-WORKER: //p' "$payload")"
+	slot_state="$(python3 -c '
+import json
+import os
+import sys
+with open(os.environ["COCKPIT_CONTROL_ROOT"] + "/ledger.json") as handle:
+    print(json.load(handle)["mission_slots"][sys.argv[1]]["state"])
+' "$worker")"
+	printf '%s:%s\n' "$event_count" "$slot_state" >"$state_dir/durable-before-delivery.txt"
+	cat "$payload" >"$state_dir/buffer.txt"
+	;;
+paste-buffer)
+	cp "$state_dir/buffer.txt" "$state_dir/pasted.txt"
+	;;
+send-keys)
+	printf '%s\n' "$target" >>"$state_dir/send-keys.log"
 	;;
 display-message)
 	printf '%s\n' "${TMUX_SESSION:-cockpit}"
@@ -134,6 +160,10 @@ path = sys.argv[1] + "/control.json"
 with open(path) as handle:
     record = json.load(handle)
 record["canonical_roots"]["queue_root"] = sys.argv[2]
+record["canonical_roots"]["planning_root"] = sys.argv[1] + "-planning"
+record["canonical_roots"]["implementation_roots"] = [sys.argv[1] + "-implementation"]
+record["planning_root"] = record["canonical_roots"]["planning_root"]
+record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
 record["queue_root"] = sys.argv[2]
 with open(path, "w") as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -204,6 +234,7 @@ print(eval(sys.argv[2]))
 	echo "$output" | grep -Fq "tick dispatched action dispatch-mission outcome dispatched reason queue-item-implementable"
 	echo "$output" | grep -Fq "events-committed 1"
 	echo "$output" | grep -Eq "^dispatch command [0-9a-f-]{36} worker worker-dev mission [0-9a-f-]{36} queue-item $item trace [0-9a-f-]{36} digest sha256:[0-9a-f]{64}$"
+	echo "$output" | grep -Eq "^delivery command [0-9a-f-]{36} worker worker-dev target cockpit:worker-dev$"
 
 	# Exactly one immutable event, exactly one registered command, and exactly
 	# one worker slot: the tick took one action and no more.
@@ -223,6 +254,90 @@ print(eval(sys.argv[2]))
 	echo "$output" | grep -Fq "command-registered"
 	grep -l '"controller_dispatch"' "$COCKPIT_CONTROL_ROOT"/events/*.json
 	grep -l '"command_envelope"' "$COCKPIT_CONTROL_ROOT"/events/*.json
+
+	# Tmux is invoked only after the event and reserved slot are durable, and the
+	# queue-owned brief carries every correlation identifier.
+	[ "$(cat "$BATS_TEST_TMPDIR/tmux-stub/durable-before-delivery.txt")" = "1:reserved" ]
+	[ "$(cat "$BATS_TEST_TMPDIR/tmux-stub/delivery-lock.txt")" = "held" ]
+	grep -Eq '^MISSION-ID: [0-9a-f-]{36}$' "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -Eq '^COMMAND-ID: [0-9a-f-]{36}$' "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -Fq "QUEUE-ITEM-ID: $item" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -Eq '^TRACE-ID: [0-9a-f-]{36}$' "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -Fq "TARGET-WORKER: worker-dev" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	grep -Fq "/the-copilot-build-method deliver a change" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
+}
+
+@test "AC1 an unaccepted durable dispatch redelivers without creating another event" {
+	cc_cockpit redelivery
+	cc_active_item implementing >/dev/null
+
+	cc_tick --as-of 2026-09-04T10:00:00.000000Z
+	[ "$status" -eq 0 ]
+	local before mission command
+	before="$(cc_events "$COCKPIT_CONTROL_ROOT")"
+	mission="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
+	command="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["command_id"]')"
+
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "redelivery of command $command"
+	echo "$output" | grep -Fq "delivery command $command worker worker-dev"
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq "$before" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" = "$mission" ]
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 2 ]
+}
+
+@test "AC1 delivery failure leaves one durable reservation for later redelivery" {
+	cc_cockpit delivery-failure
+	cc_active_item implementing >/dev/null
+	export TMUX_FAIL_DELIVERY=1
+
+	cc_tick --as-of 2026-09-04T10:00:00.000000Z
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "is durable but delivery to cockpit:worker-dev failed"
+	echo "$output" | grep -Fq "rerun \`cockpit-overseer tick\`"
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "reserved" ]
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/send-keys.log" ]
+
+	unset TMUX_FAIL_DELIVERY
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "redelivery of command"
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
+}
+
+@test "AC1 editing a reserved queue brief records a command conflict and refuses delivery" {
+	cc_cockpit changed-brief
+	local item
+	item="$(cc_active_item implementing)"
+	cc_tick --as-of 2026-09-04T10:00:00.000000Z
+	[ "$status" -eq 0 ]
+	local sends_before
+	sends_before="$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")"
+
+	python3 -c '
+import json
+import sys
+
+path = sys.argv[1]
+with open(path) as handle:
+    item = json.load(handle)
+item["title"] = "changed after reservation"
+with open(path, "w") as handle:
+    handle.write(json.dumps(item, indent=2, sort_keys=True) + "\n")
+' "$COCKPIT_QUEUE_ROOT/items/$item.yaml"
+
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "conflicts with the stored command envelope"
+	echo "$output" | grep -Fq "no brief was delivered"
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 2 ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq "$sends_before" ]
 }
 
 @test "AC1 a tick that already acted refuses a second state-changing action" {
@@ -477,11 +592,11 @@ ledger["active_queue_item_id"] = "QI-forged"
 with open(path, "w") as handle:
     handle.write(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 ' "$COCKPIT_CONTROL_ROOT"
-	cc_tick --as-of 2026-09-04T10:05:00.000000Z
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from divergent"
 	echo "$output" | grep -Eq "^precedence 5 ledger-projection derived revision [0-9]+ current repair repaired$"
-	cc_absent_output "^dispatch command"
+	echo "$output" | grep -Fq "redelivery of command"
 	cc_absent_output "QI-forged"
 
 	# From here the situation is unchanged, so every later tick decides nothing
@@ -493,7 +608,7 @@ with open(path, "w") as handle:
 	# architecture section 17 rebuilds it from the journal by exactly the same
 	# replay. The rebuild is byte-identical to the clean projection.
 	printf 'not a projection\n' >"$COCKPIT_CONTROL_ROOT/ledger.json"
-	cc_tick --as-of 2026-09-04T10:10:00.000000Z
+	cc_tick --as-of 2026-09-04T10:02:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from corrupt"
 	echo "$output" | grep -Fq "events-committed 0"
@@ -503,7 +618,7 @@ with open(path, "w") as handle:
 
 	# The rebuildable compatibility view is repaired by the same one replay.
 	printf '{"torn":\n' >"$COCKPIT_CONTROL_ROOT/events.jsonl"
-	cc_tick --as-of 2026-09-04T10:15:00.000000Z
+	cc_tick --as-of 2026-09-04T10:03:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from derived-view"
 	echo "$output" | grep -Fq "events-committed 0"
@@ -618,8 +733,7 @@ print("every classification is read exactly once")
 	trace="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 
 	# The worker durably accepts and runs the mission it was dispatched.
-	cc_emit --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace "$trace" --sequence 1 --fresh-for 3600
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_emit --state running --worker worker-dev --mission "$mission" --queue-item "$item" \
 		--trace "$trace" --sequence 2 --fresh-for 3600
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "running" ]
@@ -689,11 +803,11 @@ with open(path, "w") as handle:
     handle.write(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
 ' "$COCKPIT_CONTROL_ROOT"
 
-	cc_tick --as-of 2026-09-04T10:05:00.000000Z
+	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "ledger repair repaired from divergent"
-	echo "$output" | grep -Fq "outcome observed reason mission-in-progress"
-	cc_absent_output "^dispatch command"
+	echo "$output" | grep -Fq "redelivery of command"
+	echo "$output" | grep -Fq "outcome dispatched reason queue-item-implementable"
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
 
@@ -891,24 +1005,24 @@ print("queue vocabulary agrees")
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 2 ]
 }
 
-@test "AC3 an undeclared queue root blocks and an unexported one observes, each once" {
+@test "AC3 an undeclared queue root blocks even without an export, each once" {
 	export COCKPIT_CONTROL_ROOT="$BATS_TEST_TMPDIR/undeclared-control"
 	unset COCKPIT_QUEUE_ROOT
 	run "$CONTROL_BIN" init
 	[ "$status" -eq 0 ]
 
 	# A mission created without a queue boundary has no product-work authority
-	# to read at all. That is something to record, not something to escalate.
+	# to read at all. Missing work boundaries are an operational blocker.
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
-	[ "$status" -eq 0 ]
-	echo "$output" | grep -Fq "tick recorded action record-observation outcome observed reason no-queue-root-declared"
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "tick recorded action record-observation outcome blocked reason queue-root-undeclared"
 	echo "$output" | grep -Fq "precedence 2 queue-state authoritative queue unobserved"
 	cc_absent_output "^dispatch command"
-	cc_absent_output "dispatch is blocked"
+	echo "$output" | grep -Fq "dispatch is blocked"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
 
 	cc_tick --as-of 2026-09-04T10:01:00.000000Z
-	[ "$status" -eq 0 ]
+	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "tick unchanged action none"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
 
@@ -1012,6 +1126,7 @@ print("blocking", action.reason in cockpit_control.CONTROLLER_BLOCKING_REASONS)
 	[ "$(find "$COCKPIT_CONTROL_ROOT/events" -type f | wc -l)" -eq 0 ]
 	[ "$(find "$COCKPIT_CONTROL_ROOT/pending" -type f | wc -l)" -eq 0 ]
 	[ ! -e "$COCKPIT_CONTROL_ROOT/locks/control.lock" ]
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" ]
 
 	control_before="$(cc_control_contents "$COCKPIT_CONTROL_ROOT")"
 	cc_tick --dry-run --as-of 2026-09-04T10:01:00.000000Z
@@ -1214,8 +1329,7 @@ print("fold", state.mission_outcomes[result.event_id][1])
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	mission="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')"
-	cc_emit --state accepted --worker worker-dev --mission "$mission" --queue-item "$item" \
-		--trace 88888888-8888-8888-8888-888888888888 --sequence 1 --fresh-for 3600
+	cc_accept_dispatch "$mission" 2026-09-04T10:01:00.000000Z 2026-09-04T11:01:00.000000Z
 	cc_tick --as-of 2026-09-04T10:05:00.000000Z
 	[ "$status" -eq 0 ]
 	projected="$(cat "$COCKPIT_CONTROL_ROOT/ledger.json")"

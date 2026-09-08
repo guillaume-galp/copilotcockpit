@@ -10,6 +10,20 @@ description: "Developer worker role in the @@APP_NAME@@ cockpit. Implements feat
 > Use `cockpit-protocol` for pane communication and worker question/answer handoffs.
 > This file adds `@@APP_NAME@@`-specific verification commands and key paths.
 
+## Durable development contract
+
+Follow global `worker-dev` / `e2e-cockpit`: FIFO/tick only. Dispatch sequence 0
+has no heartbeat; run the exact `accept-dispatch`, start only on `accepted` /
+`start_work=true` (sequence 1), then `heartbeat` running sequence 2. Duplicates
+never restart implementation. `ask` / `access-prompt` use private typed body
+refs; `pending` / `read-question` return durable mission-status JSON. Only
+explicit human replies; `hold --answers` leaves the prompt unapproved.
+Inspect `status.pending_commands` and `command-status`; accepted-worker
+cancel/replace needs accepted then applied ACK with matching digest and typed
+`--result` after actual safe application. Reuse IDs/digests; journal no secrets.
+Lifecycle is separate from pane diagnosis. No raw `send`/`nudge` for normal
+mission, approval or cancel; uninstrumented prompts need explicit reporting.
+
 If the parent repo has `graphify-out/graph.json` and `graphify` is available,
 use `graphify query "<question>" --graph "$REPO/graphify-out/graph.json"`
 before broad text search for related code, architecture, file relationships, and

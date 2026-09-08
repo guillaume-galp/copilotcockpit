@@ -37,6 +37,7 @@ def _without_guard(rows):
 
 def _env(control_root: Path, queue_root: Path) -> dict:
     env = dict(os.environ)
+    env["PATH"] = str(ROOT / "tests" / "transport") + os.pathsep + env["PATH"]
     env["COCKPIT_CONTROL_ROOT"] = str(control_root)
     env["COCKPIT_QUEUE_ROOT"] = str(queue_root)
     return env
@@ -50,6 +51,10 @@ def _declare_queue_root(control_root: Path, queue_root: Path):
     path = control_root / cc.CONTROL_METADATA_NAME
     record = json.loads(path.read_text())
     record["canonical_roots"]["queue_root"] = str(queue_root)
+    record["canonical_roots"]["planning_root"] = str(control_root.parent / "planning")
+    record["canonical_roots"]["implementation_roots"] = [str(control_root.parent / "implementation")]
+    record["planning_root"] = record["canonical_roots"]["planning_root"]
+    record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
     record["queue_root"] = str(queue_root)
     path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 
@@ -67,7 +72,7 @@ class ControlControllerSeamTests(unittest.TestCase):
         self.assertIs(cc.controller_precedence_lines, control_controller.controller_precedence_lines)
         self.assertIs(cc.report_controller_tick, control_controller.report_controller_tick)
 
-    def test_one_action_then_no_action_tick_and_overseer_output_stays_stable(self):
+    def test_dispatch_redelivery_then_no_action_output_stays_stable(self):
         with tempfile.TemporaryDirectory() as tmp:
             control_root = Path(tmp) / "control"
             queue_root = Path(tmp) / "queue"
@@ -104,15 +109,33 @@ class ControlControllerSeamTests(unittest.TestCase):
                 [str(BIN / "cockpit-overseer"), "tick", "--as-of", "2026-09-04T10:01:00.000000Z"], env
             )
             self.assertEqual(second.returncode, 0)
-            self.assertIn("action record-observation", second.stdout)
+            self.assertIn("action dispatch-mission", second.stdout)
+            self.assertIn("redelivery of command", second.stdout)
+            self.assertIn("events-committed 0", second.stdout)
+
+            mission_id = re.search(r"mission ([0-9a-f-]{36}) queue-item", first.stdout).group(1)
+            trace_id = re.search(r"trace ([0-9a-f-]{36}) digest", first.stdout).group(1)
+            envelope = next(iter(cc.read_command_slots(control_root).values()))["envelope"]
+            accepted = cc.accept_dispatch(
+                control_root, envelope["command_id"], mission_id, "worker-dev",
+                item, trace_id, envelope["payload_digest"], fresh_for="330",
+                as_of="2026-09-04T10:01:30.000000Z",
+            )
+            self.assertTrue(accepted.start_work)
 
             third = _run(
                 [str(BIN / "cockpit-overseer"), "tick", "--as-of", "2026-09-04T10:02:00.000000Z"], env
             )
             self.assertEqual(third.returncode, 0)
-            self.assertIn("tick unchanged action none", third.stdout)
-            self.assertIn("events-committed 0", third.stdout)
+            self.assertIn("action record-observation", third.stdout)
             self.assertIn("precedence 6 worker-reports", third.stdout)
+
+            fourth = _run(
+                [str(BIN / "cockpit-overseer"), "tick", "--as-of", "2026-09-04T10:03:00.000000Z"], env
+            )
+            self.assertEqual(fourth.returncode, 0)
+            self.assertIn("tick unchanged action none", fourth.stdout)
+            self.assertIn("events-committed 0", fourth.stdout)
 
     def test_stale_recovery_terminal_conflict_and_dry_run_are_preserved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -161,28 +184,14 @@ class ControlControllerSeamTests(unittest.TestCase):
             mission_match = re.search(r"mission ([0-9a-f-]{36}) queue-item", dispatched.stdout)
             self.assertIsNotNone(mission_match, dispatched.stdout)
             mission_id = mission_match.group(1)
-            trace_id = str(uuid4())
+            envelope = next(iter(cc.read_command_slots(control_root).values()))["envelope"]
+            trace_id = envelope["trace_id"]
 
             lifecycle_base = [str(BIN / "cockpit-control"), "record-lifecycle", "--worker", "worker-dev"]
-            accepted = _run(
-                lifecycle_base
-                + [
-                    "--state",
-                    "accepted",
-                    "--mission",
-                    mission_id,
-                    "--queue-item",
-                    item,
-                    "--trace",
-                    trace_id,
-                    "--sequence",
-                    "1",
-                    "--heartbeat-at",
-                    "2026-09-04T10:01:00.000000Z",
-                    "--fresh-until",
-                    "2026-09-04T10:07:00.000000Z",
-                ],
-                env,
+            accepted = cc.accept_dispatch(
+                control_root, envelope["command_id"], mission_id, "worker-dev",
+                item, trace_id, envelope["payload_digest"], fresh_for="360",
+                as_of="2026-09-04T10:01:00.000000Z",
             )
             running = _run(
                 lifecycle_base
@@ -204,7 +213,7 @@ class ControlControllerSeamTests(unittest.TestCase):
                 ],
                 env,
             )
-            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertTrue(accepted.start_work)
             self.assertEqual(running.returncode, 0, running.stderr)
 
             stale = _run(

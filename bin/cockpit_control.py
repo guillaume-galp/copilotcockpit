@@ -28,7 +28,8 @@ import stat
 import subprocess
 import tempfile
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -151,6 +152,7 @@ LIFECYCLE_REPLACED = "replaced"
 
 # The complete, closed lifecycle vocabulary a worker may emit.
 WORKER_LIFECYCLE_STATES = (
+    LIFECYCLE_PENDING_DISPATCH,
     LIFECYCLE_ACCEPTED,
     LIFECYCLE_RUNNING,
     LIFECYCLE_BLOCKED,
@@ -509,6 +511,7 @@ MISSION_DIALOG_REPLY = "reply"
 MISSION_DIALOG_ACCESS_PROMPT_RESPONSE = "access-prompt-response"
 MISSION_DIALOG_PROMPT_KINDS = (MISSION_DIALOG_QUESTION, MISSION_DIALOG_ACCESS_PROMPT)
 MISSION_DIALOG_RESPONSE_KINDS = (
+    "hold",
     MISSION_DIALOG_REPLY,
     MISSION_DIALOG_ACCESS_PROMPT_RESPONSE,
 )
@@ -517,6 +520,7 @@ MISSION_DIALOG_KINDS = MISSION_DIALOG_PROMPT_KINDS + MISSION_DIALOG_RESPONSE_KIN
 # can never resolve an ordinary question and vice versa, so an operator cannot
 # accidentally close a filesystem-access prompt with an architectural answer.
 MISSION_DIALOG_ANSWERS = {
+    "hold": None,
     MISSION_DIALOG_REPLY: MISSION_DIALOG_QUESTION,
     MISSION_DIALOG_ACCESS_PROMPT_RESPONSE: MISSION_DIALOG_ACCESS_PROMPT,
 }
@@ -645,6 +649,7 @@ MISSION_RECOVERY_COMMAND_TYPES = {
     MISSION_RECOVERY_TROUBLESHOOT: COMMAND_TYPE_MISSION_TROUBLESHOOT,
 }
 MISSION_DIALOG_COMMAND_TYPES = {
+    "hold": "mission-hold",
     MISSION_DIALOG_QUESTION: COMMAND_TYPE_MISSION_QUESTION,
     MISSION_DIALOG_ACCESS_PROMPT: COMMAND_TYPE_MISSION_ACCESS_PROMPT,
     MISSION_DIALOG_REPLY: COMMAND_TYPE_MISSION_REPLY,
@@ -669,6 +674,7 @@ MISSION_DIALOG_PENDING = "pending"
 MISSION_DIALOG_ANSWERED = "answered"
 MISSION_DIALOG_DELIVERED = "delivered"
 MISSION_DIALOG_STATES = (
+    "held",
     MISSION_DIALOG_PENDING,
     MISSION_DIALOG_ANSWERED,
     MISSION_DIALOG_DELIVERED,
@@ -893,8 +899,12 @@ CONTROLLER_REASON_WORKER_BUSY = "worker-busy"
 CONTROLLER_REASON_WORKER_CONFLICT = "worker-mission-conflict"
 CONTROLLER_REASON_RECOVERY_AWAITING = "awaiting-recovery-response"
 CONTROLLER_REASON_RECOVERY_ESCALATED = "bounded-recovery-escalated"
+CONTROLLER_REASON_ACCEPTANCE_EXPIRED = "dispatch-acceptance-expired"
+CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED = "dispatch-acceptance-unsupported"
 CONTROLLER_DISPATCH_REASONS = (CONTROLLER_REASON_IMPLEMENTABLE,)
 CONTROLLER_OBSERVATION_REASONS = (
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_MISSION_IN_PROGRESS,
     CONTROLLER_REASON_NOT_IMPLEMENTABLE,
@@ -962,6 +972,8 @@ CONTROLLER_EPISODE_REASONS = CONTROLLER_RECOVERY_REASONS + (
 # They are still recorded exactly once and still terminate the tick cleanly;
 # `blocked` is a refusal to guess, never a loop and never a retry.
 CONTROLLER_BLOCKING_REASONS = (
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_QUEUE_AMBIGUOUS,
     CONTROLLER_REASON_QUEUE_UNREADABLE,
@@ -974,6 +986,18 @@ CONTROLLER_BLOCKING_REASONS = (
 # The exact repair each blocking reason asks a human for.  A refusal that does
 # not name its repair is not fail-closed, it is just a dead end.
 CONTROLLER_BLOCKING_REPAIRS = {
+    CONTROLLER_REASON_ACCEPTANCE_EXPIRED: (
+        "inspect command {command} and worker {worker}; acceptance expired and the "
+        "reservation is retained; an operator must decide explicit recovery or queue "
+        "disposition with cockpit-queue; reservation release is not implemented by this "
+        "slice (replace-mission requires accepted lifecycle); leave it blocked, "
+        "do not fabricate worker failure, edit events, or retry delivery"
+    ),
+    CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED: (
+        "inspect command {command} with cockpit-control command-status; this reservation "
+        "lacks a supported acceptance contract; explicit operator recovery is required, "
+        "not an invented deadline or an edit to immutable events"
+    ),
     CONTROLLER_REASON_ROOT_CONFLICT: (
         "export COCKPIT_QUEUE_ROOT to the queue root {declared} that "
         "control.json declares, or create a control root for {exported}"
@@ -2602,7 +2626,21 @@ def validate_mission_cancellation(
     data = _require_object(record, label)
     _require_mission_control_schema_version(data, label)
     _require_record_type(data, MISSION_CANCELLATION_RECORD_TYPE, label)
-    _require_closed_fields(data, MISSION_CANCELLATION_FIELDS, label)
+    _require_closed_fields(
+        {key: value for key, value in data.items() if key != "reservation_recovery"},
+        MISSION_CANCELLATION_FIELDS, label,
+    )
+    if "reservation_recovery" in data:
+        recovery = data["reservation_recovery"]
+        if not isinstance(recovery, dict) or set(recovery) != {
+            "dispatch_command_id", "payload_digest", "inspected_safe"
+        }:
+            raise ControlStoreError(f"{label} requires correlated reservation inspection")
+        _require_uuid(recovery, "dispatch_command_id", label)
+        _require_digest(recovery, "payload_digest", label)
+        if recovery["inspected_safe"] is not True:
+            raise ControlStoreError(f"{label} requires explicit safe inspection attestation")
+        _require_evidence_refs(data, label, required=True)
 
     _require_uuid(data, "command_id", label)
     _require_uuid(data, "mission_id", label)
@@ -2637,7 +2675,12 @@ def validate_mission_replacement(
     data = _require_object(record, label)
     _require_mission_control_schema_version(data, label)
     _require_record_type(data, MISSION_REPLACEMENT_RECORD_TYPE, label)
-    _require_closed_fields(data, MISSION_REPLACEMENT_FIELDS, label)
+    _require_closed_fields(
+        {key: value for key, value in data.items() if key != "cooperative"},
+        MISSION_REPLACEMENT_FIELDS, label,
+    )
+    if "cooperative" in data and data["cooperative"] is not True:
+        raise ControlStoreError(f"{label} cooperative must be true")
 
     _require_uuid(data, "command_id", label)
     _require_mission_correlation(data, label)
@@ -2964,6 +3007,63 @@ def validate_event(record: Any, control_id: str, label: str = "event") -> Dict[s
     event_mission_control(data, label)
     event_controller_observation(data, label)
     return data
+
+
+def mission_command_correlation_fault(
+    event: Mapping[str, Any], commands: Mapping[str, Mapping[str, Any]],
+) -> Optional[str]:
+    """Check semantic pairing without making old invalid evidence unreadable."""
+
+    field, record = event_mission_control(event, "mission command correlation")
+    if record is None:
+        return None
+    envelope = event["payload"][COMMAND_ENVELOPE_PAYLOAD_FIELD]
+    mission_id = record["replaced_mission_id"] if field == MISSION_REPLACEMENT_PAYLOAD_FIELD else record["mission_id"]
+    if (
+        envelope["target"] != {"kind": COMMAND_TARGET_WORKER, "id": record["worker_id"]}
+        or envelope["mission_id"] != mission_id
+        or any(envelope[key] != record[key] for key in ("queue_item_id", "trace_id", "parent_trace_id"))
+    ):
+        return "mission command envelope does not match its correlated worker/mission/queue/trace"
+    dispatch = next(
+        (entry["envelope"] for entry in commands.values()
+         if entry["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+         and entry["envelope"]["mission_id"] == mission_id),
+        None,
+    )
+    if field != CONTROLLER_DISPATCH_PAYLOAD_FIELD and dispatch is not None:
+        if (envelope["target"] != dispatch["target"]
+            or envelope["queue_item_id"] != dispatch["queue_item_id"]
+            or envelope["boundaries"] != dispatch["boundaries"]):
+            return "mission command does not match its dispatch owner/queue/boundaries"
+    recovery = record.get("reservation_recovery")
+    if recovery is not None:
+        original = commands.get(recovery["dispatch_command_id"])
+        if (
+            original is None or original["status"] != COMMAND_STATUS_REGISTERED
+            or original["envelope"]["command_type"] != COMMAND_TYPE_MISSION_DISPATCH
+            or original["envelope"]["payload_digest"] != recovery["payload_digest"]
+            or original["envelope"]["target"] != envelope["target"]
+            or original["envelope"]["boundaries"] != envelope["boundaries"]
+            or any(original["envelope"][key] != envelope[key]
+                   for key in ("mission_id", "queue_item_id", "trace_id", "parent_trace_id"))
+        ):
+            return "reservation recovery does not match its registered dispatch identity/digest/boundaries"
+    return None
+
+
+def validate_mission_command_publication(record: Mapping[str, Any], history: "EventHistory") -> None:
+    if COMMAND_ENVELOPE_PAYLOAD_FIELD not in record["payload"]:
+        return
+    field, mission_record = event_mission_control(record, "mission command publication")
+    # Only committed legacy history may replace without a cooperative worker ACK.
+    if (mission_record is not None and field == MISSION_REPLACEMENT_PAYLOAD_FIELD
+        and mission_record.get("cooperative") is not True):
+        raise ControlStoreError("new mission replacement cooperative must be true")
+    commands, _ = fold_commands(history.events)
+    fault = mission_command_correlation_fault(record, commands)
+    if fault is not None:
+        raise ControlStoreError(fault)
 
 
 def validate_command(record: Any, control_id: str, label: str = "command") -> Dict[str, Any]:
@@ -4545,14 +4645,19 @@ def apply_mission_dialog(
     prompt = dialogs.get(dialog["answers_command_id"])
     if prompt is None:
         return False, MISSION_FOLD_RETAINED_UNKNOWN_PROMPT
-    if prompt["dialog"]["kind"] != MISSION_DIALOG_ANSWERS[dialog["kind"]]:
+    if dialog["kind"] != "hold" and prompt["dialog"]["kind"] != MISSION_DIALOG_ANSWERS[dialog["kind"]]:
         return False, MISSION_FOLD_RETAINED_KIND
-    if prompt["state"] != MISSION_DIALOG_PENDING:
+    if prompt["state"] not in (MISSION_DIALOG_PENDING, "held"):
         return False, MISSION_FOLD_RETAINED_ANSWERED
     for field in ("mission_id", "worker_id", "queue_item_id"):
         if prompt["dialog"][field] != dialog[field]:
             return False, MISSION_FOLD_RETAINED_UNMATCHED
 
+    if dialog["kind"] == "hold":
+        prompt["state"] = "held"
+        entry["state"] = MISSION_DIALOG_DELIVERED
+        dialogs[command_id] = entry
+        return True, MISSION_FOLD_ANSWERED
     prompt["state"] = MISSION_DIALOG_ANSWERED
     prompt["answered_by_command_id"] = command_id
     prompt["answered_at"] = event.record["timestamp"]
@@ -4756,10 +4861,13 @@ def apply_controller_dispatch(
             # retained as durable evidence and re-applies nothing, exactly as an
             # idempotent command redelivery must.
             return False, MISSION_FOLD_RETAINED_DUPLICATE
-        return refuse(MISSION_SLOT_CONFLICT_SECOND_ACTIVE)
+        if not (slot["state"] == MISSION_SLOT_RESERVED and slot["mission_id"] == mission_id
+                and slot["replaces"] is not None):
+            return refuse(MISSION_SLOT_CONFLICT_SECOND_ACTIVE)
     if mission_id in missions or any(
         entry["state"] in MISSION_SLOT_CLAIMED_STATES and entry["mission_id"] == mission_id
-        for entry in worker_slots.values()
+        and not (holder == worker_id and entry["state"] == MISSION_SLOT_RESERVED and entry["replaces"] is not None)
+        for holder, entry in worker_slots.items()
     ):
         return refuse(MISSION_SLOT_CONFLICT_REUSED)
 
@@ -4770,6 +4878,11 @@ def apply_controller_dispatch(
     entry["command_id"] = command_id
     entry["replaces"] = None
     entry.update(_mission_event_stamp(event))
+    pending = build_worker_lifecycle(
+        LIFECYCLE_PENDING_DISPATCH, worker_id, mission_id, dispatch["queue_item_id"],
+        dispatch["trace_id"], 0, parent_trace_id=dispatch["parent_trace_id"],
+    )
+    missions[mission_id] = {"lifecycle": pending, **_mission_event_stamp(event)}
     _record_controller_decision(
         controller,
         CONTROLLER_DISPATCHED,
@@ -5058,7 +5171,7 @@ def _fold_one_event(
         )
         return
     lifecycle = event_worker_lifecycle(event.record, label)
-    if lifecycle is not None:
+    if lifecycle is not None and lifecycle["state"] != LIFECYCLE_PENDING_DISPATCH:
         fault = _mission_slot_claim_fault(worker_slots, lifecycle)
         if fault is not None:
             # The event stays committed audit evidence; it simply may not
@@ -5087,8 +5200,43 @@ def _fold_one_event(
     if record is None:
         return
     if field == MISSION_DIALOG_PAYLOAD_FIELD:
-        mission_outcomes[event.event_id] = apply_mission_dialog(dialogs, record, event)
+        prior = missions.get(record["mission_id"])
+        if (prior is None or prior["lifecycle"]["state"] not in WORKER_LIFECYCLE_ACTIVE_STATES
+            or prior["lifecycle"]["worker_id"] != record["worker_id"]
+            or prior["lifecycle"]["queue_item_id"] != record["queue_item_id"]):
+            mission_outcomes[event.event_id] = (False, MISSION_FOLD_RETAINED_UNMATCHED)
+        else:
+            mission_outcomes[event.event_id] = apply_mission_dialog(dialogs, record, event)
     elif field == MISSION_CANCELLATION_PAYLOAD_FIELD:
+        recovery = record.get("reservation_recovery")
+        prior = missions.get(record["mission_id"])
+        if recovery is None and (
+            prior is None or prior["lifecycle"]["state"] not in WORKER_LIFECYCLE_ACTIVE_STATES
+            or prior["lifecycle"]["worker_id"] != record["worker_id"]
+            or prior["lifecycle"]["queue_item_id"] != record["queue_item_id"]
+        ):
+            mission_outcomes[event.event_id] = (False, MISSION_FOLD_RETAINED_UNMATCHED)
+            return
+        if recovery is not None:
+            slot = worker_slots.get(record["worker_id"])
+            if (
+                slot is not None and slot["state"] == MISSION_SLOT_RESERVED
+                and slot["mission_id"] == record["mission_id"]
+                and slot["queue_item_id"] == record["queue_item_id"]
+                and slot["command_id"] == recovery["dispatch_command_id"]
+                and (prior is None or prior["lifecycle"]["state"] == LIFECYCLE_PENDING_DISPATCH)
+            ):
+                cancelled = build_worker_lifecycle(
+                    LIFECYCLE_CANCELLED, record["worker_id"], record["mission_id"],
+                    record["queue_item_id"], record["trace_id"], 1,
+                    reason=record["reason"], evidence_refs=record["evidence_refs"],
+                    parent_trace_id=record["parent_trace_id"],
+                )
+                missions[record["mission_id"]] = {"lifecycle": cancelled, **_mission_event_stamp(event)}
+                apply_lifecycle_mission_slot(worker_slots, cancelled, event)
+            else:
+                mission_outcomes[event.event_id] = (False, MISSION_FOLD_RETAINED_UNMATCHED)
+                return
         mission_outcomes[event.event_id] = apply_mission_cancellation(
             cancellations, record, event
         )
@@ -5108,10 +5256,19 @@ def _fold_one_event(
         _close_observed_episodes(
             episodes, missions, record["decided_at"], record["mission_id"], record["reason"]
         )
-    else:
+    elif not record.get("cooperative"):
         mission_outcomes[event.event_id] = apply_mission_replacement(
             missions, worker_slots, record, event
         )
+    else:
+        # Validate the request using the existing replacement transition,
+        # without applying it until the worker's cooperative receipt arrives.
+        proposed_slots = deepcopy(worker_slots)
+        applied, outcome = apply_mission_replacement(deepcopy(missions), proposed_slots, record, event)
+        if not applied:
+            worker_slots.clear()
+            worker_slots.update(proposed_slots)
+        mission_outcomes[event.event_id] = (True, MISSION_FOLD_REQUESTED) if applied else (False, outcome)
 
 
 def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
@@ -5127,6 +5284,7 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
     mission_outcomes: Dict[str, Tuple[bool, str]] = {}
     slot_claims: Dict[str, Tuple[int, str]] = {}
     recovery_episodes: Dict[str, Tuple[int, bool]] = {}
+    commands: Dict[str, Dict[str, Any]] = {}
 
     def record_slot_claims(event: "CommittedEvent") -> None:
         """Stamp the revision at which each worker's current claim began.
@@ -5147,6 +5305,42 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
 
     for event in events:
         label = f"{EVENTS_DIR_NAME}/{event.path.name}"
+        envelope = event_command_envelope(event.record, label)
+        acknowledgement = event_command_acknowledgement(event.record, label)
+        lifecycle = event_worker_lifecycle(event.record, label)
+        if envelope is not None:
+            if mission_command_correlation_fault(event.record, commands) is not None:
+                mission_outcomes[event.event_id] = (False, MISSION_FOLD_RETAINED_UNMATCHED)
+                if lifecycle is not None:
+                    lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
+                continue
+            _, envelope_outcome = apply_command_envelope(commands, envelope, event)
+            if envelope_outcome != COMMAND_FOLD_REGISTERED:
+                mission_outcomes[event.event_id] = (False, MISSION_FOLD_RETAINED_DUPLICATE)
+                continue
+        if lifecycle is not None:
+            slot = worker_slots.get(lifecycle["worker_id"])
+            # Correlate by registered mission, even when its slot claim was
+            # refused or the event names a different worker.
+            dispatch = next(
+                (command for command in commands.values()
+                 if command["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+                 and command["envelope"]["mission_id"] == lifecycle["mission_id"]
+                  and command["envelope"]["deadline_at"] is not None),
+                None,
+            )
+            managed = (
+                lifecycle["state"] == LIFECYCLE_ACCEPTED
+                and dispatch is not None
+            )
+            if acknowledgement is not None or managed:
+                receipt_command = commands.get(acknowledgement["command_id"]) if acknowledgement else dispatch
+                fault = dispatch_acceptance_fault(
+                    receipt_command, acknowledgement, lifecycle, slot, missions
+                )
+                if fault is not None:
+                    lifecycle_outcomes[event.event_id] = (False, LIFECYCLE_RETAINED_UNMATCHED)
+                    continue
         _fold_one_event(
             event,
             label,
@@ -5160,6 +5354,59 @@ def fold_mission_state(events: Sequence["CommittedEvent"] = ()) -> MissionState:
             mission_outcomes=mission_outcomes,
             episodes=recovery_episodes,
         )
+        if acknowledgement is not None:
+            acknowledged_command = commands.get(acknowledgement["command_id"])
+            requires_joint = (
+                acknowledged_command is not None
+                and acknowledged_command["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+                and acknowledged_command["envelope"]["deadline_at"] is not None
+                and acknowledgement["outcome"] == COMMAND_ACCEPTED
+            )
+            if not requires_joint or (
+                lifecycle is not None and lifecycle_outcomes.get(event.event_id, (False, ""))[0]
+            ):
+                ack_applied, _ack_outcome = apply_command_acknowledgement(commands, acknowledgement, event)
+                if (
+                    ack_applied and acknowledgement["outcome"] == COMMAND_APPLIED
+                    and acknowledged_command is not None
+                    and not acknowledged_command["conflicts"]
+                    and acknowledgement["acknowledged_by"] == acknowledged_command["envelope"]["target"]["id"]
+                ):
+                    cancelled_request = cancellations.get(acknowledgement["command_id"])
+                    if cancelled_request is not None:
+                        request = cancelled_request["cancellation"]
+                        prior = missions.get(request["mission_id"])
+                        slot = worker_slots.get(request["worker_id"])
+                        if (
+                            acknowledgement["acknowledged_by"] == request["worker_id"]
+                            and prior is not None
+                            and prior["lifecycle"]["state"] in WORKER_LIFECYCLE_ACTIVE_STATES
+                            and prior["lifecycle"]["worker_id"] == request["worker_id"]
+                            and prior["lifecycle"]["queue_item_id"] == request["queue_item_id"]
+                            and slot is not None and slot["mission_id"] == request["mission_id"]
+                            and slot["state"] in MISSION_SLOT_CLAIMED_STATES
+                        ):
+                            cancelled = build_worker_lifecycle(
+                                LIFECYCLE_CANCELLED, request["worker_id"], request["mission_id"],
+                                request["queue_item_id"], prior["lifecycle"]["trace_id"],
+                                prior["lifecycle"]["sequence"] + 1,
+                                reason=request["reason"], evidence_refs=request["evidence_refs"],
+                                parent_trace_id=prior["lifecycle"]["parent_trace_id"],
+                            )
+                            missions[request["mission_id"]] = {"lifecycle": cancelled, **_mission_event_stamp(event)}
+                            apply_lifecycle_mission_slot(worker_slots, cancelled, event)
+                    # New replacement requests are cooperative. The applied
+                    # worker receipt, not the operator request, releases work.
+                    for request in events:
+                        replacement = request.record["payload"].get(MISSION_REPLACEMENT_PAYLOAD_FIELD)
+                        if (replacement is not None and replacement.get("cooperative")
+                            and replacement["command_id"] == acknowledgement["command_id"]
+                            and replacement["worker_id"] == acknowledgement["acknowledged_by"]
+                            and mission_outcomes.get(request.event_id, (False, ""))[0]):
+                            mission_outcomes[event.event_id] = apply_mission_replacement(
+                                missions, worker_slots, replacement, event,
+                            )
+                            break
         record_slot_claims(event)
 
     return MissionState(
@@ -5877,6 +6124,9 @@ control_journal.validate_root_metadata = (
     lambda *args, **kwargs: validate_root_metadata(*args, **kwargs)
 )
 control_journal.validate_event = lambda *args, **kwargs: validate_event(*args, **kwargs)
+control_journal.validate_mission_command_publication = (
+    lambda *args, **kwargs: validate_mission_command_publication(*args, **kwargs)
+)
 control_journal.build_ledger_projection = (
     lambda *args, **kwargs: build_ledger_projection(*args, **kwargs)
 )
@@ -5968,6 +6218,7 @@ control_lifecycle.publish_control_event = (
 control_lifecycle.inspect_control_events = (
     lambda *args, **kwargs: inspect_control_events(*args, **kwargs)
 )
+control_lifecycle.PortableControlLock = PortableControlLock
 control_lifecycle.fold_mission_state = (
     lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
 )
@@ -5983,6 +6234,7 @@ LifecycleRecordResult = control_lifecycle.LifecycleRecordResult
 WorkerLifecycleObservation = control_lifecycle.WorkerLifecycleObservation
 build_worker_lifecycle = control_lifecycle.build_worker_lifecycle
 record_worker_lifecycle = control_lifecycle.record_worker_lifecycle
+has_lifecycle_capability = control_lifecycle.has_lifecycle_capability
 _observed_slot = control_lifecycle._observed_slot
 observe_worker_lifecycle = control_lifecycle.observe_worker_lifecycle
 
@@ -6432,6 +6684,10 @@ control_commands.inspect_control_events = (
 control_commands.utc_timestamp = lambda: utc_timestamp()
 control_commands.CommittedEvent = CommittedEvent
 control_commands.EventPublicationResult = EventPublicationResult
+control_commands.fold_mission_state = lambda *args, **kwargs: fold_mission_state(*args, **kwargs)
+control_commands.mission_command_correlation_fault = (
+    lambda *args, **kwargs: mission_command_correlation_fault(*args, **kwargs)
+)
 
 canonical_command_payload = control_commands.canonical_command_payload
 command_payload_digest = control_commands.command_payload_digest
@@ -6450,6 +6706,7 @@ _command_conflict_entry = control_commands._command_conflict_entry
 apply_command_envelope = control_commands.apply_command_envelope
 apply_command_acknowledgement = control_commands.apply_command_acknowledgement
 fold_commands = control_commands.fold_commands
+dispatch_acceptance_fault = control_commands.dispatch_acceptance_fault
 build_command_envelope = control_commands.build_command_envelope
 build_command_acknowledgement = control_commands.build_command_acknowledgement
 read_command_slots = control_commands.read_command_slots
@@ -7055,6 +7312,10 @@ def observe_mission_control(
 # --- managed mission dialogs, cancellation, replacement, and recovery ---------
 
 control_mission_control.ControlStoreError = ControlStoreError
+control_mission_control.PortableControlLock = PortableControlLock
+control_mission_control.has_lifecycle_capability = has_lifecycle_capability
+control_commands.PortableControlLock = PortableControlLock
+control_mission_control.build_worker_lifecycle = lambda *args, **kwargs: build_worker_lifecycle(*args, **kwargs)
 control_mission_control.MISSION_CONTROL_SCHEMA_VERSION = MISSION_CONTROL_SCHEMA_VERSION
 control_mission_control.MISSION_DIALOG_RECORD_TYPE = MISSION_DIALOG_RECORD_TYPE
 control_mission_control.MISSION_CANCELLATION_RECORD_TYPE = MISSION_CANCELLATION_RECORD_TYPE
@@ -7142,7 +7403,9 @@ class QueueItemObservation:
     """One durable queue item as the controller may read it, never own it."""
 
     item_id: str
+    title: str
     state: str
+    source_text: str
     created_at: str
 
     @property
@@ -7197,7 +7460,9 @@ def _queue_item_observation(path: Path, label: str) -> QueueItemObservation:
         )
     return QueueItemObservation(
         item_id=item_id,
+        title=_require_string(record, "title", label),
         state=state,
+        source_text=_require_string(record, "source_text", label),
         created_at=_require_string(record, "created_at", label),
     )
 
@@ -9433,6 +9698,7 @@ FINDING_CONFIGURATION = "configuration"
 
 PREFLIGHT_STATUS_READY = "ready"
 PREFLIGHT_STATUS_DEGRADED = "degraded"
+PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED = "operationally-blocked"
 PREFLIGHT_STATUS_BLOCKED = "blocked"
 
 # The complete set of control-plane dimensions preflight always reports, in the
@@ -9471,6 +9737,10 @@ STORE_REPAIR_REPAIRED = "repaired"
 STORE_REPAIR_WOULD_REPAIR = "would-repair"
 
 REPAIR_ACTION_INIT = "cockpit-control init"
+REPAIR_ACTION_BIND_ROOTS = (
+    "cockpit-control bind-roots --queue-root <absolute queue root> "
+    "--planning-root <absolute planning root> --implementation-root <absolute implementation root>"
+)
 REPAIR_ACTION_REPLAY = "cockpit-control replay-ledger"
 REPAIR_ACTION_REPAIR_LOCK = "cockpit-control repair-lock"
 REPAIR_ACTION_REPAIR_STORE = DEFAULT_STORE_REPAIR_COMMAND
@@ -9655,7 +9925,10 @@ class PreflightReport:
 
     @property
     def blocked(self) -> bool:
-        return self.status == PREFLIGHT_STATUS_BLOCKED
+        return self.status in (
+            PREFLIGHT_STATUS_BLOCKED,
+            PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
+        )
 
     @property
     def actionable(self) -> Tuple[PreflightFinding, ...]:
@@ -9699,6 +9972,20 @@ class ControlPreflight:
 
     def _ready(self, dimension: str, detail: str) -> None:
         self._add(dimension, PREFLIGHT_READY, FINDING_OK, detail)
+
+    def _operationally_blocked(
+        self,
+        dimension: str,
+        detail: str,
+        repair: str = REPAIR_ACTION_BIND_ROOTS,
+    ) -> None:
+        self._add(
+            dimension,
+            PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
+            FINDING_CONFIGURATION,
+            detail,
+            repair,
+        )
 
     def _undeterminable(self, dimension: str, detail: str, repair: Optional[str] = None) -> None:
         self._add(dimension, PREFLIGHT_UNDETERMINABLE, FINDING_OK, detail, repair)
@@ -10135,20 +10422,19 @@ class ControlPreflight:
         if declared is None:
             detail = (
                 "no queue root is declared yet, so this root-level store carries no "
-                "product-work authority; a mission must declare one before dispatch"
+                "product-work authority; bind canonical roots before dispatch"
             )
             if exported:
-                self._add(
+                self._operationally_blocked(
                     dimension,
-                    PREFLIGHT_ADVISORY,
-                    FINDING_CONFIGURATION,
                     f"{detail}; the shell exports COCKPIT_QUEUE_ROOT={exported}, which "
                     f"{CONTROL_METADATA_NAME} does not declare",
-                    f"declare canonical_roots.queue_root as {exported} when the mission is "
-                    "created, or unset COCKPIT_QUEUE_ROOT in this shell",
+                    f"cockpit-control bind-roots --queue-root {exported} "
+                    "--planning-root <absolute planning root> "
+                    "--implementation-root <absolute implementation root>",
                 )
                 return
-            self._ready(dimension, detail)
+            self._operationally_blocked(dimension, detail)
             return
 
         self._check_declared_root(dimension, "queue root", declared)
@@ -10186,6 +10472,36 @@ class ControlPreflight:
                 f"declared capabilities are not read until {CONTROL_METADATA_NAME} is valid",
             )
             return
+        for required in ("worker_lifecycle", "command_protocol"):
+            value = self.metadata["capabilities"].get(required)
+            if type(value) is not int or value != 1:
+                self._operationally_blocked(
+                    dimension,
+                    f"missing supported {required} capability; workers are legacy-observed",
+                    "inspect existing work before initializing a fresh configured control root; "
+                    "do not rewrite live immutable history (ADR-017)",
+                )
+        _metadata, history = inspect_control_events(self.root)
+        state = fold_mission_state(history.events)
+        commands, _ = fold_commands(history.events)
+        for worker, slot in state.claimed_slots:
+            stored = commands.get(slot["command_id"])
+            if stored is None:
+                self._operationally_blocked(dimension, f"{worker} has an unresolved legacy mission boundary")
+                continue
+            envelope = stored["envelope"]
+            if any(envelope["boundaries"][key] != self.metadata["canonical_roots"][key]
+                   for key in ("control_root", "queue_root", "planning_root", "implementation_roots")):
+                self._operationally_blocked(dimension, f"{worker} has an unresolved legacy command boundary; inspect before migration")
+            if (slot["state"] == MISSION_SLOT_RESERVED
+                and envelope["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+                and envelope["deadline_at"] is None):
+                self._operationally_blocked(
+                    dimension, f"{worker} dispatch-acceptance-unsupported",
+                    f"cockpit-control recover-dispatch --dispatch-command {slot['command_id']} "
+                    "--command-id <new UUID> --worker " + worker +
+                    " --inspect-safe --by <operator> --reason <reason> --evidence <type:reference>",
+                )
         declarations = (
             ("capabilities", self.metadata["capabilities"], "control_store"),
             (
@@ -10199,7 +10515,7 @@ class ControlPreflight:
             if required not in declared:
                 self._add(
                     dimension,
-                    PREFLIGHT_ADVISORY,
+                    PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
                     FINDING_CONFIGURATION,
                     f"{CONTROL_METADATA_NAME} declares no {field}.{required}; this cockpit "
                     "is legacy-observed and cannot be given VP3 lifecycle work",
@@ -10233,7 +10549,7 @@ class ControlPreflight:
             if value < CONTROL_SCHEMA_VERSION:
                 self._add(
                     dimension,
-                    PREFLIGHT_ADVISORY,
+                    PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED,
                     FINDING_CONFIGURATION,
                     f"{CONTROL_METADATA_NAME} declares legacy {field}.{required} {value}; "
                     f"this build provides capability {CONTROL_SCHEMA_VERSION}, so the "
@@ -10249,8 +10565,7 @@ class ControlPreflight:
         self._ready(
             dimension,
             f"{CONTROL_METADATA_NAME} declares {' and '.join(summary)}, both satisfied by "
-            f"this build; worker lifecycle capability is not declared, so workers remain "
-            "legacy-observed until a mission declares it",
+            "this build; worker lifecycle and command protocol capability 1 are declared",
         )
 
     def _check_declared_root(self, dimension: str, label: str, declared: str) -> None:
@@ -10304,7 +10619,7 @@ class ControlPreflight:
         if self._has_finding(dimension):
             return
         if declared_count == 0:
-            self._ready(
+            self._operationally_blocked(
                 dimension,
                 "no planning root or implementation roots are declared yet, so no mission "
                 "boundary can be crossed",
@@ -10356,12 +10671,17 @@ class ControlPreflight:
             raise ControlStoreError("preflight produced a finding outside its declared dimensions")
 
         status = PREFLIGHT_STATUS_READY
+        operationally_blocked = False
         for finding in ordered:
             if finding.state == PREFLIGHT_BLOCKED:
                 status = PREFLIGHT_STATUS_BLOCKED
                 break
+            if finding.state == PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED:
+                operationally_blocked = True
             if finding.state != PREFLIGHT_READY:
                 status = PREFLIGHT_STATUS_DEGRADED
+        if status != PREFLIGHT_STATUS_BLOCKED and operationally_blocked:
+            status = PREFLIGHT_STATUS_OPERATIONALLY_BLOCKED
         return PreflightReport(
             root=self.root,
             source=self.source,
@@ -10797,17 +11117,103 @@ def _session_identity() -> str:
     return "shell"
 
 
-def _initial_records(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _canonical_roots_record(
+    control_root: Path,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
+) -> Dict[str, Any]:
+    """Build one normalized canonical-root declaration."""
+
+    roots = {
+        "control_root": str(control_root),
+        "queue_root": queue_root,
+        "planning_root": planning_root,
+        "implementation_roots": list(implementation_roots),
+    }
+    return _validate_canonical_roots(roots, "canonical root binding", control_root)
+
+
+def _declared_roots_from_values(
+    control_root: Path,
+    queue_root: str,
+    planning_root: str,
+    implementation_roots: Sequence[str],
+) -> Dict[str, Any]:
+    """Validate a complete operational root binding from CLI arguments."""
+
+    if not implementation_roots:
+        raise ControlStoreError("at least one --implementation-root is required")
+    roots = _canonical_roots_record(
+        control_root,
+        queue_root=_require_root_path(queue_root, "queue_root", "root binding"),
+        planning_root=_require_root_path(planning_root, "planning_root", "root binding"),
+        implementation_roots=[
+            _require_root_path(value, f"implementation_roots[{index}]", "root binding")
+            for index, value in enumerate(implementation_roots)
+        ],
+    )
+    seen: Dict[str, str] = {}
+    for label, value in (
+        ("control_root", roots["control_root"]),
+        ("queue_root", roots["queue_root"]),
+        ("planning_root", roots["planning_root"]),
+    ):
+        if value in seen:
+            raise ControlStoreError(
+                f"root binding requires distinct paths; {label} duplicates {seen[value]}"
+            )
+        seen[value] = label
+    for index, value in enumerate(roots["implementation_roots"]):
+        label = f"implementation_roots[{index}]"
+        if value in seen:
+            raise ControlStoreError(
+                f"root binding requires distinct paths; {label} duplicates {seen[value]}"
+            )
+        seen[value] = label
+    return roots
+
+
+def _metadata_with_canonical_roots(
+    metadata: Mapping[str, Any],
+    roots: Mapping[str, Any],
+    *,
+    migrated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return metadata with canonical and compatibility root fields synchronized."""
+
+    updated = dict(metadata)
+    canonical = {
+        "control_root": roots["control_root"],
+        "queue_root": roots["queue_root"],
+        "planning_root": roots["planning_root"],
+        "implementation_roots": list(roots["implementation_roots"]),
+    }
+    updated["canonical_roots"] = canonical
+    updated["queue_root"] = canonical["queue_root"]
+    updated["planning_root"] = canonical["planning_root"]
+    updated["implementation_roots"] = list(canonical["implementation_roots"])
+    if migrated_at is not None:
+        updated["last_migration_at"] = migrated_at
+    return updated
+
+
+def _initial_records(
+    root: Path,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     created_at = utc_timestamp()
     control_id = str(uuid4())
     session_id = _session_identity()
     cockpit_id = os.environ.get("COCKPIT_ID") or session_id
-    canonical_roots = {
-        "control_root": str(root),
-        "queue_root": None,
-        "planning_root": None,
-        "implementation_roots": [],
-    }
+    canonical_roots = _canonical_roots_record(
+        root,
+        queue_root=queue_root,
+        planning_root=planning_root,
+        implementation_roots=implementation_roots,
+    )
     metadata = {
         "schema_version": CONTROL_SCHEMA_VERSION,
         "record_type": "control-root",
@@ -10816,10 +11222,10 @@ def _initial_records(root: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "session_id": session_id,
         "control_root": str(root),
         "canonical_roots": canonical_roots,
-        "queue_root": None,
-        "planning_root": None,
+        "queue_root": canonical_roots["queue_root"],
+        "planning_root": canonical_roots["planning_root"],
         "implementation_roots": list(canonical_roots["implementation_roots"]),
-        "capabilities": {"control_store": CONTROL_SCHEMA_VERSION},
+        "capabilities": {"control_store": CONTROL_SCHEMA_VERSION, "worker_lifecycle": 1, "command_protocol": 1},
         "tool_capability_versions": {"cockpit-control": CONTROL_SCHEMA_VERSION},
         "created_at": created_at,
         "last_migration_at": created_at,
@@ -10839,7 +11245,7 @@ def _root_has_entries(root: Path) -> bool:
     return True
 
 
-def _create_store_atomically(root: Path) -> None:
+def _create_store_atomically(root: Path, roots: Optional[Mapping[str, Any]] = None) -> None:
     parent = root.parent
     if not parent.is_dir():
         raise ControlStoreError(f"parent directory does not exist for COCKPIT_CONTROL_ROOT: {parent}")
@@ -10855,7 +11261,15 @@ def _create_store_atomically(root: Path) -> None:
         temporary_root.chmod(0o700)
         for name in REQUIRED_STORE_DIRECTORIES:
             (temporary_root / name).mkdir(mode=0o700)
-        metadata, ledger = _initial_records(root)
+        if roots is None:
+            metadata, ledger = _initial_records(root)
+        else:
+            metadata, ledger = _initial_records(
+                root,
+                queue_root=roots["queue_root"],
+                planning_root=roots["planning_root"],
+                implementation_roots=roots["implementation_roots"],
+            )
         _write_json(temporary_root / CONTROL_METADATA_NAME, metadata)
         _write_json(temporary_root / LEDGER_NAME, ledger)
         _write_new_text(temporary_root / EVENTS_NAME, build_events_view())
@@ -10871,11 +11285,23 @@ def _create_store_atomically(root: Path) -> None:
 
 def initialize_control_store(
     resolved_root: Optional[ResolvedControlRoot] = None,
+    queue_root: Optional[str] = None,
+    planning_root: Optional[str] = None,
+    implementation_roots: Sequence[str] = (),
 ) -> StoreInitialization:
     """Create a complete store atomically, or validate an existing one unchanged."""
 
     resolved = resolved_root or resolve_control_root()
     root = resolved.path
+    if any(value is not None for value in (queue_root, planning_root)) or implementation_roots:
+        if queue_root is None or planning_root is None or not implementation_roots:
+            raise ControlStoreError(
+                "init root binding requires --queue-root, --planning-root, and at least "
+                "one --implementation-root together"
+            )
+        roots = _declared_roots_from_values(root, queue_root, planning_root, implementation_roots)
+    else:
+        roots = _canonical_roots_record(root)
     if root.exists() or root.is_symlink():
         if root.is_symlink() or not root.is_dir():
             raise ControlStoreError("COCKPIT_CONTROL_ROOT must be a directory, not a symlink or file")
@@ -10883,10 +11309,151 @@ def initialize_control_store(
             validate_control_store(root)
             return StoreInitialization(root=root, source=resolved.source, created=False)
 
-    _create_store_atomically(root)
+    if roots["queue_root"] is not None:
+        for label, value in (
+            ("queue root", roots["queue_root"]),
+            ("planning root", roots["planning_root"]),
+        ):
+            _ensure_declared_directory(value, label)
+        for index, value in enumerate(roots["implementation_roots"]):
+            _ensure_declared_directory(value, f"implementation root {index + 1}")
+    _create_store_atomically(root, roots if roots["queue_root"] is not None else None)
     # Re-read the just-published files through the normal fail-closed validator.
     validate_control_store(root)
     return StoreInitialization(root=root, source=resolved.source, created=True)
+
+
+@dataclass(frozen=True)
+class RootBindingResult:
+    """Outcome of binding canonical work roots into an existing control store."""
+
+    root: Path
+    queue_root: str
+    planning_root: str
+    implementation_roots: Tuple[str, ...]
+    changed: bool
+
+
+def _ensure_declared_directory(path: str, label: str) -> None:
+    """Create or validate one declared work root without following symlinks."""
+
+    root = Path(path)
+    mode = _existing_mode(root, label)
+    if mode is None:
+        parent = root.parent
+        if not parent.is_dir():
+            raise ControlStoreError(f"parent directory does not exist for {label}: {parent}")
+        if parent.is_symlink():
+            raise ControlStoreError(f"parent directory for {label} must not be a symlink: {parent}")
+        try:
+            root.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise ControlStoreError(f"cannot create {label}: {exc}") from None
+        _fsync_directory(parent)
+        return
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        raise ControlStoreError(f"{label} must be a real directory, not a symlink or file")
+    if not os.access(path, os.W_OK):
+        raise ControlStoreError(f"{label} is not writable by this user")
+
+
+def _write_replacement_json(path: Path, record: Mapping[str, Any], label: str) -> None:
+    temporary = path.with_name(f".{path.name}.bind-{uuid4()}.tmp")
+    try:
+        _write_json(temporary, record)
+        identity = temporary.lstat()
+        os.replace(str(temporary), str(path))
+        replaced = path.lstat()
+    except OSError as exc:
+        raise ControlStoreError(f"cannot atomically replace {label}: {exc}") from None
+    finally:
+        if temporary.exists():
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+    if not _same_filesystem_identity(replaced, identity):
+        raise ControlStoreError(f"{label} changed filesystem identity during replacement")
+    _fsync_directory(path.parent)
+
+
+def bind_control_roots(
+    root: Path,
+    queue_root: str,
+    planning_root: str,
+    implementation_roots: Sequence[str],
+    *,
+    command: str = "cockpit-control bind-roots",
+    timeout_seconds: Optional[float] = None,
+    poll_seconds: float = DEFAULT_LOCK_POLL_SECONDS,
+    dry_run: bool = False,
+) -> RootBindingResult:
+    """Bind complete canonical work roots and refresh the derived ledger."""
+
+    root = _require_absolute_root(str(root), "configured")
+    roots = _declared_roots_from_values(root, queue_root, planning_root, implementation_roots)
+    metadata = validate_control_authority(root)
+    current = metadata["canonical_roots"]
+    changed = current != roots
+    if dry_run:
+        return RootBindingResult(
+            root=root,
+            queue_root=roots["queue_root"],
+            planning_root=roots["planning_root"],
+            implementation_roots=tuple(roots["implementation_roots"]),
+            changed=changed,
+        )
+
+    for label, value in (
+        ("queue root", roots["queue_root"]),
+        ("planning root", roots["planning_root"]),
+    ):
+        _ensure_declared_directory(value, label)
+    for index, value in enumerate(roots["implementation_roots"]):
+        _ensure_declared_directory(value, f"implementation root {index + 1}")
+
+    with PortableControlLock(
+        root,
+        command,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    ) as lock:
+        metadata = validate_control_authority(root)
+        changed = metadata["canonical_roots"] != roots
+        if changed:
+            updated = _metadata_with_canonical_roots(
+                metadata,
+                roots,
+                migrated_at=utc_timestamp(),
+            )
+            validate_root_metadata(updated, root)
+            history = read_committed_events(root, updated["control_id"])
+            ledger = build_ledger_projection(updated, history.events)
+            _write_replacement_json(root / CONTROL_METADATA_NAME, updated, CONTROL_METADATA_NAME)
+            _write_replacement_json(root / LEDGER_NAME, ledger, LEDGER_NAME)
+            view_identity = _write_projection_temporary(
+                root / EVENTS_VIEW_TEMPORARY_NAME,
+                build_events_view(history.events),
+                EVENTS_VIEW_TEMPORARY_NAME,
+            )
+            _replace_projection(
+                root / EVENTS_VIEW_TEMPORARY_NAME,
+                root / EVENTS_NAME,
+                view_identity,
+                EVENTS_NAME,
+            )
+        else:
+            ControlLedgerProjection(root, command=command, held_lock=lock).run()
+    validate_control_store(root)
+    return RootBindingResult(
+        root=root,
+        queue_root=roots["queue_root"],
+        planning_root=roots["planning_root"],
+        implementation_roots=tuple(roots["implementation_roots"]),
+        changed=changed,
+    )
 
 
 def _print_error(error: Exception) -> int:
@@ -11520,7 +12087,7 @@ def _report_command_status(root: Path, observations: Sequence[Mapping[str, Any]]
 def _dialog_observation(state: MissionState, entry: Mapping[str, Any]) -> str:
     """Classify one dialog against the mission state folded in the same pass."""
 
-    if entry["state"] != MISSION_DIALOG_PENDING:
+    if entry["state"] not in (MISSION_DIALOG_PENDING, "held"):
         return MISSION_DIALOG_OBSERVATION_SETTLED
     mission = state.missions.get(entry["dialog"]["mission_id"])
     if mission is not None and mission["lifecycle"]["state"] in WORKER_LIFECYCLE_ACTIVE_STATES:
@@ -11765,6 +12332,14 @@ def _report_mission_status(report: MissionControlReport) -> int:
         print(_mission_dialog_line(entry, report.dialog_observation(entry)))
     for observation in report.cancellations:
         print(_mission_cancellation_line(observation))
+    for entry in report.replacements:
+        replacement = entry["replacement"]
+        print(
+            f"replacement {replacement['command_id']} mission {replacement['replaced_mission_id']} "
+            f"replacement-mission {replacement['replacement_mission_id']} worker {replacement['worker_id']} "
+            f"trace {replacement['trace_id']} observation {entry['observation']} "
+            f"command-status {entry['command_status']}"
+        )
     for worker_id, slot in report.worker_slots:
         print(_mission_slot_line(worker_id, slot))
         for conflict in slot["conflicts"]:
@@ -11861,6 +12436,9 @@ build_controller_observation = control_controller.build_controller_observation
 _controller_dispatched_pairs = control_controller._controller_dispatched_pairs
 _correlation_counts = control_controller._correlation_counts
 controller_tick = control_controller.controller_tick
+accept_dispatch = control_controller.accept_dispatch
+DispatchAcceptanceResult = control_controller.DispatchAcceptanceResult
+dispatch_payload_digest = control_controller.dispatch_payload_digest
 _precedence_verdicts = control_controller._precedence_verdicts
 controller_precedence_lines = control_controller.controller_precedence_lines
 controller_tick_lines = control_controller.controller_tick_lines
@@ -12046,6 +12624,11 @@ def _managed_envelope(
     the command is delivered into.
     """
 
+    # Omitted boundaries mean the already-declared canonical mission roots,
+    # not a new legacy command with null boundaries. No path is guessed.
+    roots = validate_root_metadata(
+        _load_json(control_root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), control_root,
+    )["canonical_roots"]
     return build_command_envelope(
         command_id=args.command_id,
         command_type=command_type,
@@ -12057,9 +12640,9 @@ def _managed_envelope(
         payload_digest=_command_digest_from_arguments(args),
         control_root=str(control_root),
         parent_trace_id=parent_trace_id,
-        queue_root=args.queue_root,
-        planning_root=args.planning_root,
-        implementation_roots=tuple(args.implementation_root or ()),
+        queue_root=args.queue_root if args.queue_root is not None else roots["queue_root"],
+        planning_root=args.planning_root if args.planning_root is not None else roots["planning_root"],
+        implementation_roots=tuple(args.implementation_root or roots["implementation_roots"]),
         runtime_boundaries=tuple(args.runtime_boundary or ()),
         deadline_at=args.deadline,
     )
@@ -12129,7 +12712,7 @@ def _run_answer_question(root: Path, args: Any) -> MissionControlResult:
             f"{label} answers command {answers}, which this control root has never raised "
             "as a mission prompt"
         )
-    kind = MISSION_DIALOG_RESPONSES.get(entry["dialog"]["kind"])
+    kind = "hold" if getattr(args, "hold", False) else MISSION_DIALOG_RESPONSES.get(entry["dialog"]["kind"])
     if kind is None:
         raise ControlStoreError(
             f"{label} answers command {answers}, which is a "
@@ -12332,6 +12915,156 @@ def _add_command_boundary_arguments(parser: Any) -> None:
     )
 
 
+def recover_dispatch(
+    root: Path, dispatch_command_id: str, command_id: str, worker_id: str,
+    *, inspected_safe: bool, operator: str, reason: str, evidence_refs: Sequence[str],
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Explicitly abandon an inspected reservation, never stop an accepted worker."""
+
+    if inspected_safe is not True:
+        raise ControlStoreError("recovery requires --inspect-safe: attest inspection found no executing worker")
+    _require_uuid({"command_id": command_id}, "command_id", "reservation recovery")
+    _require_uuid({"command_id": dispatch_command_id}, "command_id", "dispatch")
+    _require_identifier({"worker": worker_id}, "worker", "reservation recovery")
+    _require_identifier({"operator": operator}, "operator", "reservation recovery")
+    _require_string({"reason": reason}, "reason", "reservation recovery")
+    _require_typed_references({"evidence": list(evidence_refs)}, "evidence", "reservation recovery",
+                              required=True, noun="inspection")
+    with (nullcontext(None) if dry_run else PortableControlLock(root, "cockpit-control recover-dispatch")) as lock:
+        metadata, history = inspect_control_events(root)
+        state = fold_mission_state(history.events)
+        commands, _ = fold_commands(history.events)
+        original = commands.get(dispatch_command_id)
+        if original is None:
+            raise ControlStoreError("recovery dispatch command is not registered")
+        envelope = original["envelope"]
+        if envelope["command_type"] != COMMAND_TYPE_MISSION_DISPATCH or envelope["target"] != {
+            "kind": "worker", "id": worker_id
+        }:
+            raise ControlStoreError("recovery requires the correlated dispatch and worker")
+        inspection = {"dispatch_command_id": dispatch_command_id,
+                      "payload_digest": envelope["payload_digest"], "inspected_safe": True}
+        payload = {"reservation_recovery": inspection, "reason": reason,
+                   "evidence_refs": list(evidence_refs), "operator": operator}
+        digest = command_payload_digest(payload)
+        result = {"command_id": command_id, "dispatch_command_id": dispatch_command_id,
+                  "mission_id": envelope["mission_id"], "worker_id": worker_id,
+                  "trace_id": envelope["trace_id"], "worker_stopped": False, "start_work": False}
+        prior = commands.get(command_id)
+        if prior is not None:
+            if prior["envelope"]["payload_digest"] != digest or prior["envelope"]["mission_id"] != envelope["mission_id"]:
+                raise ControlStoreError("recovery command ID conflicts with its stored inspection")
+            committed = next((event for event in history.events
+                              if event.record["payload"].get(MISSION_CANCELLATION_PAYLOAD_FIELD, {}).get("command_id") == command_id), None)
+            if (committed is None
+                or committed.record["payload"][MISSION_CANCELLATION_PAYLOAD_FIELD].get("reservation_recovery") != inspection
+                or not state.mission_outcomes.get(committed.event_id, (False, ""))[0]):
+                raise ControlStoreError("recovery command has no applied reservation recovery")
+            return dict(result, outcome="duplicate", event_id=committed.event_id)
+        slot = state.worker_slots.get(worker_id)
+        mission = state.missions.get(envelope["mission_id"])
+        if (
+            slot is None or slot["state"] != MISSION_SLOT_RESERVED
+            or slot["command_id"] != dispatch_command_id
+            or slot["mission_id"] != envelope["mission_id"]
+            or original["status"] != COMMAND_STATUS_REGISTERED or original["conflicts"]
+            or (mission is not None and mission["lifecycle"]["state"] != LIFECYCLE_PENDING_DISPATCH)
+            or state.contested_slots
+        ):
+            raise ControlStoreError("reservation is accepted, released, or contested; use cooperative cancellation/replacement")
+        # An ahead projection may represent lost committed acceptance. Never
+        # erase that diagnostic evidence by publishing a recovery over it.
+        _, projection_reason = _classify_published_ledger(
+            root, metadata["control_id"],
+            _serialized_record(build_ledger_projection(metadata, history.events)).encode("utf-8"),
+        )
+        if projection_reason == PROJECTION_REASON_AHEAD:
+            raise ControlStoreError("committed history appears missing; inspect authority before recovery")
+        now = utc_timestamp()
+        cancellation = build_mission_cancellation(
+            command_id, envelope["mission_id"], worker_id, envelope["queue_item_id"],
+            envelope["trace_id"], reason, _shifted_timestamp(now, 300),
+            parent_trace_id=envelope["parent_trace_id"], evidence_refs=evidence_refs, requested_at=now,
+        )
+        cancellation["reservation_recovery"] = inspection
+        recovery_envelope = dict(envelope, command_id=command_id,
+                                 command_type=COMMAND_TYPE_MISSION_CANCEL,
+                                 payload_digest=digest, created_at=now, deadline_at=None)
+        publication = register_mission_command(
+            root, recovery_envelope, MISSION_CANCELLATION_PAYLOAD_FIELD, cancellation,
+            actor=operator, held_lock=lock, dry_run=dry_run,
+        )
+        return dict(result, outcome="would-release" if dry_run else "released",
+                    event_id=None if dry_run else publication.command.publication.event_id)
+
+
+def protocol_worker_status(root: Path, workers: Sequence[str], as_of: Optional[str] = None) -> Dict[str, Any]:
+    """Replay durable evidence once. Pane reachability is a separate diagnostic."""
+
+    moment = as_of or utc_timestamp()
+    now = _parsed_timestamp(moment, "as_of", "protocol status")
+    metadata, history = inspect_control_events(root)
+    _, projection_reason = _classify_published_ledger(
+        root, metadata["control_id"],
+        _serialized_record(build_ledger_projection(metadata, history.events)).encode("utf-8"),
+    )
+    if projection_reason == PROJECTION_REASON_AHEAD:
+        return {"workers": {
+            worker: {"status": "blocked", "authoritative": True, "trace_id": "",
+                     "mission_id": None, "command_id": None, "pending_commands": [],
+                     "reason": "committed-history-missing"}
+            for worker in workers
+        }}
+    state = fold_mission_state(history.events)
+    commands, _ = fold_commands(history.events)
+    output = {}
+    for worker in workers:
+        _require_identifier({"worker": worker}, "worker", "protocol status")
+        slot = state.worker_slots.get(worker)
+        row = {"status": "available", "authoritative": False, "trace_id": "",
+               "mission_id": None, "command_id": None, "pending_commands": []}
+        if slot is not None and slot["state"] in MISSION_SLOT_CLAIMED_STATES:
+            row.update(authoritative=True, status="working", mission_id=slot["mission_id"],
+                       command_id=slot["command_id"])
+            mission = state.missions.get(slot["mission_id"])
+            command = commands.get(slot["command_id"])
+            if command is not None:
+                row["trace_id"] = command["envelope"]["trace_id"]
+            if slot["state"] == MISSION_SLOT_RESERVED:
+                deadline = None if command is None else command["envelope"]["deadline_at"]
+                if command is None or (command["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH and
+                    (deadline is None or now >= _parsed_timestamp(deadline, "deadline", "dispatch"))):
+                    row["status"] = "blocked"
+                row["lifecycle"] = LIFECYCLE_PENDING_DISPATCH
+            elif mission is None:
+                row["status"] = "blocked"
+            else:
+                lifecycle = mission["lifecycle"]
+                row.update(lifecycle=lifecycle["state"], trace_id=lifecycle["trace_id"])
+                observation = _observed_slot(mission, now, moment)
+                if observation.stale:
+                    row["status"] = "unreachable"
+                if lifecycle["state"] == LIFECYCLE_BLOCKED:
+                    row["status"] = "blocked"
+                prompts = [entry for entry in state.dialogs.values()
+                           if entry["dialog"]["mission_id"] == slot["mission_id"]
+                           and entry["state"] in (MISSION_DIALOG_PENDING, "held")]
+                if prompts:
+                    row["status"] = "held" if any(p["state"] == "held" for p in prompts) else "awaiting-approval"
+            row["pending_commands"] = [
+                key for key, entry in commands.items()
+                if entry["envelope"]["mission_id"] == slot["mission_id"]
+                and entry["status"] in (COMMAND_STATUS_REGISTERED, COMMAND_ACCEPTED)
+            ]
+            if any(holder == worker for holder, _, _ in state.contested_slots):
+                row["status"] = "blocked"
+        elif not has_lifecycle_capability(metadata):
+            row.update(status="blocked", authoritative=True)
+        output[worker] = row
+    return {"workers": output}
+
+
 def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
     """Run the small control-store CLI used by humans and controller commands."""
 
@@ -12347,7 +13080,36 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("init", help="atomically initialize an explicit control root")
+    init = subcommands.add_parser("init", help="atomically initialize an explicit control root")
+    init.add_argument("--queue-root", default=None, metavar="PATH", help="declared queue root")
+    init.add_argument("--planning-root", default=None, metavar="PATH", help="declared planning root")
+    init.add_argument(
+        "--implementation-root",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    bind_roots = subcommands.add_parser(
+        "bind-roots",
+        help="atomically bind queue, planning, and implementation roots into a control store",
+    )
+    bind_roots.add_argument("--queue-root", required=True, metavar="PATH", help="declared queue root")
+    bind_roots.add_argument(
+        "--planning-root", required=True, metavar="PATH", help="declared planning root"
+    )
+    bind_roots.add_argument(
+        "--implementation-root",
+        action="append",
+        required=True,
+        metavar="PATH",
+        help="declared implementation boundary; may be repeated",
+    )
+    bind_roots.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and report the binding without changing any state",
+    )
     subcommands.add_parser("validate", help="validate an explicit control root without mutation")
     repair = subcommands.add_parser(
         "repair-lock",
@@ -12428,6 +13190,13 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="report the repair plan without changing any state",
     )
+    accept = subcommands.add_parser(
+        "accept-dispatch", help="atomically accept a dispatched command and claim work once",
+    )
+    for option in ("command-id", "mission", "worker", "queue-item", "trace", "payload-digest"):
+        accept.add_argument("--" + option, required=True)
+    accept.add_argument("--fresh-for", required=True, metavar="SECONDS")
+    accept.add_argument("--dry-run", action="store_true")
     lifecycle = subcommands.add_parser(
         "record-lifecycle",
         help=(
@@ -12942,14 +13711,60 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="report the projection decision without changing any state",
     )
+    answer_question.add_argument("--hold", action="store_true", help="hold without answering or approving")
+    mission_status.add_argument("--json", action="store_true")
+    recover = subcommands.add_parser("recover-dispatch", help="release an explicitly inspected unaccepted reservation; never stop a worker")
+    recover.add_argument("--dispatch-command", required=True)
+    recover.add_argument("--command-id", required=True)
+    recover.add_argument("--worker", required=True)
+    recover.add_argument("--inspect-safe", action="store_true", help="attest safe inspection found no worker executing this reservation")
+    recover.add_argument("--by", required=True)
+    recover.add_argument("--reason", required=True)
+    recover.add_argument("--evidence", required=True, action="append")
+    recover.add_argument("--dry-run", action="store_true")
+    status = subcommands.add_parser("protocol-status", help="authoritative JSON worker status")
+    status.add_argument("--workers", default="worker-dev,worker-test,worker-fix")
+    status.add_argument("--as-of")
     args = parser.parse_args(argv)
 
     try:
         resolved = resolve_control_root()
+        if args.command == "recover-dispatch":
+            print(json.dumps(recover_dispatch(
+                resolved.path, args.dispatch_command, args.command_id, args.worker,
+                inspected_safe=args.inspect_safe, operator=args.by, reason=args.reason,
+                evidence_refs=args.evidence, dry_run=args.dry_run,
+            ), sort_keys=True))
+            return 0
+        if args.command == "protocol-status":
+            print(json.dumps(protocol_worker_status(resolved.path, args.workers.split(","), args.as_of), sort_keys=True))
+            return 0
         if args.command == "init":
-            result = initialize_control_store(resolved)
+            result = initialize_control_store(
+                resolved,
+                queue_root=args.queue_root,
+                planning_root=args.planning_root,
+                implementation_roots=tuple(args.implementation_root or ()),
+            )
             verb = "initialized" if result.created else "validated"
             print(f"cockpit-control: {verb} {result.root} (source: {result.source})")
+            return 0
+        if args.command == "bind-roots":
+            result = bind_control_roots(
+                resolved.path,
+                args.queue_root,
+                args.planning_root,
+                tuple(args.implementation_root or ()),
+                dry_run=args.dry_run,
+            )
+            verb = "would bind" if args.dry_run and result.changed else "bound"
+            if not result.changed:
+                verb = "already bound"
+            print(
+                f"cockpit-control: {verb} roots in {result.root}: "
+                f"queue={result.queue_root} planning={result.planning_root} "
+                f"implementation-roots={len(result.implementation_roots)}"
+            )
             return 0
         if args.command == "publish-event":
             return _report_event_publication(
@@ -12961,6 +13776,18 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
                     dry_run=args.dry_run,
                 )
             )
+        if args.command == "accept-dispatch":
+            result = accept_dispatch(
+                resolved.path, args.command_id, args.mission, args.worker,
+                args.queue_item, args.trace, args.payload_digest,
+                fresh_for=args.fresh_for, dry_run=args.dry_run,
+            )
+            print(json.dumps({
+                "outcome": result.outcome, "command_id": result.command_id,
+                "mission_id": result.mission_id, "start_work": result.start_work,
+                "event_id": result.event_id,
+            }, sort_keys=True))
+            return 0
         if args.command == "record-lifecycle":
             return _report_lifecycle_record(
                 record_worker_lifecycle(
@@ -13016,6 +13843,14 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "replace-mission":
             return _report_mission_control(_run_replace_mission(resolved.path, args))
         if args.command == "mission-status":
+            if args.json:
+                report = observe_mission_control(
+                    resolved.path, as_of=args.as_of, mission_id=args.mission,
+                    worker_id=args.worker, command_id=args.command_id,
+                )
+                from dataclasses import asdict
+                print(json.dumps(dict(asdict(report), root=str(report.root)), sort_keys=True))
+                return 0
             return _report_mission_status(
                 observe_mission_control(
                     resolved.path,

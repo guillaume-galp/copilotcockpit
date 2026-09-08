@@ -38,12 +38,15 @@ class ControlWakeSeamTests(unittest.TestCase):
             cadence="2099-01-01T23:59:00",
             blocker_threshold=5,
             lifecycle_state="pending",
+            control_root="/absolute/control",
         )
         record = control_wake.wake_intent_to_dict(wake)
         self.assertEqual(record["id"], "wake-1")
         self.assertEqual(record["mission"], "M-1")
         self.assertEqual(record["owner"], "owner-1")
         self.assertEqual(record["status"], "pending")
+        self.assertEqual(record["control_root"], "/absolute/control")
+        self.assertEqual(record["target"], {"session": "session-a", "window": "window-a"})
 
         allowed, message = control_wake.guard_wake_fire(record, "wake-1", Path("/dev/null"))
         self.assertTrue(allowed)
@@ -63,6 +66,7 @@ class ControlWakeSeamTests(unittest.TestCase):
 
     def test_duplicate_and_stale_lease_paths_preserve_fail_closed_behavior(self):
         events = []
+        self.addCleanup(control_wake.bind_facade, {"publish_control_event": cc.publish_control_event})
 
         def _publish(root, event_type, actor, payload, command):
             events.append((event_type, payload))

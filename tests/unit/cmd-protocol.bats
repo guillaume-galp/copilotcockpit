@@ -93,14 +93,14 @@ EOF
 	chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
 }
 
-@test "cockpit-protocol dispatch confirms alternate working markers" {
+@test "cockpit-protocol explicit bootstrap dispatch confirms alternate working markers" {
 	local brief="$BATS_TEST_TMPDIR/mission.txt"
 	cat > "$brief" <<'EOF'
 MISSION-ID: M-123
 TASK: validate working marker
 EOF
 
-	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --target ulysses:worker-dev --message-file "$brief" --enter-delay 0 --confirm-delay 0
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --bootstrap --target ulysses:worker-dev --message-file "$brief" --enter-delay 0 --confirm-delay 0
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "◉ Working"
 	grep -q "TASK: validate working marker" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
@@ -125,15 +125,26 @@ EOF
 	grep -q "portal-local:worker-dev" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
 }
 
-@test "cockpit-protocol worker dispatch refuses busy panes unless forced" {
+@test "cockpit-protocol worker dispatch refuses the direct mission bypass even when forced" {
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --worker worker-test --message "TASK: busy" --enter-delay 0 --confirm-delay 0
 	[ "$status" -ne 0 ]
-	echo "$output" | grep -q "looks busy"
+	echo "$output" | grep -Fq "direct mission dispatch is retired"
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --worker worker-test --message "TASK: forced" --enter-delay 0 --confirm-delay 0 --force
-	[ "$status" -eq 0 ]
-	grep -q "TASK: forced" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
-	grep -q "portal-local:worker-test" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -Fq "direct mission dispatch is retired"
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" ]
+}
+
+@test "cockpit-protocol mission refuses the retired direct mission bypass" {
+	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" mission \
+		--worker worker-dev \
+		--id 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af8 \
+		--message "TASK: must be durable"
+	[ "$status" -ne 0 ]
+	echo "$output" | grep -Fq "mission is retired"
+	echo "$output" | grep -Fq "cockpit-overseer tick"
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt" ]
 }
 
 @test "cockpit-protocol status json includes worker states and reports" {
@@ -141,7 +152,7 @@ EOF
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q '"session": "portal-local"'
 	echo "$output" | grep -q '"status": "available"'
-	echo "$output" | grep -q '"status": "working"'
+	echo "$output" | grep -q '"observation": "working"'
 	echo "$output" | grep -q '"report": "WORKER-DEV DONE"'
 }
 
@@ -188,14 +199,18 @@ EOF
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" ask \
 		--worker "$worker" \
-		--blocked-on "root validation" \
-		--question "Should not persist?"
+		--command-id 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af8 \
+		--mission 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af9 \
+		--queue-item QI-root-test --trace 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af7 \
+		--category root-validation --body-ref note:question --payload '{}'
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is required"
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" reply \
-		--worker "$worker" \
-		--answer "Should not persist."
+		--command-id 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af6 \
+		--answers 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af8 \
+		--by operator --trace 0d8d7b28-8c9f-4d10-9d2f-9ebd1dc96af5 \
+		--category root-validation --body-ref note:answer --payload '{}'
 	[ "$status" -ne 0 ]
 	echo "$output" | grep -Fq "COCKPIT_CONTROL_ROOT is required"
 

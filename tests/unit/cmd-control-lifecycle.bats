@@ -138,7 +138,7 @@ for event in history.events:
 
 assert len(lifecycle) == 13, len(lifecycle)
 observed = sorted({record["state"] for _event, record in lifecycle})
-assert observed == sorted(cockpit_control.WORKER_LIFECYCLE_STATES), observed
+assert observed == sorted(set(cockpit_control.WORKER_LIFECYCLE_STATES) - {"pending-dispatch"}), observed
 
 for event, record in lifecycle:
     assert event.record["schema_version"] == cockpit_control.CONTROL_SCHEMA_VERSION
@@ -595,6 +595,7 @@ for state in cockpit_control.WORKER_LIFECYCLE_TERMINAL_STATES:
 assert sorted(cockpit_control.WORKER_LIFECYCLE_STATES) == sorted(
     set(cockpit_control.WORKER_LIFECYCLE_ACTIVE_STATES)
     | set(cockpit_control.WORKER_LIFECYCLE_TERMINAL_STATES)
+    | {"pending-dispatch"}
 )
 print("the transition table matches architecture section 9")
 ' "$MODULE_DIR"

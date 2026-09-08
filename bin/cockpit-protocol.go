@@ -19,7 +19,7 @@ func main() {
 	}
 
 	var err error
-	if !isHelpCommand(os.Args[1]) {
+	if !isHelpCommand(os.Args[1]) && !isDurableCommand(os.Args[1]) {
 		err = validateControlStore()
 	}
 	if err != nil {
@@ -27,6 +27,16 @@ func main() {
 		os.Exit(1)
 	}
 	switch os.Args[1] {
+	case "accept-dispatch", "record-lifecycle", "lifecycle-status", "raise-question",
+		"answer-question", "cancel-mission", "replace-mission", "acknowledge-command",
+		"command-status", "mission-status", "recover-dispatch":
+		err = controlCommand(os.Args[1], os.Args[2:])
+	case "heartbeat":
+		err = controlCommand("record-lifecycle", os.Args[2:])
+	case "access-prompt":
+		err = controlCommand("raise-question", append(os.Args[2:], "--kind", "access-prompt"))
+	case "hold":
+		err = controlCommand("answer-question", append(os.Args[2:], "--hold"))
 	case "meta":
 		err = cmdMeta(os.Args[2:])
 	case "dispatch":
@@ -48,13 +58,13 @@ func main() {
 	case "wait-report":
 		err = cmdWaitReport(os.Args[2:])
 	case "ask":
-		err = cmdAsk(os.Args[2:])
+		err = controlCommand("raise-question", os.Args[2:])
 	case "pending":
-		err = cmdPending(os.Args[2:])
+		err = controlCommand("mission-status", append(os.Args[2:], "--json"))
 	case "read-question":
-		err = cmdReadQuestion(os.Args[2:])
+		err = controlCommand("mission-status", append(os.Args[2:], "--json"))
 	case "reply":
-		err = cmdReply(os.Args[2:])
+		err = controlCommand("answer-question", os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -68,8 +78,31 @@ func main() {
 	}
 }
 
+// Durable verbs use the existing control command contract, never pane input,
+// permission inference, shared /tmp files, or a second lifecycle system.
+func controlCommand(verb string, args []string) error {
+	command := exec.Command(os.Getenv("COCKPIT_CONTROL_BIN"), append([]string{verb}, args...)...)
+	command.Env = os.Environ()
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	return command.Run()
+}
+
 func isHelpCommand(command string) bool {
 	return command == "-h" || command == "--help" || command == "help"
+}
+
+func isDurableCommand(command string) bool {
+	switch command {
+	case "status", "accept-dispatch", "record-lifecycle", "heartbeat", "lifecycle-status",
+		"raise-question", "ask", "access-prompt", "answer-question", "reply", "hold",
+		"cancel-mission", "replace-mission", "acknowledge-command", "command-status",
+		"mission-status", "pending", "read-question", "recover-dispatch":
+		// These verbs validate their own authority. A missing/stale derived
+		// ledger must not prevent read-only diagnosis or receipt replay.
+		return true
+	}
+	return false
 }
 
 func validateControlStore() error {
@@ -103,19 +136,26 @@ Usage:
   cockpit-protocol meta windows [--session SESSION]
   cockpit-protocol meta resolve-target --worker <worker-name> [--session SESSION]
   cockpit-protocol meta cockpit [--session SESSION] [--json]
-  cockpit-protocol dispatch (--target <session:window> | --worker <worker-name> [--session SESSION]) (--message <text> | --message-file <path>) [--force]
+  cockpit-protocol dispatch --bootstrap --target <session:window> (--message <text> | --message-file <path>) [--force]
   cockpit-protocol send (--target <session:window> | --worker <worker-name> [--session SESSION]) --text <text>
   cockpit-protocol tail (--target <session:window> | --worker <worker-name> [--session SESSION]) [--lines 20]
   cockpit-protocol watch (--target <session:window> | --worker <worker-name> [--session SESSION]) [--lines 20] [--interval 2]
   cockpit-protocol status [--workers all|worker-dev,worker-test] [--session SESSION] [--json]
-  cockpit-protocol mission --worker <worker-name> --id <mission-id> [--template <name>] (--message <text> | --message-file <path>) [--force]
+  cockpit-protocol mission ...  # retired; enqueue product work and run cockpit-overseer tick
   cockpit-protocol nudge --worker <worker-name> --trace-id <trace-id> --kind resend-report
   cockpit-protocol report --worker <worker-name> [--trace-id <trace-id>] [--format text|markdown]
   cockpit-protocol wait-report --worker <worker-name> [--trace-id <trace-id>] [--timeout 180]
-  cockpit-protocol ask --worker <worker-name> --blocked-on <text> --question <text> [--options "A|B|C"]
-  cockpit-protocol pending
-  cockpit-protocol read-question --worker <worker-name>
-  cockpit-protocol reply --worker <worker-name> --answer <text>
+  cockpit-protocol accept-dispatch|record-lifecycle|heartbeat <cockpit-control arguments>
+  cockpit-protocol ask|raise-question|access-prompt <raise-question arguments>
+  cockpit-protocol reply|answer-question|hold <answer-question arguments>
+  cockpit-protocol cancel-mission|replace-mission|acknowledge-command <cockpit-control arguments>
+  cockpit-protocol recover-dispatch --dispatch-command UUID --command-id UUID --worker WORKER --inspect-safe --by OPERATOR --reason REASON --evidence TYPE:REF
+  cockpit-protocol pending|read-question [--worker WORKER] [--mission UUID]
+  cockpit-protocol mission-status|command-status|lifecycle-status <cockpit-control arguments>
+
+Use each durable verb's --help for its correlated IDs, digest, body references,
+and acknowledgement contract. Hold never answers or approves. Cancellation and
+replacement of accepted work require an applied worker acknowledgement.
 
 Worker addressing resolves sessions in this order: explicit --session, TMUX_SESSION,
 current tmux session, then auto-detection of a single cockpit session. Do not pass
@@ -130,12 +170,19 @@ func cmdDispatch(args []string) error {
 	session := fs.String("session", "", "tmux session for --worker resolution")
 	message := fs.String("message", "", "inline mission text")
 	messageFile := fs.String("message-file", "", "mission file path")
+	bootstrap := fs.Bool("bootstrap", false, "allow setup-time worker priming only")
 	force := fs.Bool("force", false, "dispatch even when worker pane looks busy")
 	enterDelay := fs.Int("enter-delay", 1, "seconds to wait before Enter")
 	confirmDelay := fs.Int("confirm-delay", 4, "seconds to wait before status check")
 	confirmLines := fs.Int("confirm-lines", 8, "lines captured for status check")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if !*bootstrap {
+		return errors.New("direct mission dispatch is retired; enqueue product work with cockpit-queue and run cockpit-overseer tick")
+	}
+	if strings.TrimSpace(*worker) != "" {
+		return errors.New("--bootstrap requires an explicit --target and cannot address a managed worker mission")
 	}
 
 	resolvedTarget, workerAddressed, err := resolveCommandTarget(*target, *worker, *session)
@@ -291,10 +338,17 @@ type cockpitMeta struct {
 }
 
 type workerStatus struct {
-	Target  string `json:"target"`
-	Status  string `json:"status"`
-	TraceID string `json:"trace_id,omitempty"`
-	Report  string `json:"report,omitempty"`
+	Target          string   `json:"target"`
+	Status          string   `json:"status"`
+	TraceID         string   `json:"trace_id,omitempty"`
+	Report          string   `json:"report,omitempty"`
+	Authoritative   bool     `json:"authoritative"`
+	MissionID       string   `json:"mission_id,omitempty"`
+	CommandID       string   `json:"command_id,omitempty"`
+	Lifecycle       string   `json:"lifecycle,omitempty"`
+	PendingCommands []string `json:"pending_commands,omitempty"`
+	Reachable       bool     `json:"reachable"`
+	Observation     string   `json:"observation,omitempty"`
 }
 
 type statusPayload struct {
@@ -401,24 +455,33 @@ func cmdStatus(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	resolved, err := resolveSession(*session)
+	workers := parseWorkers(*workersArg)
+	command := exec.Command(os.Getenv("COCKPIT_CONTROL_BIN"), "protocol-status", "--workers", strings.Join(workers, ","))
+	output, err := command.Output()
 	if err != nil {
+		return fmt.Errorf("durable status unavailable: %w", err)
+	}
+	resolved, sessionErr := resolveSession(*session)
+	payload := statusPayload{Session: resolved}
+	if err := json.Unmarshal(output, &payload); err != nil {
 		return err
 	}
-	workers := parseWorkers(*workersArg)
-	payload := statusPayload{Session: resolved, Workers: map[string]workerStatus{}}
 	for _, worker := range workers {
 		target := fmt.Sprintf("%s:%s", resolved, worker)
-		text, err := captureTail(target, *lines)
-		if err != nil {
-			return err
+		text, err := "", sessionErr
+		if err == nil {
+			text, err = captureTail(target, *lines)
 		}
-		payload.Workers[worker] = workerStatus{
-			Target:  target,
-			Status:  statusLabel(text),
-			TraceID: latestTraceID(text),
-			Report:  firstLine(extractReport(text)),
+		status := payload.Workers[worker]
+		status.Target = target
+		status.Reachable = err == nil
+		if err == nil {
+			status.Observation = statusLabel(text)
+			status.Report = firstLine(extractReport(text))
+		} else if !status.Authoritative {
+			status.Status = "unreachable"
 		}
+		payload.Workers[worker] = status
 	}
 	if *asJSON {
 		return printJSON(payload)
@@ -438,41 +501,7 @@ func cmdStatus(args []string) error {
 }
 
 func cmdMission(args []string) error {
-	fs := flag.NewFlagSet("mission", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	worker := fs.String("worker", "", "worker name")
-	session := fs.String("session", "", "tmux session")
-	id := fs.String("id", "", "mission id")
-	template := fs.String("template", "", "mission template name")
-	message := fs.String("message", "", "inline mission text")
-	messageFile := fs.String("message-file", "", "mission file path")
-	force := fs.Bool("force", false, "dispatch even when worker pane looks busy")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" || *id == "" {
-		return errors.New("--worker and --id are required")
-	}
-	if (*message == "") == (*messageFile == "") {
-		return errors.New("use exactly one of --message or --message-file")
-	}
-	content := *message
-	if *messageFile != "" {
-		b, err := os.ReadFile(*messageFile)
-		if err != nil {
-			return err
-		}
-		content = string(b)
-	}
-	var b strings.Builder
-	b.WriteString("MISSION-ID: " + *id + "\n")
-	if *template != "" {
-		b.WriteString("MISSION-TEMPLATE: " + *template + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(strings.TrimRight(content, "\n"))
-	b.WriteString("\n")
-	return dispatchContent(*worker, *session, b.String(), *force, 1, 4, 8)
+	return errors.New("mission is retired because it bypasses durable controller state; enqueue product work with cockpit-queue and run cockpit-overseer tick")
 }
 
 func cmdNudge(args []string) error {
@@ -565,135 +594,6 @@ func cmdWaitReport(args []string) error {
 		}
 		time.Sleep(2 * time.Second)
 	}
-}
-
-func cmdAsk(args []string) error {
-	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	worker := fs.String("worker", "", "worker name (worker-dev|worker-fix|worker-test)")
-	blocked := fs.String("blocked-on", "", "what is blocked")
-	question := fs.String("question", "", "question text")
-	options := fs.String("options", "", "optional choices split by |")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" || *blocked == "" || *question == "" {
-		return errors.New("--worker, --blocked-on, and --question are required")
-	}
-	path := fmt.Sprintf("/tmp/%s-question.txt", *worker)
-	var b strings.Builder
-	b.WriteString("WORKER: " + *worker + "\n")
-	b.WriteString("BLOCKED ON: " + *blocked + "\n")
-	b.WriteString("QUESTION: " + *question + "\n")
-	if strings.TrimSpace(*options) != "" {
-		b.WriteString("OPTIONS:\n")
-		for _, option := range strings.Split(*options, "|") {
-			option = strings.TrimSpace(option)
-			if option == "" {
-				continue
-			}
-			b.WriteString("  - " + option + "\n")
-		}
-	}
-	return os.WriteFile(path, []byte(b.String()), 0o600)
-}
-
-func cmdPending(args []string) error {
-	fs := flag.NewFlagSet("pending", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	files, err := filepath.Glob("/tmp/worker-*-question.txt")
-	if err != nil {
-		return err
-	}
-	for _, f := range files {
-		fmt.Println(f)
-	}
-	return nil
-}
-
-func cmdReadQuestion(args []string) error {
-	fs := flag.NewFlagSet("read-question", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	worker := fs.String("worker", "", "worker name")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" {
-		return errors.New("--worker is required")
-	}
-	path := fmt.Sprintf("/tmp/%s-question.txt", *worker)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	fmt.Print(string(b))
-	return nil
-}
-
-func cmdReply(args []string) error {
-	fs := flag.NewFlagSet("reply", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	worker := fs.String("worker", "", "worker name")
-	answer := fs.String("answer", "", "answer text")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *worker == "" || *answer == "" {
-		return errors.New("--worker and --answer are required")
-	}
-	path := fmt.Sprintf("/tmp/%s-answer.txt", *worker)
-	return os.WriteFile(path, []byte(*answer+"\n"), 0o600)
-}
-
-func dispatchContent(worker string, session string, content string, force bool, enterDelay int, confirmDelay int, confirmLines int) error {
-	target, err := resolveWorkerTarget(worker, session)
-	if err != nil {
-		return err
-	}
-	if !force {
-		if err := refuseBusyWorker(target, worker); err != nil {
-			return err
-		}
-	}
-	if strings.TrimSpace(content) == "" {
-		return errors.New("mission content is empty")
-	}
-	tmp, err := os.CreateTemp("", "cockpit-mission-*.txt")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if _, err := tmux("load-buffer", tmpPath); err != nil {
-		return err
-	}
-	if _, err := tmux("paste-buffer", "-t", target); err != nil {
-		return err
-	}
-	time.Sleep(time.Duration(enterDelay) * time.Second)
-	if _, err := tmux("send-keys", "-t", target, "", "Enter"); err != nil {
-		return err
-	}
-	time.Sleep(time.Duration(confirmDelay) * time.Second)
-	out, err := captureTail(target, confirmLines)
-	if err != nil {
-		return err
-	}
-	fmt.Print(out)
-	if !workerStarted(out) {
-		return errors.New("worker start not confirmed (missing working status marker)")
-	}
-	return nil
 }
 
 func resolveCommandTarget(target string, worker string, session string) (string, bool, error) {

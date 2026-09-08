@@ -133,6 +133,10 @@ path = sys.argv[1] + "/control.json"
 with open(path) as handle:
     record = json.load(handle)
 record["canonical_roots"]["queue_root"] = sys.argv[2]
+record["canonical_roots"]["planning_root"] = sys.argv[1] + "-planning"
+record["canonical_roots"]["implementation_roots"] = [sys.argv[1] + "-implementation"]
+record["planning_root"] = record["canonical_roots"]["planning_root"]
+record["implementation_roots"] = record["canonical_roots"]["implementation_roots"]
 record["queue_root"] = sys.argv[2]
 with open(path, "w") as handle:
     handle.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
@@ -205,9 +209,7 @@ cc_running_mission() {
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	CC_MISSION="$(cc_slot_mission)"
-	cc_emit --state accepted --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
-		--trace "$2" --sequence 1 --heartbeat-at 2026-09-04T10:01:00.000000Z \
-		--fresh-until "$3"
+	cc_accept_dispatch "$CC_MISSION" 2026-09-04T10:01:00.000000Z "$3"
 	cc_emit --state running --worker worker-dev --mission "$CC_MISSION" --queue-item "$1" \
 		--trace "$2" --sequence 2 --heartbeat-at 2026-09-04T10:02:00.000000Z \
 		--fresh-until "$3"
@@ -263,9 +265,7 @@ cc_expired_cockpit() {
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 0 ]
 	CC_MISSION="$(cc_slot_mission)"
-	cc_emit --state accepted --worker worker-dev --mission "$CC_MISSION" --queue-item "$CC_ITEM" \
-		--trace 11111111-1111-4111-8111-111111111111 --sequence 1 \
-		--heartbeat-at 2026-09-04T10:00:00.000000Z --fresh-until 2026-09-04T10:02:00.000000Z
+	cc_accept_dispatch "$CC_MISSION" 2026-09-04T10:00:00.000000Z 2026-09-04T10:02:00.000000Z
 	CC_SEQUENCE=2
 }
 
@@ -376,27 +376,26 @@ print("2026-09-04T%02d:%02d:00.000000Z" % (total // 60, total % 60))
 	[ "$(cc_recovery_actions "$COCKPIT_CONTROL_ROOT" | awk '{print $1}' | tr '\n' ' ')" = "nudge troubleshoot " ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_cancellations"])')" -eq 1 ]
 
-	# The replacement ended the episode by creating a new mission on the same
-	# single slot; the prior mission is `replaced`, which is a decision, and is
-	# never `failed`, which no timeout may ever produce.
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "replaced" ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "reserved" ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["replaces"]')" = "$mission" ]
+	# An unanswered replacement request cannot pretend the worker stopped.
+	# The original mission and slot remain active until a cooperative receipt.
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "running" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "active" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["replaces"]')" = "None" ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["active_mission_id"]')" = \
 		"$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" ]
 	cc_absent_events '"state": "failed"'
 
-	# Ticking on for a long time adds nothing: the episode is over and every
-	# later tick terminates cleanly with the situation already recorded.
+	# Silence exhausts the ladder once and stays escalated without killing or
+	# forging any receipt from the worker.
 	local settled
 	settled="$(cc_events "$COCKPIT_CONTROL_ROOT")"
 	for moment in 11:00 11:30 12:00 13:00 14:00; do
 		cc_tick --as-of "2026-09-04T${moment}:00.000000Z"
-		[ "$status" -eq 0 ]
+		[ "$status" -eq 1 ]
 		cc_absent_output "^recovery rung"
 	done
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq $((settled + 1)) ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["controller"]["reason"]')" = "mission-in-progress" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["controller"]["reason"]')" = "bounded-recovery-escalated" ]
 	run "$CONTROL_BIN" validate
 	[ "$status" -eq 0 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"]["worker-dev"]["conflicts"])')" -eq 0 ]
@@ -464,15 +463,15 @@ print("2026-09-04T%02d:%02d:00.000000Z" % (total // 60, total % 60))
 	done
 	cc_absent_events '"state": "failed"'
 	cc_absent_events '"failed"'
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "replaced" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "running" ]
 
-	# Long after every declared deadline expired, the mission the ladder ended is
-	# `replaced` -- an explicit decision -- and nothing anywhere is `failed`.
+	# Long after every deadline, the silent worker is still recorded running.
+	# Neither replacement nor failure can be inferred from a request.
 	run "$CONTROL_BIN" lifecycle-status --as-of 2026-09-05T00:00:00.000000Z
 	[ "$status" -eq 0 ]
 	cc_absent_output "state failed"
 	echo "$output" | grep -Fq "$mission worker worker-dev"
-	echo "$output" | grep -Fq "state replaced"
+	echo "$output" | grep -Fq "state running"
 
 	# And the queue item the mission implements was never touched by any of it:
 	# the controller reads product-work authority and never writes it.
@@ -651,7 +650,7 @@ print("episode-keyed-on-newest-evidence", revision == state.missions[sys.argv[3]
 	# order, and not one repeated rung anywhere in it.
 	[ "$(cc_recovery_actions "$COCKPIT_CONTROL_ROOT" | awk '{print $1}' | tr '\n' ' ')" = "nudge troubleshoot " ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_cancellations"])')" -eq 1 ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["replaces"]')" = "$mission" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" = "$mission" ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 5 ]
 
 	# The replacement rung pinned its record to the explicit moment the tick was
@@ -659,24 +658,27 @@ print("episode-keyed-on-newest-evidence", revision == state.missions[sys.argv[3]
 	[ "$(cc_replacement "$COCKPIT_CONTROL_ROOT" requested_at)" = "2026-09-04T11:00:00.000000Z" ]
 	[ "$(cc_replacement "$COCKPIT_CONTROL_ROOT" replaced_mission_id)" = "$mission" ]
 
-	# The episode is over and the same cadence goes on forever without producing
-	# one further rung: the ladder is finite in wall-clock time, not merely
-	# finite per key. Nothing anywhere was ever marked failed by a timeout.
-	for moment in 11:11 11:21 11:31 11:41; do
-		cc_expired_report "$moment"
-	done
+	# The worker has not acknowledged replacement. Interleave reports and ticks
+	# in real temporal order: every report is already expired when observed.
 	settled="$(cc_events "$COCKPIT_CONTROL_ROOT")"
-	for moment in 11:20 11:30 11:40 12:40 20:00; do
+	local pair
+	for pair in 11:11/11:20 11:21/11:30 11:31/11:40 11:41/11:50; do
+		cc_expired_report "${pair%/*}"
+		cc_tick --as-of "2026-09-04T${pair#*/}:00.000000Z"
+		[ "$status" -eq 1 ]
+		cc_absent_output "^recovery rung"
+	done
+	for moment in 12:40 20:00; do
 		cc_tick --as-of "2026-09-04T${moment}:00.000000Z"
-		[ "$status" -eq 0 ]
+		[ "$status" -eq 1 ]
 		cc_absent_output "^recovery rung"
 	done
 	[ "$(cc_recovery_actions "$COCKPIT_CONTROL_ROOT" | awk '{print $1}' | tr '\n' ' ')" = "nudge troubleshoot " ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 5 ]
-	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "replaced" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["worker_missions"]["'"$mission"'"]["lifecycle"]["state"]')" = "running" ]
 	cc_absent_events '"state": "failed"'
-	# Five wakes, one observation recorded once: no rung, and no re-investigation.
-	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq $((settled + 1)) ]
+	# Four worker reports and one escalation, with no repeated investigation.
+	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq $((settled + 5)) ]
 	run "$CONTROL_BIN" validate
 	[ "$status" -eq 0 ]
 }
@@ -1278,7 +1280,7 @@ print(
 	# longer describes the claim the slot now holds.
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"]["worker-dev"]["conflicts"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["conflicts"][0]["mission_id"]')" = "$intruder" ]
-	cc_tick --as-of 2026-09-04T10:35:00.000000Z
+	cc_tick --as-of 2026-09-04T10:34:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "contested 0"
 	cc_absent_output "worker-mission-conflict"

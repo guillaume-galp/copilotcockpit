@@ -32,7 +32,11 @@ setup() {
 cc_fresh_store() {
 	local root="$1" count="${2:-0}" index=0
 	export COCKPIT_CONTROL_ROOT="$root"
-	"$CONTROL_BIN" init >/dev/null
+	export COCKPIT_QUEUE_ROOT="$root-queue"
+	"$CONTROL_BIN" init \
+		--queue-root "$root-queue" \
+		--planning-root "$root-planning" \
+		--implementation-root "$root-implementation" >/dev/null
 	while [ "$index" -lt "$count" ]; do
 		"$CONTROL_BIN" publish-event --type control-preflight-fixture >/dev/null
 		index=$((index + 1))
@@ -79,6 +83,49 @@ cc_assert_preflight_readonly() {
 	[ ! -e "$root/ledger.json.tmp" ]
 	[ ! -e "$root/events.jsonl.tmp" ]
 	[ ! -e "$root/locks/control.lock" ]
+}
+
+@test "preflight reports operationally-blocked for an initialized store without declared work boundaries" {
+	local root="$BATS_TEST_TMPDIR/preflight-unbound"
+	export COCKPIT_CONTROL_ROOT="$root"
+	unset COCKPIT_QUEUE_ROOT
+	"$CONTROL_BIN" init >/dev/null
+
+	run "$CONTROL_BIN" preflight
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "preflight operationally-blocked in $root"
+	echo "$output" | grep -Fq "queue operationally-blocked configuration: no queue root is declared yet"
+	echo "$output" | grep -Fq "declared-paths operationally-blocked configuration: no planning root or implementation roots are declared yet"
+	echo "$output" | grep -Fq "[repair: cockpit-control bind-roots --queue-root <absolute queue root>"
+
+	run "$CONTROL_BIN" bind-roots \
+		--queue-root "$BATS_TEST_TMPDIR/queue" \
+		--planning-root "$BATS_TEST_TMPDIR/planning" \
+		--implementation-root "$BATS_TEST_TMPDIR/implementation"
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "cockpit-control: bound roots in $root"
+
+	export COCKPIT_QUEUE_ROOT="$BATS_TEST_TMPDIR/queue"
+	run "$CONTROL_BIN" preflight
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "preflight ready in $root"
+
+	run python3 -c '
+import json
+import sys
+root, queue, planning, implementation = sys.argv[1:5]
+metadata = json.load(open(root + "/control.json"))
+ledger = json.load(open(root + "/ledger.json"))
+expected = {
+    "control_root": root,
+    "queue_root": queue,
+    "planning_root": planning,
+    "implementation_roots": [implementation],
+}
+assert metadata["canonical_roots"] == expected, metadata["canonical_roots"]
+assert ledger["canonical_roots"] == expected, ledger["canonical_roots"]
+' "$root" "$BATS_TEST_TMPDIR/queue" "$BATS_TEST_TMPDIR/planning" "$BATS_TEST_TMPDIR/implementation"
+	[ "$status" -eq 0 ]
 }
 
 @test "preflight names every readiness dimension the control plane declares" {
@@ -410,7 +457,11 @@ with open(path, "w") as handle:
 @test "an interrupted cleanup quarantine is reported as debris and cleaned by explicit repair" {
 	local root="$BATS_TEST_TMPDIR/interrupted-cleanup-quarantine"
 	export COCKPIT_CONTROL_ROOT="$root"
-	"$CONTROL_BIN" init >/dev/null
+	export COCKPIT_QUEUE_ROOT="$root-queue"
+	"$CONTROL_BIN" init \
+		--queue-root "$root-queue" \
+		--planning-root "$root-planning" \
+		--implementation-root "$root-implementation" >/dev/null
 
 	run python3 -c '
 import subprocess
@@ -834,10 +885,10 @@ with open(path, "w") as handle:
 
 	export COCKPIT_QUEUE_ROOT="$queue"
 	run "$CONTROL_BIN" preflight
-	[ "$status" -eq 0 ]
+	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "queue ready ok: the declared queue root $queue exists"
 	echo "$output" | grep -Fq "declared-paths ready ok: 2 declared root(s) exist and are writable"
-	echo "$output" | grep -Fq "worker-capability advisory configuration: control.json declares legacy capabilities.control_store 0"
+	echo "$output" | grep -Fq "worker-capability operationally-blocked configuration: control.json declares legacy capabilities.control_store 0"
 	echo "$output" | grep -Fq "legacy-observed"
 
 	export COCKPIT_QUEUE_ROOT="$BATS_TEST_TMPDIR/other-queue"

@@ -12,6 +12,39 @@ Your overseer is in the `overseer` tmux window and will send you missions.
 Wait for a mission. Do not start work until one arrives.
 Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
+## Durable Dispatch Receipt
+
+Before acting on a controller brief, verify `TARGET-WORKER` is `worker-dev`
+and read its `BOUNDARIES`. Run the exact `cockpit-control accept-dispatch`
+command embedded in the brief, including its control root, command, mission,
+queue, trace, digest and `--fresh-for 300`. Only exit 0 with JSON
+`outcome: "accepted"` and `start_work: true` authorizes starting work.
+`duplicate` / `start_work: false` never authorizes another run, including after
+a cold restart. A lost response is uncertain: retry the same receipt, never
+invent an ID or use `record-lifecycle --state accepted` / a generic
+acknowledgement as a substitute. Errors, expired deadlines, missing receipt
+instructions, and legacy briefs require an overseer decision, not work.
+
+Acceptance atomically records lifecycle sequence 1 and the command receipt.
+Before that, dispatch is sequence 0 `pending-dispatch`, without a heartbeat.
+Before work, publish `record-lifecycle --state running` at sequence 2 with the
+same worker/mission/queue/trace and `--fresh-for 300`; renew freshness with
+strictly increasing sequences while active. Preserve correlation and declared
+boundaries through completion or blocking. Pane markers are diagnostic only.
+If a duplicate receipt is returned after context loss, report it and wait for
+explicit recovery; do not assume the previously accepted work never started.
+
+`cockpit-protocol accept-dispatch` and `heartbeat` are aliases for these control
+operations. Follow the global `e2e-cockpit` durable question/ACK contract and the
+[README operator examples](../../README.md#durable-operator-walkthrough).
+Poll `pending` / `read-question` (mission-status JSON) and `command-status` for
+control requests; `status.pending_commands` identifies commands awaiting ACK.
+Check IDs, target, boundaries and digest, acknowledge `accepted`, then `applied`
+only after actually applying/stopping, with a typed `--result`. Accepted-worker
+cancel/replace is cooperative, never satisfied by a DONE marker or pane reset.
+Keep durable lifecycle separate from pane diagnosis; no `send`/`nudge` as a
+mission, approval, or cancel shortcut.
+
 ---
 
 ## Your Responsibilities
@@ -48,9 +81,8 @@ reads when the graph is absent, stale, or inconclusive.
 
 ## Session Start — What to Expect
 
-The overseer may have reset your pane before dispatching this mission.
-This is intentional — it resets a long-task context. When this happens you will
-be re-primed with your role context.
+After a human-requested context reset, reload your role and inspect durable
+mission/command state. A reset does not cancel work or authorize a second run.
 
 **On every new mission, confirm you have role context**.
 If no context is present, load the role by invoking `$worker-dev`.
@@ -62,27 +94,20 @@ UUID in your completion report.
 If you are blocked and need user input before proceeding:
 
 ```bash
-# 1. Write your question via the cockpit protocol tool
-cockpit-protocol ask \
-  --worker worker-dev \
-  --blocked-on "<brief description of what you're working on>" \
-  --question "<your specific question>" \
-  --options "A) ...|B) ..."
-
-# 2. Signal the overseer in your pane output
-echo "❓ BLOCKED — question written via cockpit-protocol"
-echo "   Waiting for overseer to relay answer to /tmp/worker-dev-answer.txt"
-
-# 3. Wait for the answer (max 10 min)
-for i in $(seq 1 120); do
-  [ -f /tmp/worker-dev-answer.txt ] && break
-  sleep 5
-done
-
-# 4. Read the answer and continue
-cat /tmp/worker-dev-answer.txt
-rm -f /tmp/worker-dev-question.txt /tmp/worker-dev-answer.txt
+cockpit-protocol ask --command-id "<prompt-uuid>" --worker worker-dev \
+  --mission "<mission-uuid>" --queue-item "<QI-ID>" --trace "<trace-uuid>" \
+  --category implementation-decision --body-ref "file:/private/mission/question" \
+  --payload '{"kind":"question"}'
+cockpit-protocol pending --worker worker-dev
 ```
+
+Use `access-prompt` instead of `ask` for an explicitly reported permission
+prompt. Store its body privately; persist only typed refs/digests, never full
+secrets in journal, arguments or pane archives. Reuse the prompt ID/digest on
+retry. Wait for the explicit human reply correlated with `--answers`, not a
+temporary answer file or inferred answer. `hold` keeps a pending prompt
+unresolved; it is not approval. Uninstrumented prompts remain diagnostic until
+reported; never automatically approve them.
 
 ---
 

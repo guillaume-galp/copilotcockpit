@@ -77,8 +77,12 @@ answers with source/config files before writing cockpit scripts.
 
 ## Phase 2 — Generate the cockpit scripts
 
-If a reference implementation exists (e.g. another project's `tmux-cockpit.sh`),
-copy it and adapt the `# ── CONFIGURE ──` block. Otherwise generate from scratch.
+For a fresh scaffold, adapt the shipped `# ── CONFIGURE ──` blocks. Existing
+installed launchers and overlays are **project-owned** under
+`templates/e2e/MANIFEST.toml`: do not copy over them or regenerate them during an
+update. Inspect local customizations and present explicit, reviewed changes for
+the project owner to apply. Toolkit bootstrap installs tools/skills; it does
+not authorize overwriting project files.
 
 ### `e2e/tmux-cockpit.sh` — k8s cockpit
 
@@ -102,8 +106,8 @@ The script must:
 4. Start chromium/browserless in `chromium`
 5. Prime each worker pane with `prime_worker()` (see below)
 6. Set session-local FIFO and VP3 control roots:
-   `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"`,
-   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"`,
+   `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/cockpit-queue}"`,
+   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/docs/cockpit-control}"`,
    export both, then set both through `tmux set-environment -t "$SESSION"`.
 
 ### `e2e/tmux-cockpit-local.sh` — local dev cockpit
@@ -127,55 +131,44 @@ The script must:
 2. Start backend and frontend in their respective windows
 3. Prime each worker pane with `prime_worker()`
 4. Set session-local FIFO and VP3 control roots:
-   `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/queue}"`,
-   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/.cockpit/control}"`,
+   `COCKPIT_QUEUE_ROOT="${COCKPIT_QUEUE_ROOT:-$PROJECT_DIR/docs/cockpit-queue}"`,
+   `COCKPIT_CONTROL_ROOT="${COCKPIT_CONTROL_ROOT:-$PROJECT_DIR/docs/cockpit-control}"`,
    export both, then set both through `tmux set-environment -t "$SESSION"`.
 
-### `prime_worker()` function (required in both scripts)
+### Bootstrap boundaries before worker priming
+
+Confirm absolute, distinct queue/control paths and the actual planning and
+implementation repositories with the user. For a fresh store:
 
 ```bash
-prime_worker() {
-  local target="$1" # e.g. "${SESSION}:worker-dev"
-  local role="$2"   # e.g. "worker-dev"
-
-  # Try Copilot and Codex global+project overlay stacks.
-  local runtime_global=""
-  local runtime_repo=""
-  if [ -f "$HOME/.agents/skills/${role}/SKILL.md" ]; then
-    runtime_global="$HOME/.agents/skills/${role}/SKILL.md"
-  else
-    runtime_global="$HOME/.copilot/skills/${role}/SKILL.md"
-  fi
-  if [ -f ".agents/skills/${role}/SKILL.md" ]; then
-    runtime_repo=".agents/skills/${role}/SKILL.md"
-  else
-    runtime_repo=".github/skills/${role}/SKILL.md"
-  fi
-
-  for i in $(seq 1 10); do
-    local output
-    output=$(cockpit-protocol tail --target "$target" --lines 80 2>/dev/null || true)
-    if echo "$output" | grep -qE "agent|copilot|commands|help"; then break; fi
-    sleep 2
-  done
-
-  cat > /tmp/prime_${role}.txt << PRIME
-You are the ${role} in the $(basename "$(pwd)") E2E cockpit.
-
-Load the runtime skills in order:
-1. Runtime role: ${runtime_global}
-2. Project extension: ${runtime_repo}
-
-After reading your skills, confirm: "I am ${role} for $(basename "$(pwd)"), ready."
-PRIME
-
-  cockpit-protocol dispatch \
-    --target "$target" \
-    --message-file /tmp/prime_${role}.txt \
-    --force
-  rm /tmp/prime_${role}.txt
-}
+export COCKPIT_CONTROL_ROOT="/absolute/project/docs/cockpit-control"
+export COCKPIT_QUEUE_ROOT="/absolute/project/docs/cockpit-queue"
+cockpit-control init --queue-root "$COCKPIT_QUEUE_ROOT" \
+  --planning-root "/absolute/project/docs/plan" \
+  --implementation-root "/absolute/project"
+cockpit-control preflight
 ```
+
+For an existing unbound store, use `cockpit-control bind-roots` with those same
+root arguments; `--implementation-root` is repeatable and `bind-roots --dry-run`
+previews the operation. No manual metadata/event editing. Bare `init` /
+`cockpit-overseer start` creates structural state only; preflight must report
+`operationally-blocked` for absent work boundaries or required capability.
+The launchers export roots but do not infer or bind work authority for you.
+
+In each launcher, resolve `PROJECT_DIR` to an absolute path, export both roots
+before starting agents, and inject both into the selected tmux session:
+
+```bash
+tmux set-environment -t "$SESSION" COCKPIT_CONTROL_ROOT "$COCKPIT_CONTROL_ROOT"
+tmux set-environment -t "$SESSION" COCKPIT_QUEUE_ROOT "$COCKPIT_QUEUE_ROOT"
+```
+
+This is setup-time environment wiring, not permission for agents to use raw tmux
+for normal communication. Retain the shipped `prime_worker()` pattern: select
+the intended runtime, load its global role then matching project overlay, and
+use `cockpit-protocol dispatch --bootstrap --target ...` for role priming only.
+Never prime with product work, raw `send`/`nudge`, or automatic permission approval.
 
 ---
 
@@ -212,15 +205,30 @@ description: "Project extension for <role> in <AppName>."
 ## Key paths
 - Test book: e2e/test-book/
 - Audit trail: e2e/runs/
-- Worker question inbox: /tmp/worker-<role>-question.txt
+
+## Durable mission contract
+- Follow global e2e-cockpit for receipt, lifecycle, status, questions and ACKs.
+- Run the exact accept-dispatch receipt; only accepted + start_work=true starts.
+- Dispatch is sequence 0 without heartbeat; accepted is 1; heartbeat running is 2.
+- pending / read-question return mission-status JSON, not an answer-file inbox.
+- ask / access-prompt use correlated IDs and private typed body references.
+- Only explicit human replies; hold --answers never approves a pending prompt.
+- Inspect status.pending_commands and command-status; accepted-worker cancel/replace
+  requires accepted then applied ACK with the matching digest and typed --result.
+- Pane diagnosis is not durable lifecycle; reuse IDs/digests and journal no secrets.
 ```
 
 For the `e2e-cockpit` overlay specifically, include a visible
 `## Cockpit communication protocol` section that makes the managed-cockpit rule
 persistent in the generated project:
 
-- Use `cockpit-protocol` for dispatch, send, tail, watch, pending questions,
-  replies, `meta cockpit --json`, and `status --workers all --json`.
+- Use `cockpit-queue` plus `cockpit-overseer tick` for product missions.
+- Use `cockpit-protocol` for receipts, lifecycle, durable dialogs/ACKs, tail, watch,
+  `meta cockpit --json`, and `status --workers all --json`.
+- `send` / `nudge` are raw-input diagnostic or explicitly human-requested
+  exceptions, never normal mission, approval, or cancel operations.
+- Use `cockpit-protocol dispatch --bootstrap --target ...` only while priming a
+  newly created worker pane; never use it for product work.
 - Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
   checks and short-loop polling.
 - Do not use ad-hoc raw `tmux` commands for cockpit status, discovery, pane
@@ -242,7 +250,7 @@ SKIP_DB_RESET=true
 
 ---
 
-## Phase 5 — Verify + Install cockpit-wake
+## Phase 5 — Verify + Install the managed runtime set
 
 ```bash
 chmod +x e2e/tmux-cockpit.sh e2e/tmux-cockpit-local.sh
@@ -250,16 +258,29 @@ bash -n e2e/tmux-cockpit.sh && echo "k8s syntax OK"
 bash -n e2e/tmux-cockpit-local.sh && echo "local syntax OK"
 ```
 
-Install `cockpit-wake` from the bundled tool if not already on PATH:
+Install/update from the **copilotcockpit toolkit clone**, not the target
+project's harness. `cockpit-wake` depends on the installed shared runtime
+modules; never copy a standalone executable from a supposed harness tools folder.
+
 ```bash
-if ! command -v cockpit-wake &>/dev/null; then
-  cp e2e/tools/cockpit-wake ~/.local/bin/cockpit-wake
-  chmod +x ~/.local/bin/cockpit-wake
-  echo "cockpit-wake installed → ~/.local/bin/cockpit-wake"
-else
-  echo "cockpit-wake already installed ($(which cockpit-wake))"
-fi
+./bootstrap.sh global          # Copilot skills + complete tools/module set
+./bootstrap.sh codex-global    # Codex skills + complete tools/module set
+./bootstrap.sh doctor
 ```
+
+Use the [README operator walkthrough](../../README.md#durable-operator-walkthrough)
+for the bootstrap → FIFO/tick → receipt → question/hold → worker ACK flow.
+Keep all generated `.agents` and `.github` contracts aligned with the global
+`e2e-cockpit` guidance, including pending ACK inspection and durable status.
+
+For scheduling, require a ready control root and `--mission`, `--queue-item`,
+`--owner`, `--intent`, `--stop-condition`, plus the exact session/window.
+Schedules store structured control root/target and invoke controller ticks;
+`-m` is an inbox intent note, not pane input. `--dry-run` is read-only.
+`stop` aliases `cancel` even for fired recurring jobs; legacy list/cancel/stop
+need no root. `migrate` is diagnosis-only, never corrupt-state renaming or
+legacy-script rewriting. Explicitly stop old schedules, bootstrap/bind roots,
+pass preflight and reschedule with complete metadata.
 
 ---
 

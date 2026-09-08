@@ -13,6 +13,39 @@ Also load the `e2e-operator` role for the full run-audit workflow and TC-ID mapp
 Wait for a mission from the overseer. Do not start a test run unprompted.
 Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
+## Durable Dispatch Receipt
+
+Before running tests for a controller brief, verify `TARGET-WORKER` is
+`worker-test` and read its `BOUNDARIES`. Run the exact
+`cockpit-control accept-dispatch` command in the brief, preserving its control
+root, command, mission, queue, trace, digest and `--fresh-for 300`. Start only
+on exit 0 with JSON `outcome: "accepted"` and `start_work: true`.
+`duplicate` / `start_work: false` means do not start or repeat the run, including
+after a cold restart.
+
+On errors, expired deadlines, missing receipt instructions, or uncertain
+output, stop and report to the overseer. Retry only the same receipt, never a
+new ID, a generic acknowledgement, or `record-lifecycle --state accepted`.
+Legacy briefs need an explicit decision. Dispatch is `pending-dispatch`
+sequence 0 with no heartbeat; acceptance is lifecycle sequence 1.
+Before testing, publish `record-lifecycle --state running` at sequence 2 with
+the same worker/mission/queue/trace and `--fresh-for 300`; renew freshness with
+increasing sequences while active. Preserve correlation and boundaries through
+completion or blocking. Pane markers do not acknowledge a mission. If context
+is lost after acceptance, report the duplicate and wait for explicit recovery
+rather than assuming the tests never ran.
+
+`cockpit-protocol accept-dispatch` / `heartbeat` expose the same operations.
+See global `e2e-cockpit` and the
+[README operator walkthrough](../../README.md#durable-operator-walkthrough)
+for durable question/status/ACK examples. Inspect `pending` / `read-question`
+(mission-status JSON), `status.pending_commands` and `command-status`. For
+reply/hold/cancel/replace, verify the envelope, ACK `accepted`, apply the action
+(stop the run safely if cancelling), then ACK `applied` with the same command
+ID/digest and typed `--result`. A cancellation request is not a stopped test
+run; never forge an ACK from pane output. Durable lifecycle and pane diagnosis
+are separate. Raw `send`/`nudge` are not normal mission, approval or cancel paths.
+
 ---
 
 ## Your Responsibilities
@@ -34,8 +67,8 @@ Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
 ## Session Start — What to Expect
 
-The overseer may reset your pane before dispatching this mission.
-This is intentional — it resets a long-task context before a long test run.
+After a human-requested context reset, reload role guidance and inspect durable
+state. A reset does not cancel a test run or authorize re-execution.
 
 **On every new mission, confirm you have role context.**
 Use `$worker-test` and `$e2e-operator` if needed.
@@ -80,32 +113,50 @@ failure found →
 ## Dispatch Brief to worker-dev
 
 ```bash
-cat > /tmp/worker-mission.txt << 'MISSION'
-Fix brief from worker-test:
+FIX_BRIEF='Fix brief from worker-test:
   TC: <TC-ID>
   spec: e2e/tests/<file>.spec.ts
   failure: <error excerpt ≤ 200 chars>
   k8s-log clue: <relevant log line if any>
   classification: app bug | spec bug
-  action: <what needs to change>
-MISSION
+  action: <what needs to change>'
 
-cockpit-protocol dispatch \
-  --target "<session>:worker-dev" \
-  --message-file /tmp/worker-mission.txt
+FIX_QI_ID="$(cockpit-queue enqueue \
+  --approved \
+  --title "Fix <TC-ID>" \
+  --text "$FIX_BRIEF")"
+printf 'queued fix as %s\n' "$FIX_QI_ID"
+
+# Stop here while another item is active. After this mission reports a terminal
+# lifecycle and the overseer settles the current queue item:
+cockpit-queue start-next
+# Use fixing instead of implementing when routing to worker-fix.
+cockpit-queue transition "$FIX_QI_ID" implementing --reason "triaged E2E failure"
+cockpit-overseer tick
 ```
+
+Use `implementing` to route an app/spec fix to `worker-dev`, or `fixing` to
+route non-obvious diagnosis to `worker-fix`. Never activate the queued fix while
+the current item is still active.
 
 ---
 
 ## Ask Questions
 
 ```bash
-cockpit-protocol ask \
-  --worker worker-test \
-  --blocked-on "<description>" \
-  --question "<question>" \
-  --options "A) ...|B) ..."
+cockpit-protocol ask --command-id "<prompt-uuid>" --worker worker-test \
+  --mission "<mission-uuid>" --queue-item "<QI-ID>" --trace "<trace-uuid>" \
+  --category test-decision --body-ref "file:/private/mission/question" \
+  --payload '{"kind":"question"}'
+cockpit-protocol pending --worker worker-test
 ```
+
+Use `access-prompt` for explicitly reported permission prompts. Store bodies in
+private artifacts; journal only typed refs/digests, never credentials or full
+secret-bearing test output. Reuse IDs/digests on retries. Wait for an explicit
+human answer correlated by `--answers`; `hold` keeps the prompt unresolved, not
+approved. Uninstrumented prompts remain diagnostic until explicitly reported.
+Never auto-approve or infer answers, and never poll temporary answer files.
 
 Project overlay references:
 - `$HOME/.agents/skills/worker-test/SKILL.md`

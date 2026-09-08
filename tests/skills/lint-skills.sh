@@ -114,4 +114,5 @@ if [[ "$fails" -ne 0 ]]; then
 	exit 1
 fi
 printf 'lint-skills: ALL %d SKILL.md files OK\n' "$count"
+python3 "$ROOT/tests/skills/test_bug001_docs.py"
 exit 0

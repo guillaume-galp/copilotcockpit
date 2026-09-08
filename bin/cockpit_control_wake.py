@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -74,11 +76,21 @@ class WakeIntent:
     cadence: str
     blocker_threshold: int
     lifecycle_state: str
+    control_root: str = ""
 
 
 def read_crontab() -> Sequence[str]:
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-    return result.stdout.splitlines() if result.returncode == 0 else []
+    result = subprocess.run(
+        ["crontab", "-l"], capture_output=True, text=True,
+        env=dict(os.environ, LC_ALL="C"),
+    )
+    if result.returncode == 0:
+        return result.stdout.splitlines()
+    if result.returncode == 1 and "no crontab for" in result.stderr.lower():
+        return []
+    raise ControlStoreError(
+        f"cannot read crontab; refusing to replace scheduler state: {result.stderr.strip()}"
+    )
 
 
 def write_crontab(lines: Sequence[str]) -> None:
@@ -88,13 +100,15 @@ def write_crontab(lines: Sequence[str]) -> None:
 
 def add_cron_line(cron_expr: str, job_script: str, wake_id: str) -> None:
     lines = list(read_crontab())
-    lines.append(f"{cron_expr} {job_script}  {CRON_TAG}{wake_id}")
+    # cron treats percent as stdin/newline even inside shell quotes.
+    command = shlex.quote(job_script).replace("%", r"\%")
+    lines.append(f"{cron_expr} {command}  {CRON_TAG}{wake_id}")
     write_crontab(lines)
 
 
 def remove_cron_line(wake_id: str) -> None:
     lines = list(read_crontab())
-    filtered = [line for line in lines if f"{CRON_TAG}{wake_id}" not in line]
+    filtered = [line for line in lines if not line.rstrip().endswith(f"{CRON_TAG}{wake_id}")]
     write_crontab(filtered)
 
 
@@ -107,14 +121,20 @@ def schedule_at(at_bin: str, timespec: str, job_script: str) -> Optional[str]:
         capture_output=True,
         text=True,
     )
+    if result.returncode:
+        raise ControlStoreError(f"at refused wake schedule: {result.stderr.strip()}")
     for line in result.stderr.splitlines():
         if line.startswith("job "):
             return line.split()[1]
-    return None
+    raise ControlStoreError("at returned no job identity; inspect scheduler before retrying")
 
 
 def remove_at_job(job_number: str) -> None:
-    subprocess.run(["atrm", str(job_number)], capture_output=True)
+    if not str(job_number).isdigit():
+        raise ControlStoreError("stored at job identity must be numeric; inspect scheduler manually")
+    result = subprocess.run(["atrm", str(job_number)], capture_output=True, text=True)
+    if result.returncode:
+        raise ControlStoreError(f"atrm refused cancellation: {result.stderr.strip()}")
 
 
 def build_wake_intent(
@@ -137,6 +157,7 @@ def build_wake_intent(
     cadence: str = "",
     blocker_threshold: int = 0,
     lifecycle_state: str = "pending",
+    control_root: str = "",
 ) -> WakeIntent:
     return WakeIntent(
         wake_id=wake_id,
@@ -159,6 +180,7 @@ def build_wake_intent(
         cadence=cadence or "",
         blocker_threshold=int(blocker_threshold),
         lifecycle_state=lifecycle_state or "pending",
+        control_root=control_root,
     )
 
 
@@ -172,6 +194,8 @@ def wake_intent_to_dict(wake: WakeIntent) -> Dict[str, Any]:
         "at_job_id": wake.at_job_id,
         "session": wake.session,
         "window": wake.window,
+        "target": {"session": wake.session, "window": wake.window},
+        "control_root": wake.control_root,
         "message": wake.message,
         "status": wake.status,
         "created_at": wake.created_at,
@@ -187,16 +211,68 @@ def wake_intent_to_dict(wake: WakeIntent) -> Dict[str, Any]:
     }
 
 
+def validate_wake_identity(wake: Mapping[str, Any]) -> None:
+    """Reject legacy/ambiguous identity rather than deriving it from ambient context."""
+
+    for field in ("id", "mission", "queue_item", "owner", "intent", "stop_condition",
+                  "cadence", "control_root", "session", "window", "lifecycle_state"):
+        value = wake.get(field)
+        if not isinstance(value, str) or not value.strip() or "\0" in value:
+            raise ControlStoreError(f"wake requires stored {field}")
+    if not re.fullmatch(r"wake-[A-Za-z0-9_-]+", wake["id"]):
+        raise ControlStoreError("wake id is not a safe scheduler identity")
+    if not Path(wake["control_root"]).is_absolute():
+        raise ControlStoreError("stored control_root must be an absolute path")
+    target = wake.get("target")
+    if not isinstance(target, dict) or target != {
+        "session": wake["session"], "window": wake["window"]
+    }:
+        raise ControlStoreError("wake requires unambiguous stored target session/window")
+    for field in ("session", "window"):
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*" if field == "session"
+                            else r"[A-Za-z0-9_][A-Za-z0-9_.-]*", target[field]):
+            raise ControlStoreError(f"wake target {field} must be a literal tmux name")
+    if type(wake.get("blocker_threshold")) is not int or wake["blocker_threshold"] <= 0:
+        raise ControlStoreError("wake blocker_threshold must be a positive integer")
+    if wake.get("type") not in ("once", "cron"):
+        raise ControlStoreError("wake type must be once or cron")
+
+
+def wake_environment(wake: Mapping[str, Any], queue_root: str) -> Dict[str, str]:
+    """Build a child environment from authoritative state, never inherited wake hints."""
+
+    validate_wake_identity(wake)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("COCKPIT_WAKE_")}
+    env["COCKPIT_CONTROL_ROOT"] = wake["control_root"]
+    env["COCKPIT_QUEUE_ROOT"] = queue_root
+    for field in ("id", "label", "session", "window", "mission", "queue_item",
+                  "owner", "intent", "stop_condition", "cadence",
+                  "blocker_threshold", "lifecycle_state"):
+        env[f"COCKPIT_WAKE_{field.upper()}"] = str(wake.get(field, ""))
+    return env
+
+
 def guard_wake_fire(wake: Mapping[str, Any], wake_id: str, state_file: Path) -> Tuple[bool, str]:
     """Return whether a generated wake may run, or why it must stop."""
 
-    if not wake.get("owner") or not wake.get("mission"):
-        return False, "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'"
+    try:
+        validate_wake_identity(wake)
+    except ControlStoreError as exc:
+        return False, (
+            f"operationally-blocked (ADR-017): legacy/malformed wake {wake_id}: {exc}; "
+            "inspect retained state, stop/cancel the old schedule, then explicitly schedule "
+            "a new controller wake with full intent and configured distinct roots. "
+            "No direct-message execution or automatic history migration is supported."
+        )
 
     status = wake.get("status", "pending")
     lifecycle = wake.get("lifecycle_state", "")
     terminal_lifecycles = {"completed", "cancelled", "superseded", "terminal", "human-suspended"}
-    if status in ("cancelled", "fired") or lifecycle in terminal_lifecycles:
+    if (status not in ("pending", "fired")
+            or (status == "fired" and wake["type"] != "cron")
+            or lifecycle in terminal_lifecycles
+            or lifecycle not in ("pending", "active", "running")):
         return False, f"skipped: wake {wake_id} has lifecycle/status {lifecycle}/{status}"
 
     if wake.get("stop_condition_fulfilled"):
@@ -425,5 +501,10 @@ def release_tick_lease(root: Path, lease_id: str, identity: os.stat_result) -> N
         raise ControlStoreError(f"cannot release {label}: {exc}") from None
 
 
-def run_wake_controller_tick(overseer_bin: str, session: str, window: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([overseer_bin, "tick", "-s", session, "-w", window], check=False)
+def run_wake_controller_tick(
+    overseer_bin: str, session: str, window: str, *,
+    env: Optional[Mapping[str, str]] = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [overseer_bin, "tick", "-s", session, "-w", window], check=False, env=env
+    )

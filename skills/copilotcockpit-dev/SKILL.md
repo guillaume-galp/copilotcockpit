@@ -22,6 +22,22 @@ It is the **8th repo-managed skill**, installed to
 
 ## 1. Branch & commit conventions
 
+This runbook does not grant release or Git-operation authority beyond the
+mission. If the caller owns the final gate or forbids commits/push/PR/release,
+preserve their dirty work, report your scoped checks and stop at that boundary.
+
+For controller-dispatched development, follow the global `e2e-cockpit` and
+[README operator walkthrough](../../README.md#durable-operator-walkthrough):
+FIFO/tick only, `accept-dispatch` with `accepted` / `start_work=true` before work
+(sequence 1; dispatch sequence 0 has no heartbeat), then `heartbeat` running
+sequence 2. Use durable `ask` / `access-prompt`, `pending` / `read-question`
+(mission-status JSON) and explicit human-only replies, not pane-input approval.
+`hold --answers` correlates a pending prompt without approving it. Inspect
+`command-status` / pending commands; accepted-worker cancel/replace requires
+accepted then applied ACK with typed `--result`. Reuse IDs/digests, keep secret
+bodies out of the journal, and distinguish lifecycle from pane diagnosis.
+Unaccepted reservation recovery requires operator inspection, never forged ACKs.
+
 - Branch from **latest `main`** (`git pull --ff-only origin main` first), naming
   the branch `feature/<slug>` for a new capability or `fix/<slug>` for a bug fix.
 - **Never commit directly to `main`** — the *only* exception is the version-bump

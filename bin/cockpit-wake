@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cockpit-wake — schedule messages to active tmux cockpit panes.
+cockpit-wake — schedule bounded, intent-aware controller ticks.
 
 One-off awakenings use `at`; recurring awakenings use `cron`.
 Works whether attached or detached from the tmux session.
@@ -10,30 +10,37 @@ Commands:
   schedule --once "HH:MM [YYYY-MM-DD]"  -s SESSION -w WINDOW -m MESSAGE [--label TEXT]
   schedule --cron "MIN HR DOM MON DOW"   -s SESSION -w WINDOW -m MESSAGE [--label TEXT]
   list            — table of all awakenings + status
-  cancel ID       — cancel a pending awakening
+  cancel ID       — cancel a pending or recurring awakening (alias: stop ID)
   fire   ID       — fire immediately (ad-hoc, regardless of schedule)
   status          — summary counts
   clean           — remove fired/cancelled entries from state
 
+Schedules require --mission, --queue-item, --owner, --intent and --stop-condition.
+COCKPIT_CONTROL_ROOT must name a configured store with distinct declared work roots.
+--dry-run validates without writing state, jobs, inbox, leases, or scheduler entries.
+Legacy direct-message schedules remain listable/cancellable without a control root;
+execution requires explicit rescheduling with full identity (ADR-017).
+
 Examples:
-  cockpit-wake schedule --once "07:15" -s ulysses -w overseer \\
-      -m "Good morning! sbx01 is back up. Re-trigger @cli round 3." --label morning-cli
-  cockpit-wake schedule --once "07:15 2026-06-17" -s ulysses -w overseer \\
-      -m "Sprint review reminder" --label sprint-review
   cockpit-wake schedule --cron "15 7 * * 1-5" -s ulysses -w overseer \\
-      -m "Daily standup: check worker status" --label daily-standup
+      -m "Check progress" --mission M-1 --queue-item QI-1 --owner operator \\
+      --intent "bounded oversight" --stop-condition "mission terminal" --dry-run
   cockpit-wake list
   cockpit-wake cancel wake-1718492400
   cockpit-wake fire   wake-1718492400
 """
 
 import argparse
+import fcntl
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -44,8 +51,7 @@ from cockpit_control import (
     publish_control_event,
     resolve_control_root,
     validate_control_store,
-    initialize_control_store,
-    CONTROL_METADATA_NAME,
+    run_control_preflight,
     CONTROL_SCHEMA_VERSION,
 )
 
@@ -90,12 +96,59 @@ def load_state():
     if not STATE_FILE.exists():
         return {"awakenings": []}
     with open(STATE_FILE) as f:
-        return json.load(f)
+        state = json.load(f)
+    if (not isinstance(state, dict) or not isinstance(state.get("awakenings"), list)
+            or any(not isinstance(wake, dict) or not isinstance(wake.get("id"), str)
+                   for wake in state["awakenings"])):
+        raise ControlStoreError("malformed legacy wake state; retain it and inspect before rescheduling")
+    ids = [wake["id"] for wake in state["awakenings"]]
+    if len(set(ids)) != len(ids):
+        raise ControlStoreError("ambiguous duplicate wake identities; retain state and inspect schedules")
+    return state
 
 def save_state(state):
     ensure_wake_dirs()
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    # Readers (including cancellation and scheduler children) see a whole record.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=WAKE_DIR, prefix=".awakenings-",
+                                         delete=False) as f:
+            temporary = Path(f.name)
+            json.dump(state, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, STATE_FILE)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+@contextmanager
+def wake_state_lock():
+    """Serialize wake transactions independently of any cockpit control root."""
+    ensure_wake_dirs()
+    with (WAKE_DIR / "awakenings.lock").open("a") as handle:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ControlStoreError("wake state lock timed out; retry after the current writer")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+def mark_wake_fired(wake_id):
+    with wake_state_lock():
+        state = load_state()
+        current = get_awakening(state, wake_id)
+        if current and current["status"] != "cancelled":
+            current["status"] = "pending" if current["type"] == "cron" else "fired"
+            current["fired_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            save_state(state)
 
 def get_awakening(state, id_):
     for a in state["awakenings"]:
@@ -104,7 +157,7 @@ def get_awakening(state, id_):
     return None
 
 def gen_id():
-    return f"wake-{int(time.time())}"
+    return f"wake-{time.time_ns()}"
 
 # ── Crontab helpers ────────────────────────────────────────────────────────────
 CRON_TAG = control_wake.CRON_TAG
@@ -139,6 +192,8 @@ def parse_once_timespec(once_str):
     Returns (at_timespec_str, iso_str) — at_timespec is passed directly to `at`.
     """
     parts = once_str.strip().split()
+    if not 1 <= len(parts) <= 2:
+        raise ValueError("--once requires HH:MM [YYYY-MM-DD]")
     time_part = parts[0]
     hh, mm = [int(x) for x in time_part.split(":")]
 
@@ -151,6 +206,8 @@ def parse_once_timespec(once_str):
         if candidate <= now:
             candidate += timedelta(days=1)
         target = candidate
+    if target <= datetime.now():
+        raise ValueError("--once must be in the future")
 
     # `at` accepts "HH:MM MMDDYY" or "HH:MM MM/DD/YY" or natural language
     at_timespec = target.strftime("%H:%M %m/%d/%Y")
@@ -167,84 +224,17 @@ def write_inbox(id_, label, message, fired_at):
         f.write(entry)
 
 # ── Fire script ────────────────────────────────────────────────────────────────
-# ── Fire script ────────────────────────────────────────────────────────────────
-def make_fire_script(id_, session, window, message, control_root, label="", 
-                     mission="", queue_item="", owner="", intent="",
-                     stop_condition="", cadence="", blocker_threshold=0,
-                     lifecycle_state="pending"):
-    """Write a standalone bash fire script. Used by both at and cron.
-
-    The script writes the message to the inbox and invokes the controller
-    tick (cockpit-overseer tick) with wake metadata exported in the
-    environment. Legacy wakes missing owner or mission are blocked with
-    migration guidance.
-    """
+def make_fire_script(id_):
+    """A scheduler holds only a locator; every invocation reloads and guards state."""
     ensure_wake_dirs()
     script  = JOBS_DIR / f"{id_}.sh"
-    msg_file = JOBS_DIR / f"{id_}.msg"
-    msg_file.write_text(message)          # pre-written message file for controller
-    notify_bin = subprocess.run(["which", "notify-send"], capture_output=True, text=True).stdout.strip()
-    if notify_bin:
-        notify_line = (
-            f"{shlex.quote(notify_bin)} {shlex.quote('cockpit-wake ⏰')} {shlex.quote(label or id_)} 2>/dev/null || true"
-        )
-    else:
-        notify_line = "true  # notify-send not available"
-
-    try:
-        blocker_threshold_int = int(blocker_threshold)
-    except Exception:
-        blocker_threshold_int = 0
-
-
+    runtime_path = os.pathsep.join((str(Path(OVERSEER_BIN).parent), str(Path(SELF).parent)))
     content = f'''#!/usr/bin/env bash
 # cockpit-wake fire script — {id_}
 # Auto-generated — do not edit manually.
-
-TMUX_BIN={shlex.quote(TMUX_BIN)}
-PYTHON={shlex.quote(PYTHON_BIN)}
-OVERSEER={shlex.quote(OVERSEER_BIN)}
-SELF={shlex.quote(SELF)}
-MSG_FILE={shlex.quote(str(msg_file))}
-export COCKPIT_CONTROL_ROOT={shlex.quote(str(control_root))}
-# exported wake metadata for controller ticks
-export COCKPIT_WAKE_ID={shlex.quote(id_)}
-export COCKPIT_WAKE_LABEL={shlex.quote(label or id_)}
-export COCKPIT_WAKE_SESSION={shlex.quote(session)}
-export COCKPIT_WAKE_WINDOW={shlex.quote(window)}
-export COCKPIT_WAKE_MISSION={shlex.quote(mission)}
-export COCKPIT_WAKE_QUEUE_ITEM={shlex.quote(queue_item)}
-export COCKPIT_WAKE_OWNER={shlex.quote(owner)}
-export COCKPIT_WAKE_INTENT={shlex.quote(intent)}
-export COCKPIT_WAKE_STOP_CONDITION={shlex.quote(stop_condition)}
-export COCKPIT_WAKE_CADENCE={shlex.quote(cadence)}
-export COCKPIT_WAKE_BLOCKER_THRESHOLD={shlex.quote(str(blocker_threshold_int))}
-export COCKPIT_WAKE_LIFECYCLE_STATE={shlex.quote(lifecycle_state)}
-# message body available at $MSG_FILE
-FIRED_AT="$(date '+%Y-%m-%dT%H:%M:%S')"
-
-# 1. Write to persistent inbox — readable by any future Copilot session
-# 3. Block legacy/malformed wakes that lack mission or owner — fail closed before any side effects
-if [ -z "$COCKPIT_WAKE_OWNER" ] || [ -z "$COCKPIT_WAKE_MISSION" ]; then
-  echo "blocked: legacy wake missing owner or mission; migrate using 'cockpit-wake migrate'" >&2
-  exit 1
-fi
-
-"$PYTHON" "$SELF" _write-inbox {shlex.quote(id_)} {shlex.quote(label or id_)} "$MSG_FILE" "$FIRED_AT" || exit $?
-
-# 2. Desktop notification (if available)
-{notify_line}
-
-
-# 3b. Deterministic guard: check persisted wake lifecycle/stop condition and skip if terminal
-"$PYTHON" "$SELF" _guard-fire {shlex.quote(id_)} || exit $?
-
-
-# 4. Acquire a bounded wake lease, then invoke one controller tick
-"$PYTHON" "$SELF" _tick-with-lease {shlex.quote(id_)} {shlex.quote(session)} {shlex.quote(window)} || exit $?
-
-# 5. Mark awakening as fired in state
-"$PYTHON" "$SELF" _mark-fired {shlex.quote(id_)}
+export HOME={shlex.quote(str(Path.home()))}
+export PATH={shlex.quote(runtime_path)}:"$PATH"
+exec {shlex.quote(PYTHON_BIN)} {shlex.quote(SELF)} _tick-with-lease {shlex.quote(id_)}
 '''
     script.write_text(content)
     script.chmod(0o755)
@@ -252,16 +242,60 @@ fi
 
 # ── Internal sub-commands (called by fire scripts) ─────────────────────────────
 def cmd_mark_fired(args):
-    state = load_state()
-    a = get_awakening(state, args.id)
-    if a:
-        a["status"]   = "fired"
-        a["fired_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    save_state(state)
+    a = get_awakening(load_state(), args.id)
+    require_wake_context(a, args.id)
+    mark_wake_fired(args.id)
 
 def cmd_write_inbox(args):
-    msg = Path(args.msg_file).read_text() if Path(args.msg_file).exists() else args.msg_file
-    write_inbox(args.id, args.label, msg, args.fired_at)
+    wake = get_awakening(load_state(), args.id)
+    require_wake_context(wake, args.id)
+    write_inbox(args.id, wake.get("label", ""), wake.get("message", ""), args.fired_at)
+
+
+def require_ready_root(root):
+    """Validate canonical identity and supported preflight without any writes."""
+    metadata = validate_control_store(root)
+    roots = metadata["canonical_roots"]
+    queue = roots.get("queue_root")
+    planning = roots.get("planning_root")
+    implementations = roots.get("implementation_roots")
+    if not queue or not planning or not implementations:
+        raise ControlStoreError(
+            "required queue/planning/implementation boundaries are absent; use "
+            "cockpit-control bind-roots with explicit absolute work roots"
+        )
+    paths = [str(root), queue, planning, *implementations]
+    if any(not Path(path).is_absolute() for path in paths):
+        raise ControlStoreError("all wake control/work roots must be absolute")
+    canonical = [Path(path).resolve() for path in paths]
+    if len(set(canonical)) != len(canonical):
+        raise ControlStoreError("wake control and work roots must be distinct")
+    # Preflight compares queue environment with metadata. Stored canonical state
+    # wins at wake execution time, including after shell/tmux context loss.
+    old_queue = os.environ.get("COCKPIT_QUEUE_ROOT")
+    try:
+        os.environ["COCKPIT_QUEUE_ROOT"] = queue
+        report = run_control_preflight(root, source="stored wake")
+    finally:
+        if old_queue is None:
+            os.environ.pop("COCKPIT_QUEUE_ROOT", None)
+        else:
+            os.environ["COCKPIT_QUEUE_ROOT"] = old_queue
+    if report.blocked:
+        details = "; ".join(f"{f.dimension}: {f.detail}" for f in report.actionable)
+        raise ControlStoreError(f"preflight {report.status}: {details}; run cockpit-control preflight")
+    return queue
+
+
+def require_wake_context(wake, wake_id):
+    if not isinstance(wake, dict):
+        raise ControlStoreError(f"wake entry {wake_id} not found in {STATE_FILE}")
+    allowed, message = control_wake.guard_wake_fire(wake, wake_id, STATE_FILE)
+    if not allowed:
+        raise ControlStoreError(message)
+    root = Path(wake["control_root"])
+    queue = require_ready_root(root)
+    return root, control_wake.wake_environment(wake, queue)
 
 
 def _utc_now() -> datetime:
@@ -337,21 +371,38 @@ def _release_tick_lease(root: Path, lease_id: str, identity: os.stat_result) -> 
 def cmd_tick_with_lease(args):
     state = load_state()
     wake = get_awakening(state, args.id)
-    if not wake:
-        print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
-        sys.exit(1)
-
-    root = args.control_root
-    lease_id, lease_identity = _acquire_tick_lease(root, args.id, args.session, args.window)
+    root, env = require_wake_context(wake, args.id)
+    session, window = wake["target"]["session"], wake["target"]["window"]
+    lease_id, lease_identity = _acquire_tick_lease(root, args.id, session, window)
     if not lease_id:
         print(f"skipped: wake {args.id} duplicate lease holder", file=sys.stderr)
         sys.exit(0)
 
     try:
-        control_wake.run_wake_controller_tick(OVERSEER_BIN, args.session, args.window)
+        # Stop and admission share a fence through actual process creation, not
+        # merely an in-flight flag. A successful stop cannot precede a new child.
+        with wake_state_lock():
+            current = get_awakening(load_state(), args.id)
+            if current != wake:
+                raise ControlStoreError("wake changed during lease acquisition; retry after inspection")
+            write_inbox(args.id, wake.get("label", ""), wake.get("message", ""),
+                        datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
+            process = subprocess.Popen(
+                [OVERSEER_BIN, "tick", "-s", session, "-w", window],
+                env=env, close_fds=True,
+            )
+        # Never wait under the state lock: the controller may itself read/stop
+        # wakes, and operators must remain able to cancel an already-running tick.
+        # close_fds also keeps the parent's lock descriptor out of the child.
+        with process:
+            returncode = process.wait()
+        if returncode:
+            return returncode
+        # Keep fired cron schedules pending; never resurrect a concurrent stop.
+        mark_wake_fired(args.id)
     finally:
         _release_tick_lease(root, lease_id, lease_identity)
-    sys.exit(0)
+    return 0
 
 # ── inbox ──────────────────────────────────────────────────────────────────────
 def cmd_guard_fire(args):
@@ -367,10 +418,7 @@ def cmd_guard_fire(args):
         print(f"blocked: wake entry {args.id} not found in {STATE_FILE}", file=sys.stderr)
         sys.exit(1)
 
-    allowed, message = control_wake.guard_wake_fire(a, args.id, STATE_FILE)
-    if not allowed:
-        print(message, file=sys.stderr)
-        sys.exit(1)
+    require_wake_context(a, args.id)
 
     # Otherwise allow the job to proceed
     sys.exit(0)
@@ -389,40 +437,19 @@ def cmd_inbox_clear(args):
 
 # ── schedule ───────────────────────────────────────────────────────────────────
 def cmd_schedule(args):
-    state = load_state()
+    load_state()
     id_   = gen_id()
     once  = args.once is not None
-
-    job_script = make_fire_script(
-        id_,
-        args.s,
-        args.w,
-        args.m,
-        args.control_root,
-        label=args.label or "",
-        mission=args.mission or "",
-        queue_item=args.queue_item or "",
-        owner=args.owner or "",
-        intent=args.intent or "",
-        stop_condition=args.stop_condition or "",
-        cadence=(args.cron if args.cron else (args.once if args.once else "")),
-        blocker_threshold=(args.blocker_threshold if args.blocker_threshold is not None else 0),
-        lifecycle_state=(args.lifecycle or "pending"),
-    )
-
-
     if once:
         at_timespec, iso_dt = parse_once_timespec(args.once)
-        at_job = schedule_at(at_timespec, f"{job_script}\n")
         cron_expr    = None
         schedule_desc = f"once @ {iso_dt}"
-        at_job_id    = at_job
     else:
-        cron_expr = args.cron
-        add_cron_line(cron_expr, job_script, id_)
+        cron_expr = validate_cron(args.cron)
+        if any(character in str(JOBS_DIR) for character in "\r\n"):
+            raise ControlStoreError("cron job path must not contain line breaks")
         schedule_desc = f"cron: {cron_expr}"
         iso_dt        = None
-        at_job_id     = None
 
     wake_intent = control_wake.build_wake_intent(
         id_,
@@ -433,25 +460,69 @@ def cmd_schedule(args):
         wake_type="once" if once else "cron",
         cron_expr=cron_expr,
         scheduled_at=iso_dt,
-        at_job_id=at_job_id,
         mission=args.mission or "",
         queue_item=args.queue_item or "",
         owner=args.owner or "",
         intent=args.intent or "",
         stop_condition=args.stop_condition or "",
         cadence=cron_expr if not once else (iso_dt or ""),
-        blocker_threshold=args.blocker_threshold if args.blocker_threshold is not None else 0,
+        blocker_threshold=args.blocker_threshold,
         lifecycle_state=args.lifecycle or "pending",
+        control_root=str(resolve_control_root().path),
     )
     entry = control_wake.wake_intent_to_dict(wake_intent)
-    state["awakenings"].append(entry)
-    save_state(state)
+    require_wake_context(entry, id_)
+    if args.lifecycle not in (None, "pending"):
+        raise ControlStoreError("new wake lifecycle must be pending")
+    if args.dry_run:
+        print(json.dumps({"outcome": "would-schedule", "wake": entry}, indent=2))
+        return
+
+    # All identity, cadence, boundary and capability checks precede job/state/
+    # scheduler writes. Persist first so an immediately runnable job sees intent.
+    with wake_state_lock():
+        state = load_state()
+        job_script = make_fire_script(id_)
+        state["awakenings"].append(entry)
+        save_state(state)
+        try:
+            if once:
+                entry["at_job_id"] = schedule_at(at_timespec, f"{shlex.quote(job_script)}\n")
+                save_state(state)
+            else:
+                add_cron_line(cron_expr, job_script, id_)
+        except (ControlStoreError, OSError, subprocess.SubprocessError):
+            # Retain cancellable evidence: at may have accepted a job despite losing
+            # its response. Never discard its authoritative wake identity.
+            entry["scheduler_error"] = "submission uncertain; inspect scheduler and cancel before retrying"
+            save_state(state)
+            raise
 
     print(f"✅ Scheduled  id={id_}  {schedule_desc}")
     print(f"   target : {args.s}:{args.w}")
     print(f"   message: {args.m[:80]}{'…' if len(args.m) > 80 else ''}")
-    if at_job_id:
-        print(f"   at job : {at_job_id}")
+    if entry["at_job_id"]:
+        print(f"   at job : {entry['at_job_id']}")
+
+
+def validate_cron(expression):
+    """Accept portable numeric five-field cron, not shell/scheduler directives."""
+    fields = expression.split()
+    if len(fields) != 5 or any(c in expression for c in "\r\n\0"):
+        raise ValueError("--cron requires a single five-field numeric expression")
+    for field, (low, high) in zip(fields, ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))):
+        for part in field.split(","):
+            match = re.fullmatch(r"(\*|\d+(?:-\d+)?)(?:/(\d+))?", part)
+            if not match:
+                raise ValueError("--cron supports numeric lists, ranges, wildcards and positive steps")
+            base, step = match.groups()
+            if step is not None and not 1 <= int(step) <= high + 1:
+                raise ValueError("--cron step is out of range")
+            if base != "*":
+                values = [int(value) for value in base.split("-")]
+                if any(not low <= value <= high for value in values) or values != sorted(values):
+                    raise ValueError("--cron field is out of range")
+    return " ".join(fields)
 
 # ── list ───────────────────────────────────────────────────────────────────────
 def cmd_list(args):
@@ -465,29 +536,37 @@ def cmd_list(args):
     print("─" * 100)
     icons = {"pending": "⏳", "fired": "✅", "cancelled": "❌"}
     for a in rows:
-        target  = f"{a['session']}:{a['window']}"
+        target  = f"{a.get('session', '?')}:{a.get('window', '?')}"
         sched   = (a.get("scheduled_at") or a.get("cron_expr") or "")[:19]
-        label   = a.get("label") or a["message"][:30]
-        icon    = icons.get(a["status"], "?")
+        label   = a.get("label") or a.get("message", "")[:30]
+        status = a.get("status", "legacy")
+        icon    = icons.get(status, "?")
         print(fmt.format(
-            a["id"], a["type"],
-            f"{icon} {a['status']}", sched, target, label
+            a["id"], a.get("type", "?"),
+            f"{icon} {status}", sched, target, label
         ))
 
 # ── cancel ─────────────────────────────────────────────────────────────────────
 def cmd_cancel(args):
+    with wake_state_lock():
+        return cancel_wake(args)
+
+def cancel_wake(args):
     state = load_state()
     a     = get_awakening(state, args.id)
     if not a:
         print(f"❌ Not found: {args.id}")
         sys.exit(1)
-    if a["status"] != "pending":
-        print(f"⚠️  Already {a['status']}: {args.id}")
+    if a.get("status") == "cancelled":
+        print(f"Already cancelled: {args.id}")
+        return 1
+    if a.get("status") == "fired" and a.get("type") != "cron":
+        print(f"⚠️  Already fired: {args.id}")
         sys.exit(1)
 
-    if a["type"] == "once" and a.get("at_job_id"):
+    if a.get("type") == "once" and a.get("at_job_id"):
         remove_at_job(a["at_job_id"])
-    elif a["type"] == "cron":
+    elif a.get("type") == "cron":
         remove_cron_line(args.id)
 
     script = JOBS_DIR / f"{args.id}.sh"
@@ -500,17 +579,11 @@ def cmd_cancel(args):
 
 # ── fire ───────────────────────────────────────────────────────────────────────
 def cmd_fire(args):
-    state  = load_state()
-    a      = get_awakening(state, args.id)
-    if not a:
-        print(f"❌ Not found: {args.id}")
-        sys.exit(1)
-    script = JOBS_DIR / f"{args.id}.sh"
-    if not script.exists():
-        print(f"❌ Fire script missing: {args.id}")
-        sys.exit(1)
-    subprocess.run([str(script)], check=True)
-    print(f"🔥 Fired: {args.id}")
+    # Never execute an old direct-message job, even when it still exists.
+    result = cmd_tick_with_lease(args)
+    if result == 0:
+        print(f"🔥 Fired: {args.id}")
+    return result
 
 # ── status ─────────────────────────────────────────────────────────────────────
 def cmd_status(args):
@@ -524,61 +597,49 @@ def cmd_status(args):
 
 # ── clean ──────────────────────────────────────────────────────────────────────
 def cmd_clean(args):
+    with wake_state_lock():
+        clean_wakes()
+
+def clean_wakes():
     state  = load_state()
     before = len(state["awakenings"])
-    state["awakenings"] = [a for a in state["awakenings"] if a["status"] == "pending"]
+    state["awakenings"] = [
+        a for a in state["awakenings"]
+        if a.get("status") not in ("fired", "cancelled")
+        or (a.get("type") == "cron" and a.get("status") != "cancelled")
+    ]
     save_state(state)
     print(f"🧹 Removed {before - len(state['awakenings'])} entries (fired/cancelled).")
 
 # ── main ───────────────────────────────────────────────────────────────────────
 def cmd_migrate(args):
-    """Migrate an existing environment into a VP3 control root.
-
-    This operation is intentionally additive: it creates a new control root
-    when absent, backs up readable but invalid metadata, refuses to mutate
-    when an unsupported future schema is present, and is idempotent.
-    """
-    root = args.control_root
+    """Read-only adoption diagnosis; never move live metadata or rewrite history."""
+    root = resolve_control_root().path
     try:
-        validate_control_store(root)
+        require_ready_root(root)
     except ControlStoreError as exc:
-        text = str(exc)
-        if "future schema_version" in text:
-            print(f"blocked: {text}")
-            sys.exit(1)
-        meta_path = root / CONTROL_METADATA_NAME
-        if meta_path.exists():
-            # backup existing metadata
-            stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
-            bak = root / f"{CONTROL_METADATA_NAME}.bak-{stamp}"
-            try:
-                meta_path.replace(bak)
-                print(f"backed-up: {meta_path} -> {bak}")
-            except OSError:
-                print(f"cannot backup corrupted {meta_path}; aborting")
-                sys.exit(1)
-            print("cockpit-wake: metadata backed up; please run 'cockpit-control repair-store' to continue")
-            sys.exit(1)
-        # If root does not exist, initialize it atomically.
-        if not root.exists():
-            try:
-                initialize_control_store()
-            except Exception as exc_init:
-                print(f"cockpit-wake: initialization failed: {exc_init}")
-                sys.exit(1)
-            print(f"initialized control root: {root}")
-            return
-        # Otherwise refuse to touch an existing populated root with missing metadata.
-        print(f"blocked: {root} exists but {CONTROL_METADATA_NAME} is missing or unreadable")
-        sys.exit(1)
-    else:
-        print(f"control root already current: {root}")
-        return
+        raise ControlStoreError(
+            f"{exc}; migration is diagnostic-only: retain all live metadata and immutable "
+            "history. Inspect with cockpit-control preflight. For a NEW empty control "
+            "root use cockpit-control init --queue-root <absolute queue root> "
+            "--planning-root <absolute planning root> --implementation-root "
+            "<absolute implementation root>; never reinitialize corrupt live authority."
+        ) from None
+    for wake in load_state()["awakenings"]:
+        try:
+            control_wake.validate_wake_identity(wake)
+        except ControlStoreError as exc:
+            raise ControlStoreError(
+                f"legacy wake {wake.get('id', '?')}: {exc}; state preserved. "
+                "Inspect and stop/cancel old schedules, then explicitly reschedule with "
+                "full intent. Existing scheduler scripts are not automatically migrated."
+            ) from None
+    print(f"control root already current: {root}; no state or history changed")
 
 
 def main():
     p = argparse.ArgumentParser(
-        description="cockpit-wake: schedule messages to tmux cockpit panes",
+        description="cockpit-wake: schedule bounded controller ticks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -590,21 +651,22 @@ def main():
     grp.add_argument("--once", metavar="\"HH:MM [YYYY-MM-DD]\"",
                      help="One-off: fire once at this time (uses `at`)")
     grp.add_argument("--cron", metavar="EXPR",
-                     help="Recurring: standard 5-field cron expression")
+                     help="Recurring: numeric 5-field cron (lists, ranges, wildcards, steps)")
     ps.add_argument("-s", required=True, metavar="SESSION", help="tmux session name")
     ps.add_argument("-w", required=True, metavar="WINDOW",  help="tmux window name")
-    ps.add_argument("-m", required=True, metavar="MESSAGE", help="Message to send to the pane")
+    ps.add_argument("-m", required=True, metavar="MESSAGE", help="Intent note retained in the inbox (not pasted to a pane)")
     ps.add_argument("--label", metavar="TEXT", help="Human-readable label")
-    ps.add_argument("--mission", help="mission id")
-    ps.add_argument("--queue-item", help="queue item id")
-    ps.add_argument("--owner", help="owner identity")
-    ps.add_argument("--intent", help="brief intent for the wake")
-    ps.add_argument("--stop-condition", help="stop condition expression")
-    ps.add_argument("--blocker-threshold", type=int, help="blocker threshold")
+    ps.add_argument("--mission", help="required mission id")
+    ps.add_argument("--queue-item", help="required queue item id")
+    ps.add_argument("--owner", help="required owner identity")
+    ps.add_argument("--intent", help="required brief intent for the wake")
+    ps.add_argument("--stop-condition", help="required stop condition expression")
+    ps.add_argument("--blocker-threshold", type=int, default=3, help="positive blocker threshold (default: 3)")
     ps.add_argument("--lifecycle", help="lifecycle state")
+    ps.add_argument("--dry-run", action="store_true", help="validate only; no state or scheduler writes")
 
     sub.add_parser("list",   help="List all awakenings")
-    pc = sub.add_parser("cancel", help="Cancel a pending awakening")
+    pc = sub.add_parser("cancel", aliases=["stop"], help="Cancel a pending/recurring awakening (alias: stop)")
     pc.add_argument("id")
     pf = sub.add_parser("fire",   help="Fire an awakening immediately")
     pf.add_argument("id")
@@ -612,7 +674,7 @@ def main():
     sub.add_parser("clean",  help="Remove fired/cancelled entries")
     sub.add_parser("inbox",       help="Show unread inbox messages from fired awakenings")
     sub.add_parser("inbox-clear", help="Clear the inbox")
-    sub.add_parser("migrate", help="migrate an existing environment into a VP3 control root")
+    sub.add_parser("migrate", help="read-only ADR-017 adoption diagnosis; no automatic wake/history migration")
 
     # Internal — called by fire scripts
     pi = sub.add_parser("_mark-fired"); pi.add_argument("id")
@@ -621,14 +683,15 @@ def main():
     pg = sub.add_parser("_guard-fire"); pg.add_argument("id")
     pt = sub.add_parser("_tick-with-lease")
     pt.add_argument("id")
-    pt.add_argument("session")
-    pt.add_argument("window")
+    pt.add_argument("session", nargs="?", help="legacy hint; stored target wins")
+    pt.add_argument("window", nargs="?", help="legacy hint; stored target wins")
 
     args = p.parse_args()
     dispatch = {
         "schedule":     cmd_schedule,
         "list":         cmd_list,
         "cancel":       cmd_cancel,
+        "stop":         cmd_cancel,
         "fire":         cmd_fire,
         "status":       cmd_status,
         "clean":        cmd_clean,
@@ -643,30 +706,14 @@ def main():
     if args.command not in dispatch:
         p.print_help()
         sys.exit(1)
-    # Commands that require a validated control root before running.
-    validated = {
-        "schedule",
-        "cancel",
-        "fire",
-        "clean",
-        "inbox-clear",
-        "_mark-fired",
-        "_write-inbox",
-        "_guard-fire",
-        "_tick-with-lease",
-    }
-    if args.command in validated:
-        try:
-            resolved_root = resolve_control_root()
-            validate_control_store(resolved_root.path)
-        except ControlStoreError as exc:
-            p.exit(1, f"cockpit-wake: {exc}\n")
-        args.control_root = resolved_root.path
-    elif args.command == "migrate":
-        # Migrate only needs the resolved root; it may create it.
-        resolved_root = resolve_control_root()
-        args.control_root = resolved_root.path
-    dispatch[args.command](args)
+    try:
+        if hasattr(args, "id") and not re.fullmatch(r"wake-[A-Za-z0-9_-]+", args.id):
+            raise ControlStoreError("wake id is not a safe scheduler identity")
+        if args.command in ("clean", "inbox-clear"):
+            validate_control_store(resolve_control_root().path)
+        return dispatch[args.command](args) or 0
+    except (ControlStoreError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        p.exit(1, f"cockpit-wake: operationally-blocked (ADR-017): {exc}\n")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

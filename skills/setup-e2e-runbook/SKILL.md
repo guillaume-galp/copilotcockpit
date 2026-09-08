@@ -23,6 +23,19 @@ paths, existing TC-IDs, and any existing chapters to avoid duplicating.
 `e2e/tmux-cockpit-local.sh` must already be configured.
 If not, run `/setup-e2e-cockpit` first.
 
+When runbook work is a product mission, use FIFO plus `cockpit-overseer tick`,
+not direct pane input. Follow the global `e2e-cockpit` receipt/dialog contract:
+`accept-dispatch` must return `accepted` and `start_work=true`; dispatch sequence
+0 has no heartbeat, acceptance is 1, and `heartbeat` running starts at 2.
+Clarify ambiguous expected behavior with `ask` / `access-prompt` and inspect
+`pending` / `read-question` (durable mission-status), never infer human answers.
+`hold` requires the pending prompt's `--answers` and does not approve it.
+Inspect pending commands via `command-status`; cooperative cancel/replace needs
+accepted then applied worker ACK with typed `--result`. Keep IDs/digests stable
+and bodies/secrets outside the journal. See the
+[README walkthrough](../../README.md#durable-operator-walkthrough) for usage;
+pane diagnosis is not lifecycle evidence or permission to run tests.
+
 ---
 
 ## Phase 1 — Discover feature domains

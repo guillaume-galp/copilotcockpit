@@ -25,8 +25,31 @@ This project's cockpit scripts ship as **runnable placeholders** with annotated
 | `tmux-cockpit.sh` | remote/k8s cockpit — log windows, port-forward, worker priming |
 | `tmux-cockpit-local.sh` | local dev cockpit — backend window + workers |
 
-Replace the `# ── CONFIGURE ──` defaults with the real values, then regenerate the
-project-specific sections of the `e2e-cockpit` / `e2e-operator` overlays.
+For a fresh scaffold, fill in `# ── CONFIGURE ──` defaults and project overlay
+sections. Existing launchers/overlays are project-owned: do not overwrite or
+regenerate them on upgrade. Present explicit changes for owner review.
+
+Follow global `setup-e2e-cockpit` for distinct absolute control/queue roots
+(`docs/cockpit-control`, `docs/cockpit-queue`), shell exports and tmux injection.
+Bootstrap with `cockpit-control init` or `bind-roots` using explicit queue,
+planning and repeatable implementation roots; pass `preflight` before work.
+Install complete tools/modules via toolkit `bootstrap.sh global` /
+`codex-global`, never a standalone executable copied from the harness.
+
+Preserve the global durable contract in both `.agents` and `.github` overlays:
+FIFO/tick only; `dispatch --bootstrap` only primes roles. `accept-dispatch`
+starts only on `accepted` / `start_work=true` (sequence 1; pending dispatch is
+0 without heartbeat); `heartbeat` running starts at 2. `ask` / `access-prompt`
+use private typed body refs; `pending` / `read-question` return mission-status
+JSON. Only explicit human replies; `hold --answers` never approves. Inspect
+`status.pending_commands` / `command-status`; accepted-worker cancel/replace
+requires accepted then applied ACK with matching digest and typed `--result`.
+Reuse IDs/digests, journal no secrets, keep lifecycle separate from pane
+diagnosis, and never use raw `send`/`nudge` for mission/approval/cancel.
+Follow the global scheduler example: all five intent fields and stored
+root/session/window, read-only `--dry-run`, `stop` alias of `cancel` including
+fired recurring jobs. Legacy `migrate` diagnoses only: explicitly stop old jobs,
+bootstrap/bind/preflight, then reschedule. No corrupt-state renaming or job rewrite.
 
 ---
 
@@ -52,3 +75,5 @@ specs, k8s manifests, or by asking the user):
 
 - Global: `~/.copilot/skills/{worker-dev,worker-fix,worker-test}/`
 - Repo overlays: `e2e/.github/skills/{worker-dev,worker-fix,worker-test}/`
+- Codex global: `~/.agents/skills/{worker-dev,worker-fix,worker-test}/`
+- Codex overlays: `e2e/.agents/skills/{worker-dev,worker-fix,worker-test}/`

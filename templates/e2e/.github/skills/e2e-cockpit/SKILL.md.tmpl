@@ -11,10 +11,14 @@ description: "@@APP_NAME@@ Playwright E2E cockpit: project topology overlay — 
 > Use `cockpit-overseer loop` for compact status checks instead of re-capturing
 > full panes in a loop.
 
-> **VP3 control store:** Before controller work, use the launcher-exported
-> absolute `COCKPIT_CONTROL_ROOT` and run `cockpit-overseer start`. The control
-> root may only fall back to the active tmux session when absent from the shell;
-> never derive it from the current directory.
+> **Control store:** Use distinct absolute `COCKPIT_CONTROL_ROOT` and
+> `COCKPIT_QUEUE_ROOT` (project defaults: `docs/cockpit-control` and
+> `docs/cockpit-queue`). Bootstrap with `cockpit-control init` plus explicit
+> `--queue-root`, `--planning-root`, repeatable `--implementation-root`, or
+> `bind-roots` for an initialized unbound store; pass `cockpit-control preflight`.
+> Bare `cockpit-overseer start` creates structure, not work authority. Never infer
+> roots from `cwd` or edit metadata/events. Existing launchers/overlays are
+> project-owned: explicitly review root exports and tmux injection, not overwrite.
 
 > **Control-plane context packet:** For VP3+ controller work, keep vocabulary and
 > ownership aligned with the copilotcockpit repository context packet
@@ -29,12 +33,39 @@ description: "@@APP_NAME@@ Playwright E2E cockpit: project topology overlay — 
 ## Cockpit communication protocol
 
 When a tmux cockpit is running, treat it as managed state. Use
-`cockpit-protocol` for all cockpit pane communication and observability
-(`dispatch`, `send`, `tail`, `watch`, `pending`, `read-question`, `reply`,
-`meta cockpit --json`, `status --workers all --json`).
+`cockpit-queue` plus `cockpit-overseer tick` for normal product missions.
+Use `cockpit-protocol` for receipts, lifecycle, durable dialogs/ACKs, `tail`,
+`watch`, `meta cockpit --json`, and `status --workers all --json`.
+`dispatch --bootstrap` only primes roles during setup; `send` / `nudge` are
+raw-input diagnostic or explicitly human-requested exceptions, never normal
+mission, approval or cancel operations.
 
 Use `cockpit-overseer status` / `cockpit-overseer loop` for compact status
 checks and short-loop polling.
+
+Follow global `e2e-cockpit` and the toolkit README operator walkthrough.
+Dispatch is `pending-dispatch` sequence 0 without heartbeat. Workers run the
+exact `accept-dispatch` receipt and start only on `accepted` / `start_work=true`
+(sequence 1); duplicates never restart work. `heartbeat` running starts at 2.
+`ask` / `access-prompt` report explicit prompts; `pending` / `read-question`
+return durable mission-status JSON. Relay only explicit human replies;
+`hold --answers` does not approve. Inspect `status.pending_commands` and
+`command-status`; accepted-worker cancel/replace needs accepted then applied ACK
+with matching digest and typed `--result`. Reuse IDs/digests; private bodies stay
+outside the journal, with no full secrets in metadata or pane archives.
+Durable lifecycle is separate from pane diagnosis (`available`, `working`,
+`awaiting-approval`, `held`, `blocked`, `unreachable`). Uninstrumented prompts
+need explicit reporting, never inferred answers or automatic permission approval.
+
+Expired or legacy missing-deadline unaccepted dispatches stay reserved until
+operator inspection proves no executing worker. Follow global `recover-dispatch`
+guidance (`--dispatch-command`, recovery `--command-id`, `--worker`,
+`--inspect-safe`, `--by operator`, `--reason`, typed `--evidence`); it fences late
+receipts, not kills workers or forges ACKs. Accepted work must stop cooperatively.
+Wakes invoke ticks with stored root/session/window and all five required intent
+fields; follow the global scheduler example. `--dry-run` is read-only,
+`stop` aliases `cancel` (including fired recurring); `migrate` diagnoses only.
+Stop legacy jobs explicitly, bootstrap/bind/preflight, then reschedule.
 
 Do not inspect or control the cockpit with ad-hoc raw `tmux` commands. This
 applies to read-only status requests as well as worker coordination. Do not
