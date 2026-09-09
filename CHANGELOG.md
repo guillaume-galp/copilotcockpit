@@ -17,6 +17,27 @@ architecture §9).
 
 _Nothing yet._
 
+## v0.10.0 — 2026-09-09
+
+### Added
+- Added reviewed, versioned mission footprints for repositories, writable
+  paths, shared resources, and provisioned worker identities.
+- Enabled strict-FIFO admission and parallel dispatch of demonstrably
+  independent missions to distinct worker instances.
+- Added immutable dispatch-time scope and queue-phase snapshots, conservative
+  overlap detection, cockpit-root authority enforcement, and addressed
+  clearance for concurrent active items.
+
+### Fixed
+- Fixed cockpit mission handoff timing with isolated tmux buffers, bounded paste
+  processing, and exactly one submit key.
+- Stopped automatic resubmission after uncertain delivery; transport enqueue no
+  longer implies worker acceptance or authorization to start.
+- Prevented completed-but-not-cleared queue items from being dispatched twice
+  while preserving legitimate later phases assigned to the same worker role.
+- Preserved occupied claims through holds, pending cancellation, terminal queue
+  state, missing worktrees, and recovery.
+
 ## v0.9.2 — 2026-09-08
 
 ### Fixed
