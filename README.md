@@ -31,7 +31,8 @@ Benefits:
 
 - **No orphan ideas**: accepted build requests persist until cleared or rejected.
 - **Lower overseer overhead**: queue commands replace repeated prompt boilerplate.
-- **Worker focus**: one active queue item prevents mission bleed across workers.
+- **Worker focus**: one mission per worker; reviewed, disjoint repositories may
+  use distinct workers concurrently, while unknown scopes remain serial.
 - **Auditable delivery**: queue events link the idea, worker trace, and E2E run
   evidence.
 - **Operator calm**: product owners can submit ideas at thought speed while the
@@ -101,7 +102,7 @@ Every skill ships as a plain Markdown `SKILL.md`. The global playbook lives in
 |------|---------|---------------|
 | `cockpit-protocol` | Durable mission protocol plus discovery, status, tail/watch and report extraction. `dispatch --bootstrap` is setup-only; raw `send`/`nudge` are diagnostic or explicitly human-requested exceptions. | yes |
 | `cockpit-overseer` | Overseer controller: control-store initialization, the deterministic one-action `tick` reconciler, plus root-validated delta polling, dispatch, reset, and append-only trace archive. | yes |
-| `cockpit-control` | Own the explicit versioned control store: atomic `init` / `bind-roots`, read-only `preflight`, durable command/lifecycle/dialog APIs, `accept-dispatch`, `recover-dispatch`, and derived `replay-ledger`. | yes |
+| `cockpit-control` | Own the explicit versioned control store: atomic `init` / `bind-roots`, empty-store `upgrade-capabilities`, read-only `preflight`, durable command/lifecycle/dialog APIs, `accept-dispatch`, `recover-dispatch`, and derived `replay-ledger`. | yes |
 | `cockpit-trace` | Replay and stitch archived comms by UUID trace / trace family. | yes |
 | `cockpit-queue` | FIFO request queue operator for intake, list, inspect, pause/resume, reject, start-next, and clear-current. | yes |
 | `cockpit-wake` | Schedule controller ticks; inspect with `list`, stop with `stop` / `cancel`, diagnose legacy state with `migrate`. | yes |
@@ -246,6 +247,38 @@ arguments (also `cockpit-overseer start`) creates only structural state, not
 product-work authority. Missing boundaries/capability make read-only `preflight`
 report `operationally-blocked` and exit nonzero.
 
+An **empty schema-v1 legacy store** already declaring `control_store: 1` and
+tool `cockpit-control: 1` can adopt missing `worker_lifecycle: 1` and
+`command_protocol: 1` without replacing its identity or canonical boundaries.
+Stop control and queue writers, back up the store, review its exact `control_id`
+and complete bound roots, then use the supported command (never edit metadata):
+
+```bash
+CONTROL_ID="replace-with-reviewed-control-UUID"
+cockpit-control upgrade-capabilities --expect-control-id "$CONTROL_ID" --dry-run
+cockpit-control upgrade-capabilities --expect-control-id "$CONTROL_ID"
+cockpit-control preflight
+```
+
+The read-only preview is provisional; the actual command revalidates under the
+control lock and transition guard. It atomically changes only missing supported
+capability declarations and `last_migration_at`, preserving creation time,
+identity, roots, and compatible extra metadata. An already-current **empty**
+store is a no-op. This declares store protocol support, **not worker enrollment,
+dispatch acceptance, or proof that any worker is idle**. Normal dispatch and
+`accept-dispatch` evidence remain required.
+
+This is **not historical migration**: it refuses any committed history,
+commands/escalations, queue items/history, unresolved candidates, unexpected
+store/queue contents, unsafe paths/symlinks, incomplete roots, incompatible or
+unknown capability declarations, and projections other than the exact empty
+ledger plus zero-byte `events.jsonl`. Empty queue `items/` and zero-byte queue
+`events.jsonl` are allowed. It never repairs or clears legacy evidence; no force
+or approval metadata bypasses these checks. Keep historical stores intact and
+inspect existing work before choosing a fresh configured root instead. Queue
+writers must remain stopped: the control lock does not serialize the independent
+queue CLI.
+
 Configure the launcher to export these same roots and inject both with
 `tmux set-environment -t "$SESSION"` before worker priming. This is launcher
 setup, not a normal agent communication path. Existing installed launchers and
@@ -256,6 +289,100 @@ set with `bootstrap.sh global` and/or `bootstrap.sh codex-global` from the toolk
 clone, not by copying a standalone executable out of a project's harness.
 
 ### FIFO dispatch and worker receipt
+
+Parallel admission is opt-in through a structured **version-1 footprint**.
+Save a JSON file such as `mission-footprint.json` (paths below are placeholders):
+
+```json
+{
+  "version": 1,
+  "status": "reviewed",
+  "rationale": "Reviewed: separate repository, planning outputs and runtime; no dependency on earlier work.",
+  "repositories": [
+    {"path": "/work/service-b", "upstream": "github.com/team/service-b", "branch": "feature-b"}
+  ],
+  "write_paths": ["/work/planning/service-b", "/work/planning/results/service-b"],
+  "resources": ["database:service-b-test", "tcp:127.0.0.1:8102"],
+  "workers": {"worker-dev": "worker-dev-2", "worker-test": "worker-test-2"}
+}
+```
+
+All top-level fields are required. `status` is `draft` or `reviewed`; a reviewed
+footprint needs at least one repository and a nonempty review rationale.
+`write_paths` lists **all writable planning/output paths outside repository
+claims**; `resources` lists exclusive shared runtime/external resource identities.
+Explicit empty arrays attest that there are no such claims. `workers` maps
+`worker-dev`, `worker-test`, or `worker-fix` to the default role ID or
+`<role>-<positive integer>`; omitted roles keep their default IDs.
+Provision matching tmux windows yourself; `--window` only adds diagnostics,
+never creates workers.
+
+The queue canonicalizes absolute paths and records each repository's
+`git_common_dir` (optional in input, required in stored footprints).
+Repository paths must be actual worktree roots. `upstream` is required even
+without an origin remote: use a consistent repository identity across clones.
+When origin exists it must match; HTTPS/SSH origin spellings normalize to
+`host/path` without `.git`. Branch is reviewed context, **not** isolation.
+Repositories, linked worktrees, ancestor/descendant paths, symlink aliases,
+upstream identities and resource keys are exclusive. Same-repository parallelism
+is deliberately unsupported, even for disjoint branches/files.
+
+Reviewed footprints **only narrow the cockpit's canonical roots**. Repository
+and Git common-directory paths must stay within declared `implementation_roots`;
+`write_paths` must stay within those roots or `planning_root`. No claim may
+overlap or enclose the queue/control stores, even under a broad implementation
+root. Canonical ancestry checks reject sibling-prefix and symlink escapes.
+Dispatch, acceptance and delivery enforce these bounds; declaring a footprint
+or a `repo:` resource key cannot grant additional repository authority.
+Legacy serial missions keep their existing boundary semantics.
+
+```bash
+# Draft intake is allowed; review/update is allowed only while still queued.
+cockpit-queue enqueue --approved --text "<mission>" --footprint mission-footprint.json
+cockpit-queue review-footprint "<QI-ID>" --footprint reviewed-footprint.json
+cockpit-queue start-next
+cockpit-queue transition "<QI-ID>" implementing --reason "reviewed and ready"
+cockpit-overseer tick --session "<session>" --window worker-dev --window worker-dev-2 --dry-run
+cockpit-overseer tick --session "<session>" --window worker-dev --window worker-dev-2
+# When several items are active, clearance must name its target.
+cockpit-queue clear-current --item "<QI-ID>" --e2e-run "<RUN-ID>"
+```
+
+Admission never skips an earlier conflicting, draft, unknown or blocked waiting
+item. Queue admission is provisional: dispatch rechecks **all journal-owned
+claims**, including terminal queue items whose workers have not stopped.
+Held, cancel-pending and unaccepted missions retain their immutable claims.
+Terminal queue history is validated structurally, so removing a finished
+repository/worktree does not block future work after lifecycle release.
+Still-occupied footprints are live-checked from their immutable commands.
+Releasing a slot does not make the same queue phase new work: replayed terminal
+lifecycle history prevents automatic redispatch while an item awaits handoff or
+clearance. Changing worker instance IDs does not bypass this guard. A different
+queue phase may proceed, including `fixing` to `e2e-related-fixing` on
+`worker-fix`; an applied replacement reservation or explicitly
+inspected recovery of an unaccepted dispatch retains its existing authorization.
+New immutable controller dispatch records include optional `queue_item_state`;
+existing command digests are unchanged. Historical initial dispatch phases are
+recovered by matching their immutable decision digest, not current queue text.
+If old history cannot establish a phase, it retains the conservative role fence
+rather than guessing. The legacy observation token remains `queue-role-terminal`.
+Owed bounded recovery commands and new recovery observations take priority over
+new dispatch; held dialogs are excluded from automatic recovery.
+Independent new work can dispatch while another reservation awaits acceptance;
+retained commands are never automatically resent. Each tick still commits at
+most one action. Singular legacy `active_mission_id` and
+`active_queue_item_id` projections are compatibility summaries, not global locks.
+
+The command's optional `boundaries.mission_footprint` contains the versioned
+snapshot and is included in the dispatch digest and worker brief. Acceptance
+and retained-command validation refuse scope drift; recovery/cancellation preserve the original
+boundaries. Legacy digests are unchanged. Old runtimes reject the added closed
+boundary field; upgrade the complete managed runtime together, never mix old
+tools into a footprint-enabled cockpit. Unknown/future footprint schemas fail
+closed. This is a reviewed scheduling contract, not a sandbox or natural-language
+dependency detector: workers must stop and report scope expansion, not edit
+an active declaration. Review a newly queued mission after explicit lifecycle
+release of the old claims when scope must change.
 
 With preflight ready and the configured cockpit running:
 
@@ -397,8 +524,18 @@ Replacement is not permission to bypass FIFO.
 `pending_commands` separately. Pane text cannot erase durable prompts or advance
 a mission; an idle-looking pane does not make an occupied slot available.
 
-Unaccepted delivery retries reuse the command ID, payload digest and immutable
-five-minute deadline. At expiry, delivery stops with
+Mission transport uses a private named tmux buffer, preserves bracketed-paste
+newlines, waits one second for CLI paste processing, then sends exactly one
+Enter. This bounded delay is not a readiness or acceptance acknowledgement.
+`transport=enqueued acceptance=pending` means only that tmux accepted the input;
+it never means the worker started. Only `accept-dispatch` authorizes work.
+
+Only the tick that first commits a dispatch sends its brief. Later ticks retain
+the same command ID, payload digest and immutable five-minute deadline, but never
+automatically paste or press Enter again: missing acceptance (including a crash
+or transport error) is unknown delivery, and another Enter could approve a
+permission prompt. Inspect the worker and durable status before operator recovery;
+do not manually resubmit uncertain input. At expiry, delivery stops with
 `dispatch-acceptance-expired`; the reservation stays blocked. A legacy dispatch
 without a deadline is `dispatch-acceptance-unsupported`. For either, inspect
 `command-status`, `mission-status`, and the worker. Only when inspection confirms

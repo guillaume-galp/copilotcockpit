@@ -38,6 +38,7 @@ setup() {
 	[ ! -e "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_wake.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ ! -e "$HOME/.local/bin/cockpit_footprint.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_rendering.py" ]
 	[ ! -e "$HOME/.local/bin/cockpit_control_cli.py" ]

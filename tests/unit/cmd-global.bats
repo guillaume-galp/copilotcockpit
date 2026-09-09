@@ -36,6 +36,7 @@ setup() {
 	[ -f "$HOME/.local/bin/cockpit_control_controller.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_wake.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_queue_adapter.py" ]
+	[ -f "$HOME/.local/bin/cockpit_footprint.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_tmux_adapter.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_rendering.py" ]
 	[ -f "$HOME/.local/bin/cockpit_control_cli.py" ]

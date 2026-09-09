@@ -18,6 +18,9 @@ cc_setup_tmux_stub() {
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -n "${TMUX_PASTE_STATE:-}" ]; then
+	exec python3 "$TMUX_PASTE_FIXTURE" "$@"
+fi
 state_dir="${BATS_TEST_TMPDIR:-/tmp}/tmux-stub"
 mkdir -p "$state_dir"
 
@@ -35,7 +38,11 @@ while [ $# -gt 0 ]; do
 		-p|-F)
 			shift
 			;;
+		-b)
+			shift 2
+			;;
 		*)
+			payload="$1"
 			shift
 			;;
 	esac
@@ -93,7 +100,7 @@ EOF
 	chmod +x "$BATS_TEST_TMPDIR/bin/tmux"
 }
 
-@test "cockpit-protocol explicit bootstrap dispatch confirms alternate working markers" {
+@test "cockpit-protocol bootstrap enqueue reports pane markers as diagnostics not acceptance" {
 	local brief="$BATS_TEST_TMPDIR/mission.txt"
 	cat > "$brief" <<'EOF'
 MISSION-ID: M-123
@@ -103,8 +110,68 @@ EOF
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-protocol" dispatch --bootstrap --target ulysses:worker-dev --message-file "$brief" --enter-delay 0 --confirm-delay 0
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -q "◉ Working"
+	echo "$output" | grep -Fq "transport=enqueued; worker start/acceptance not confirmed"
 	grep -q "TASK: validate working marker" "$BATS_TEST_TMPDIR/tmux-stub/buffer.txt"
 	grep -q "ulysses:worker-dev" "$BATS_TEST_TMPDIR/tmux-stub/send-keys-target.txt"
+}
+
+@test "cockpit-protocol bootstrap separates delayed paste from a single Enter with an isolated buffer" {
+	export TMUX_PASTE_STATE="$BATS_TEST_TMPDIR/paste-state"
+	export TMUX_PASTE_FIXTURE="$CC_REPO_ROOT/tests/transport/delayed-paste-tmux.py"
+	local brief="$BATS_TEST_TMPDIR/brief.txt"
+	printf 'TASK: delayed paste\nliteral $HOME and Enter\n' >"$brief"
+	run "$CC_REPO_ROOT/bin/cockpit-protocol" dispatch --bootstrap --target isolated:worker-fix \
+		--message-file "$brief" --enter-delay 0 --confirm-delay 0
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "worker start/acceptance not confirmed"
+	cmp "$brief" "$TMUX_PASTE_STATE/submitted.txt"
+	python3 - "$TMUX_PASTE_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+assert [call[0] for call in calls] == ["load-buffer", "paste-buffer", "send-keys", "capture-pane"]
+assert calls[1] == ["paste-buffer", "-p", "-r", "-d", "-b", calls[0][2], "-t", "isolated:worker-fix"]
+assert calls[2] == ["send-keys", "-t", "isolated:worker-fix", "Enter"]
+assert json.loads((root / "state.json").read_text())["buffers"] == {"ambient": "foreign clipboard"}
+PY
+}
+
+@test "cockpit-protocol bootstrap transport errors never retry paste or Enter" {
+	export TMUX_PASTE_FIXTURE="$CC_REPO_ROOT/tests/transport/delayed-paste-tmux.py"
+	local phase
+	for phase in load-buffer paste-buffer send-keys; do
+		export TMUX_PASTE_STATE="$BATS_TEST_TMPDIR/failure-$phase"
+		export TMUX_PASTE_FAIL="$phase"
+		run "$CC_REPO_ROOT/bin/cockpit-protocol" dispatch --bootstrap --target isolated:worker-fix \
+			--message "TASK: fail safely" --confirm-delay 0
+		[ "$status" -ne 0 ]
+		echo "$output" | grep -Fq "delivery unknown; do not automatically resubmit"
+		python3 - "$TMUX_PASTE_STATE" "$phase" <<'PY'
+import json, sys
+from pathlib import Path
+calls = [json.loads(line)[0] for line in (Path(sys.argv[1]) / "calls.jsonl").read_text().splitlines()]
+expected = {
+    "load-buffer": ["load-buffer", "delete-buffer"],
+    "paste-buffer": ["load-buffer", "paste-buffer", "delete-buffer"],
+    "send-keys": ["load-buffer", "paste-buffer", "send-keys"],
+}
+assert calls == expected[sys.argv[2]], calls
+assert not any(key.startswith("cockpit-") for key in
+               json.loads((Path(sys.argv[1]) / "state.json").read_text())["buffers"])
+PY
+	done
+}
+
+@test "cockpit-protocol rejects invalid paste delays before transport" {
+	local delay
+	for delay in -1 31; do
+		run "$CC_REPO_ROOT/bin/cockpit-protocol" dispatch --bootstrap --target isolated:worker-fix \
+			--message "TASK: invalid" --enter-delay "$delay"
+		[ "$status" -ne 0 ]
+		echo "$output" | grep -Fq -- "--enter-delay must be between 0 and 30"
+		[ ! -e "$BATS_TEST_TMPDIR/tmux-stub" ]
+	done
 }
 
 @test "cockpit-protocol meta cockpit reports current cockpit as json" {

@@ -249,6 +249,8 @@ main() {
 	_row "cockpit_control_wake.py" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_queue_adapter.py" "$home_bin/cockpit_control_queue_adapter.py")"
 	_row "cockpit_control_queue_adapter.py" "$state"
+	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_footprint.py" "$home_bin/cockpit_footprint.py")"
+	_row "cockpit_footprint.py" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_tmux_adapter.py" "$home_bin/cockpit_control_tmux_adapter.py")"
 	_row "cockpit_control_tmux_adapter.py" "$state"
 	state="$(cc_drift_state "$CC_ROOT/bin/cockpit_control_rendering.py" "$home_bin/cockpit_control_rendering.py")"

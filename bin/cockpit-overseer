@@ -24,9 +24,13 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from cockpit_footprint import queue_lock
+from cockpit_control_controller import _scope_conflict
 
 from cockpit_control import (
     CONTROLLER_LIVE_REACHABLE,
@@ -60,6 +64,7 @@ ARCHIVE_DIR = STATE_DIR / "archive"
 ARCHIVE_INDEX = ARCHIVE_DIR / "index.jsonl"
 ARCHIVE_SESSIONS = ARCHIVE_DIR / "sessions"
 DEFAULT_WINDOWS = ["worker-test", "worker-dev", "worker-fix"]
+PASTE_SETTLE_SECONDS = 1
 TRACE_ID_PATTERN = r"(?:TRACE-ID|TRACE_ID):\s*([0-9a-fA-F-]{36})"
 PARENT_TRACE_ID_PATTERN = r"(?:PARENT-TRACE-ID|PARENT_TRACE_ID):\s*([0-9a-fA-F-]{36})"
 
@@ -190,6 +195,8 @@ def controller_dispatch_brief(result: ControllerTickResult, envelope: dict) -> s
         f"PAYLOAD-DIGEST: {envelope['payload_digest']}",
         f"ACCEPT-BEFORE: {envelope['deadline_at']}",
         "BOUNDARIES: " + json.dumps(envelope["boundaries"], sort_keys=True),
+        "Footprint scope is immutable. Stop and report any out-of-scope requirement;",
+        "do not widen repository, planning/output paths, or shared resources while working.",
         "",
         "Before doing any work, run this receipt command exactly:",
         "env " + shlex.quote(f"COCKPIT_CONTROL_ROOT={result.root}") + " "
@@ -222,17 +229,19 @@ def deliver_controller_dispatch(
     result: ControllerTickResult,
     session: str,
     as_of: Optional[str] = None,
-) -> None:
+) -> bool:
     """Deliver one already-durable controller command to its worker pane."""
 
+    if result.dry_run:
+        return False
     if not session:
         raise RuntimeError(
-            "no tmux session is available; set TMUX_SESSION and rerun "
-            "`cockpit-overseer tick` to redeliver the committed command"
+            "no tmux session is available; the committed reservation requires "
+            "operator inspection before recovery"
         )
     action = result.action
     target = f"{session}:{action.worker_id}"
-    with PortableControlLock(result.root, command="cockpit-overseer deliver"):
+    with PortableControlLock(result.root, command="cockpit-overseer deliver"), ExitStack() as queue_locks:
         metadata, history = inspect_control_events(result.root)
         state = fold_mission_state(history.events)
         commands, _outcomes = fold_commands(history.events)
@@ -266,27 +275,53 @@ def deliver_controller_dispatch(
                    for key in ("queue_root", "planning_root", "implementation_roots"))
         ):
             raise RuntimeError("dispatch acceptance expired or contract changed; no tmux input was sent")
+        queue_locks.enter_context(queue_lock(envelope["boundaries"]["queue_root"]))
         queue = observe_queue(Path(envelope["boundaries"]["queue_root"]))
         item = next((item for item in queue.active if item.item_id == action.queue_item_id), None)
         if (
             queue.paused or item is None or item.worker_id != action.worker_id
             or dispatch_payload_digest(item, action.mission_id, action.worker_id, action.trace_id)
             != envelope["payload_digest"]
+            or item.footprint != envelope["boundaries"].get("mission_footprint")
+            or _scope_conflict(item, state, commands) is not None
         ):
             raise RuntimeError("dispatch queue brief or authority changed; no tmux input was sent")
+        # A retained command may already be pasted or awaiting a permission answer.
+        # Only the tick that committed it may send input; a crash is unknown delivery,
+        # not permission to press Enter again. The reservation is the durable fence.
+        if not result.applied:
+            return False
         payload = controller_dispatch_brief(result, envelope)
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as fh:
             fh.write(payload)
             brief_path = fh.name
         try:
-            tmux("load-buffer", brief_path)
-            tmux("paste-buffer", "-t", target)
-            tmux("send-keys", "-t", target, "", "Enter")
+            paste_and_submit(brief_path, target)
         finally:
             try:
                 os.unlink(brief_path)
             except FileNotFoundError:
                 pass
+    return True
+
+
+def paste_and_submit(brief_path: str, target: str) -> None:
+    """Enqueue text and one submit key, never infer worker acceptance."""
+
+    buffer_name = "cockpit-" + Path(brief_path).name
+    try:
+        tmux("load-buffer", "-b", buffer_name, brief_path)
+        # Preserve newlines and request bracketed paste; never use the shared
+        # top buffer. tmux completion does not mean the CLI has processed paste.
+        tmux("paste-buffer", "-p", "-r", "-d", "-b", buffer_name, "-t", target)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        try:
+            tmux("delete-buffer", "-b", buffer_name)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+            print(f"cockpit-overseer: buffer cleanup failed: {exc}", file=sys.stderr)
+        raise
+    time.sleep(PASTE_SETTLE_SECONDS)
+    tmux("send-keys", "-t", target, "Enter")
 
 
 def current_session() -> str:
@@ -518,8 +553,7 @@ def cmd_tick(args: argparse.Namespace) -> int:
             and not (result.command is not None and result.command.conflicted)
         ):
             try:
-                deliver_controller_dispatch(result, session, as_of=args.as_of)
-                delivered = True
+                delivered = deliver_controller_dispatch(result, session, as_of=args.as_of)
             except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                 delivery_error = str(exc)
         status = report_controller_tick(result)
@@ -528,14 +562,24 @@ def cmd_tick(args: argparse.Namespace) -> int:
                 "cockpit-overseer: dispatch command "
                 f"{result.action.command_id} is durable but delivery to "
                 f"{session or '-'}:{result.action.worker_id} failed: {delivery_error} "
-                "[repair: restore the tmux target and rerun `cockpit-overseer tick`]",
+                "[delivery unknown; acceptance not confirmed; no automatic resubmit. "
+                "Inspect command-status, mission-status and the worker before "
+                "operator recover-dispatch; reservation retained]",
                 file=sys.stderr,
             )
             return 1
         if delivered:
             print(
                 f"delivery command {result.action.command_id} worker "
-                f"{result.action.worker_id} target {session}:{result.action.worker_id}"
+                f"{result.action.worker_id} target {session}:{result.action.worker_id} "
+                "transport=enqueued acceptance=pending; worker start not confirmed"
+            )
+        elif status == 0 and result.action.kind == CONTROLLER_ACTION_DISPATCH and not result.dry_run:
+            print(
+                f"delivery command {result.action.command_id} not resent: "
+                "delivery unknown; acceptance=pending; reservation retained. "
+                "Inspect command-status, mission-status and the worker before "
+                "operator recover-dispatch."
             )
         return status
     except ControlStoreError as exc:

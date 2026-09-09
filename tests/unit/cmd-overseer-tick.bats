@@ -88,6 +88,9 @@ cc_setup_tmux_stub() {
 	cat >"$BATS_TEST_TMPDIR/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ -n "${TMUX_PASTE_STATE:-}" ]; then
+	exec python3 "$TMUX_PASTE_FIXTURE" "$@"
+fi
 state_dir="${BATS_TEST_TMPDIR:-/tmp}/tmux-stub"
 mkdir -p "$state_dir"
 cmd="${1:-}"
@@ -100,7 +103,9 @@ while [ $# -gt 0 ]; do
 		target="$2"
 		shift 2
 		;;
-	*) shift ;;
+	-b) shift 2 ;;
+	-p|-r|-d) shift ;;
+	*) payload="$1"; shift ;;
 	esac
 done
 case "$cmd" in
@@ -234,7 +239,7 @@ print(eval(sys.argv[2]))
 	echo "$output" | grep -Fq "tick dispatched action dispatch-mission outcome dispatched reason queue-item-implementable"
 	echo "$output" | grep -Fq "events-committed 1"
 	echo "$output" | grep -Eq "^dispatch command [0-9a-f-]{36} worker worker-dev mission [0-9a-f-]{36} queue-item $item trace [0-9a-f-]{36} digest sha256:[0-9a-f]{64}$"
-	echo "$output" | grep -Eq "^delivery command [0-9a-f-]{36} worker worker-dev target cockpit:worker-dev$"
+	echo "$output" | grep -Eq "^delivery command [0-9a-f-]{36} worker worker-dev target cockpit:worker-dev transport=enqueued acceptance=pending; worker start not confirmed$"
 
 	# Exactly one immutable event, exactly one registered command, and exactly
 	# one worker slot: the tick took one action and no more.
@@ -268,7 +273,7 @@ print(eval(sys.argv[2]))
 	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
 }
 
-@test "AC1 an unaccepted durable dispatch redelivers without creating another event" {
+@test "AC1 an unaccepted durable dispatch retains identity without unsafe resubmission" {
 	cc_cockpit redelivery
 	cc_active_item implementing >/dev/null
 
@@ -282,13 +287,13 @@ print(eval(sys.argv[2]))
 	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "redelivery of command $command"
-	echo "$output" | grep -Fq "delivery command $command worker worker-dev"
+	echo "$output" | grep -Fq "delivery command $command not resent: delivery unknown; acceptance=pending; reservation retained"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq "$before" ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["mission_id"]')" = "$mission" ]
-	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 2 ]
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
 }
 
-@test "AC1 delivery failure leaves one durable reservation for later redelivery" {
+@test "AC1 delivery failure leaves one durable reservation without automatic retry" {
 	cc_cockpit delivery-failure
 	cc_active_item implementing >/dev/null
 	export TMUX_FAIL_DELIVERY=1
@@ -296,7 +301,7 @@ print(eval(sys.argv[2]))
 	cc_tick --as-of 2026-09-04T10:00:00.000000Z
 	[ "$status" -eq 1 ]
 	echo "$output" | grep -Fq "is durable but delivery to cockpit:worker-dev failed"
-	echo "$output" | grep -Fq "rerun \`cockpit-overseer tick\`"
+	echo "$output" | grep -Fq "no automatic resubmit"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "reserved" ]
@@ -306,8 +311,9 @@ print(eval(sys.argv[2]))
 	cc_tick --as-of 2026-09-04T10:01:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "redelivery of command"
+	echo "$output" | grep -Fq "not resent: delivery unknown"
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 1 ]
-	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
+	[ ! -e "$BATS_TEST_TMPDIR/tmux-stub/send-keys.log" ]
 }
 
 @test "AC1 editing a reserved queue brief records a command conflict and refuses delivery" {
@@ -338,6 +344,36 @@ with open(path, "w") as handle:
 	[ "$(cc_events "$COCKPIT_CONTROL_ROOT")" -eq 2 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
 	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq "$sends_before" ]
+}
+
+@test "AC1 lost submit response never presses Enter again on a later tick or expiry" {
+	cc_cockpit lost-submit
+	cc_active_item implementing >/dev/null
+	export TMUX_PASTE_STATE="$BATS_TEST_TMPDIR/paste-state"
+	export TMUX_PASTE_FIXTURE="$CC_REPO_ROOT/tests/transport/delayed-paste-tmux.py"
+	export TMUX_PASTE_FAIL=send-keys
+	cc_tick --session isolated --as-of 2026-09-04T10:00:00.000000Z
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "delivery unknown; acceptance not confirmed; no automatic resubmit"
+	[ -f "$TMUX_PASTE_STATE/submitted.txt" ]
+	local envelope
+	envelope="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'list(ledger["commands"].values())[0]["envelope"]')"
+
+	unset TMUX_PASTE_FAIL
+	cc_tick --session isolated --as-of 2026-09-04T10:01:00.000000Z
+	[ "$status" -eq 0 ]
+	echo "$output" | grep -Fq "not resent: delivery unknown; acceptance=pending; reservation retained"
+	cc_tick --session isolated --as-of 2026-09-04T10:05:00.000000Z
+	echo "$output" | grep -Fq "dispatch-acceptance-expired"
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "reserved" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'list(ledger["commands"].values())[0]["envelope"]')" = "$envelope" ]
+	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'list(ledger["commands"].values())[0]["acknowledgements"]')" = "[]" ]
+	python3 - "$TMUX_PASTE_STATE" <<'PY'
+import json, sys
+from pathlib import Path
+calls = [json.loads(line)[0] for line in (Path(sys.argv[1]) / "calls.jsonl").read_text().splitlines()]
+assert calls.count("load-buffer") == calls.count("paste-buffer") == calls.count("send-keys") == 1, calls
+PY
 }
 
 @test "AC1 a tick that already acted refuses a second state-changing action" {
@@ -902,7 +938,8 @@ print("queue vocabulary agrees")
 	local first second
 	first="$(cc_active_item implementing)"
 	second="$("$QUEUE_BIN" enqueue --text "/the-copilot-build-method deliver a second change" --title second)"
-	run "$QUEUE_BIN" transition "$second" testing --reason "a second active item"
+	# Admission now refuses this conflict; simulate external legacy corruption.
+	run python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); d=json.loads(p.read_text()); d["state"]="testing"; p.write_text(json.dumps(d))' "$COCKPIT_QUEUE_ROOT/items/$second.yaml"
 	[ "$status" -eq 0 ]
 
 	# Rule 2 owns which product work exists. Two active items is a question only
@@ -1374,9 +1411,9 @@ print("fold", state.mission_outcomes[result.event_id][1])
 	: >"$barrier"
 	wait
 
-	# Delivery is uncertain, so several processes legitimately retry the same
-	# command ID; exactly one may register it, exactly one may claim the worker's
-	# slot, and no conflict has to be recorded to make that true.
+	# Reconciliation may retain the same command, but only the committing tick
+	# may send input. Uncertain delivery never authorizes a second Enter.
+	[ "$(wc -l <"$BATS_TEST_TMPDIR/tmux-stub/send-keys.log")" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["commands"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'len(ledger["mission_slots"])')" -eq 1 ]
 	[ "$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-dev"]["state"]')" = "reserved" ]

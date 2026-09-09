@@ -80,7 +80,7 @@ Queue verb:
 
 | Tool | Purpose |
 |------|---------|
-| `cockpit-queue` | FIFO request queue CLI: `enqueue`, `list`, `inspect`, `classify`, `pause`, `resume`, `reject`, `start-next`, `clear-current` |
+| `cockpit-queue` | FIFO request queue CLI: `enqueue`, `review-footprint`, `list`, `inspect`, `classify`, `pause`, `resume`, `reject`, `start-next`, `clear-current` |
 
 ### Code intelligence
 
@@ -313,13 +313,18 @@ and lifecycle sequence 1 in one event. A duplicate receipt returns
 The worker then emits `heartbeat` / `record-lifecycle --state running` sequence 2
 with matching mission/worker/queue/trace and renews freshness monotonically.
 
-A reserved, unaccepted dispatch is redelivered with the same command ID and
-digest only before its immutable five-minute acceptance deadline. At expiry,
+Only the tick that commits a new dispatch sends its brief: a private named tmux
+buffer, bracketed paste with preserved newlines, a one-second processing interval,
+then one Enter. `transport=enqueued acceptance=pending` is not proof of worker
+start or acceptance. Later ticks never automatically paste or press Enter again,
+even after a transport error or crash: uncertain input could be a permission
+prompt. They retain the command ID, digest and immutable five-minute deadline.
+At expiry,
 ticks stop delivery and record `dispatch-acceptance-expired` once for unchanged
 evidence; the slot remains reserved, not failed or automatically replaced.
 Missing-deadline legacy reservations are `dispatch-acceptance-unsupported`.
-Inspect `command-status`, `mission-status` and the worker. For either expired
-or legacy missing-deadline dispatch, only after confirming no worker is executing
+Inspect `command-status`, `mission-status` and the worker. For unknown delivery,
+expired or legacy missing-deadline dispatch, only after confirming no worker is executing
 the reservation may the operator use:
 
 ```bash
@@ -334,8 +339,9 @@ it does not kill a worker, forge acceptance/ACKs, start work or settle the queue
 Accepted work requires cooperative cancellation/replacement; uncertain
 inspection stays blocked. Queue disposition alone does not release a reservation.
 
-Exit codes: `0` when the tick dispatched and delivered, recorded an observation, redelivered
-a command that already stands, or found nothing new. It exits `1` in exactly two
+Exit codes: `0` when the tick enqueued input (not worker acceptance), recorded an
+observation, retained an existing command without resending, or found nothing new.
+It exits `1` in exactly two
 controller cases plus explicit delivery failure, all of which print a named
 diagnostic on stderr and never a traceback:
 
@@ -345,8 +351,8 @@ diagnostic on stderr and never a traceback:
   slot** — the fold, not the tick, decides who holds a slot, so the tick reports
   what the fold recorded and creates no second mission.
 * tmux delivery failed after commit — the durable reservation remains and the
-  next tick redelivers the same command after the target is restored, but only
-  before the acceptance deadline.
+  next tick does not resend input. Inspect before explicit operator recovery;
+  never use an extra Enter to repair unknown delivery.
 
 Ticking again over the same evidence persists nothing, so a recurrent wake
 terminates instead of re-investigating.
@@ -426,7 +432,7 @@ cockpit-queue enqueue --text "<request containing /the-copilot-build-method>" --
 cockpit-queue enqueue --text "<request>" --approved --actor overseer
 ```
 
-Queue pause blocks only `start-next`. Enqueueing remains free-flowing so the
+Queue pause blocks admission and controller dispatch/acceptance. Enqueueing remains free-flowing so the
 human can keep adding ideas while delivery is paused.
 
 Do not enqueue questions, pure diagnostics, reminders, or unrelated commands.
@@ -434,6 +440,62 @@ Use `cockpit-queue reject <id> --reason "<why>"` for an existing item that is
 not buildable.
 
 ### Queue loop
+
+Parallel missions require an explicit reviewed version-1 footprint; see the
+[README schema and commands](../../README.md#fifo-dispatch-and-worker-receipt).
+Use `enqueue --footprint <JSON-file>` for draft or reviewed intake and
+`review-footprint <QI-ID> --footprint <JSON-file>` while the item is queued.
+Do not infer independence from titles or ask the tooling to interpret prose.
+
+Before marking `status: reviewed`, perform targeted scope analysis: inspect
+repository/worktree and upstream identities, intended branches, writable paths,
+planning artefacts, generated outputs, test fixtures, databases, ports,
+deployment environments, external resources and dependencies on earlier work.
+Record why the complete declarations are independent in `rationale`; if any
+identity or side effect remains uncertain, leave it draft/unknown and serial.
+This boundary inspection is required even though implementation research belongs
+to the worker. Include all writable planning/output paths outside the exclusive
+repository claims, not just source files. Resource keys must name the same
+resource identically across missions.
+
+Reviewed footprints narrow, never expand, canonical cockpit authority.
+Repository and Git common-directory paths must be inside `implementation_roots`;
+writable paths must be inside implementation roots or `planning_root`.
+Do not claim the queue/control stores or directories enclosing them. A footprint
+or resource key is not permission to add a repository outside those upper bounds.
+
+Repository claims are exclusive: different branches, files, clones sharing an
+upstream, or linked worktrees do not establish independence. Use distinct
+explicit instance IDs such as `workers: {"worker-dev": "worker-dev-2"}` and
+matching already-provisioned windows to run two implementing missions. Repeat
+`tick --window` for diagnostics as needed; it does not provision panes.
+The controller revalidates immutable claims under its lock. A queue state
+transition, held prompt, cancellation request or failed delivery does not free
+those claims. Independent new missions may dispatch while another is held or
+awaiting acceptance; no global lock may be inferred from the singular legacy
+active-item/mission projections.
+
+Owed bounded recovery takes priority over new independent dispatch, except that
+held dialogs are never automatically recovered. Terminal queue history remains
+readable after repository removal, but occupied claims still require live
+validation of the original command footprint, not the terminal queue record.
+
+A normally terminated mission remains finished even while its queue item awaits
+handoff/clearance. A released worker slot is not permission to dispatch that phase
+again, nor is changing its instance ID. Advance to the next appropriate phase or
+use explicit lifecycle recovery/replacement; never infer a retry from queue
+state alone. Inspected recovery of an unaccepted reservation remains supported.
+`fixing` and `e2e-related-fixing` are distinct phases even though both use
+`worker-fix`. Their completion fences use immutable dispatch phase evidence.
+Unknown historical phase evidence stays conservatively fenced by role.
+
+**Scope drift protocol:** the worker stops before crossing a boundary, preserves
+mission correlation and freshness, and raises a durable question/blocker.
+Do not widen the active queue declaration or use a pane reset as release.
+Resolve the question within the existing scope, or cooperatively stop/release
+the old mission and review a newly queued mission with the expanded footprint.
+Acceptance/retained-command validation rejects changed declarations; immutable journal claims
+remain authoritative. This is not an OS sandbox.
 
 Before dispatching new work:
 
@@ -446,11 +508,15 @@ cockpit-protocol status --workers all --json
 
 Rules:
 
-- Start the next item only when no item is already active.
-- If `cockpit-queue` reports multiple active items, stop dispatching, inspect the
-  active QI-IDs, keep the earliest valid item, transition/reset the others, then
-  resume the FIFO pace.
-- Preserve FIFO order unless the human explicitly overrides it.
+- Start the next item only when serial, or when all active declarations are
+  reviewed and disjoint. Draft/unknown/legacy scopes keep serial semantics.
+- Multiple active items are valid only with disjoint reviewed footprints.
+  On a conflict, stop admission and inspect the named QI-IDs and occupied claims;
+  never reset a running worker or mutate scope to evade the conflict.
+- Preserve FIFO admission: never bypass an earlier waiting conflict or
+  unreviewed item. Earlier shaping work is not silently skipped at dispatch.
+- Use `clear-current --item <QI-ID>` when several items are active; unaddressed
+  clearance is retained only for an unambiguous single active item.
 - Never dispatch to a busy worker.
 - Keep the queue item ID in every worker mission and trace/report.
 - Pause/resume with `cockpit-queue pause` and `cockpit-queue resume` when the

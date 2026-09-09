@@ -34,7 +34,7 @@ if command in ("load-buffer", "paste-buffer", "send-keys"):
                      ("COCKPIT_CONTROL_ROOT", "COCKPIT_QUEUE_ROOT")},
     }
     if command == "load-buffer":
-        record["brief"] = Path(sys.argv[2]).read_text()
+        record["brief"] = Path(sys.argv[-1]).read_text()
     with (base / "transport.jsonl").open("a") as handle:
         handle.write(json.dumps(record) + "\\n")
     sys.exit(0)
@@ -339,7 +339,11 @@ class PublicRuntimeTests(wake_fixture.WakeCLIFixture):
     def assert_pending_delivery(self, envelope, mission_count):
         batch = self.transport()[-3:]
         self.assertEqual([r["argv"][0] for r in batch], ["load-buffer", "paste-buffer", "send-keys"])
-        self.assertEqual(batch[1]["argv"], ["paste-buffer", "-t", "stored-session:worker-dev"])
+        self.assertEqual(batch[1]["argv"], [
+            "paste-buffer", "-p", "-r", "-d", "-b", batch[0]["argv"][2],
+            "-t", "stored-session:worker-dev",
+        ])
+        self.assertEqual(batch[2]["argv"], ["send-keys", "-t", "stored-session:worker-dev", "Enter"])
         for record in batch:
             ledger = record["ledger"]
             self.assertEqual(len(ledger["worker_missions"]), mission_count)
@@ -388,7 +392,9 @@ class PublicRuntimeTests(wake_fixture.WakeCLIFixture):
         self.assertEqual(len(self.ledger()["commands"]), 1)
         self.assertEqual(len(self.events()), 1)
         self.assert_pending_delivery(e, 1)
-        self.tick()  # pending redelivery reuses all identity and the fixed deadline
+        sent = self.transport()
+        self.assertIn("not resent: delivery unknown", self.tick().stdout)
+        self.assertEqual(self.transport(), sent)
         self.assertEqual(e, self.envelope())
         self.assertEqual(len(self.events()), 1)
         self.assert_pending_delivery(e, 1)

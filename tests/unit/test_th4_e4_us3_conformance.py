@@ -58,6 +58,7 @@ class TH4E4US3ConformanceTests(unittest.TestCase):
             graph[name] = {dep for dep in imports if dep in managed and dep != name}
 
         layer = {
+            "cockpit_footprint": 0,
             "cockpit_control_root_schema": 0,
             "cockpit_control_locks": 1,
             "cockpit_control_journal": 1,

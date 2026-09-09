@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from cockpit_footprint import validate_footprint
 
 # Command protocol vocabulary.
 COMMAND_SCHEMA_VERSION = 1
@@ -245,7 +246,7 @@ def _require_command_boundaries(record: Mapping[str, Any], label: str) -> Dict[s
     value = record["boundaries"]
     if not isinstance(value, dict):
         raise ControlStoreError(f"{label} requires object boundaries")
-    unknown = sorted(set(value) - set(COMMAND_BOUNDARY_FIELDS))
+    unknown = sorted(set(value) - set(COMMAND_BOUNDARY_FIELDS) - {"mission_footprint"})
     if unknown:
         raise ControlStoreError(
             f"{label} boundaries declares unknown field(s) {', '.join(unknown)}"
@@ -275,6 +276,11 @@ def _require_command_boundaries(record: Mapping[str, Any], label: str) -> Dict[s
     _require_typed_references(
         value, "runtime_boundaries", sub, required=False, noun="boundary"
     )
+    if "mission_footprint" in value:
+        try:
+            validate_footprint(value["mission_footprint"])
+        except ValueError as exc:
+            raise ControlStoreError(f"{sub}: {exc}") from exc
     return value
 
 
@@ -624,6 +630,7 @@ def build_command_envelope(
     runtime_boundaries: Sequence[str] = (),
     created_at: Optional[str] = None,
     deadline_at: Optional[str] = None,
+    mission_footprint: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     record = {
         "schema_version": COMMAND_SCHEMA_VERSION,
@@ -646,6 +653,8 @@ def build_command_envelope(
         "created_at": created_at if created_at is not None else utc_timestamp(),
         "deadline_at": deadline_at,
     }
+    if mission_footprint is not None:
+        record["boundaries"]["mission_footprint"] = validate_footprint(mission_footprint)
     return validate_command_envelope(record)
 
 

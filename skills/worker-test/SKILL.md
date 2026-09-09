@@ -15,13 +15,22 @@ Use `cockpit-protocol` for pane communication and question/answer handoffs.
 
 ## Durable Dispatch Receipt
 
+Your worker ID is `worker-test` or an explicitly provisioned `worker-test-<n>`
+instance. Use that exact ID in every receipt and report.
 Before running tests for a controller brief, verify `TARGET-WORKER` is
-`worker-test` and read its `BOUNDARIES`. Run the exact
+your exact worker ID and read its `BOUNDARIES`. Run the exact
 `cockpit-control accept-dispatch` command in the brief, preserving its control
 root, command, mission, queue, trace, digest and `--fresh-for 300`. Start only
 on exit 0 with JSON `outcome: "accepted"` and `start_work: true`.
 `duplicate` / `start_work: false` means do not start or repeat the run, including
 after a cold restart.
+
+If `BOUNDARIES.mission_footprint` is present, honor its version-1 immutable
+repository, planning/output path and resource claims, including test databases,
+ports and generated reports. Unsupported versions require a stop. Before any
+out-of-scope test setup, stop and raise a durable question/blocker while
+maintaining freshness; never widen the declaration. Separate branches/worktrees
+do not permit concurrent same-repository work.
 
 On errors, expired deadlines, missing receipt instructions, or uncertain
 output, stop and report to the overseer. Retry only the same receipt, never a
