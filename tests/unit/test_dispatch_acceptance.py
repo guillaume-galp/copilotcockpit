@@ -606,6 +606,119 @@ class DispatchAcceptanceTests(unittest.TestCase):
         self.assertEqual(stdout.strip(), "accepted")
         self.assertEqual(len(self.history()), 2)
 
+    def paste_transport(self, operation, *args):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tests/transport/delayed-paste-tmux.py"),
+             operation, *args], env=self.env, text=True, capture_output=True,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr)
+        return result.stdout
+
+    def paste_calls(self):
+        path = Path(self.env["TMUX_PASTE_STATE"]) / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def test_transport_delayed_paste_preserves_brief_despite_top_buffer_collision(self):
+        self.env["TMUX_PASTE_STATE"] = str(self.base / "paste")
+        with patch.object(overseer, "tmux", side_effect=self.paste_transport):
+            self.assertTrue(overseer.deliver_controller_dispatch(self.tick, "isolated"))
+        calls = self.paste_calls()
+        self.assertEqual([call[0] for call in calls], ["load-buffer", "paste-buffer", "send-keys"])
+        self.assertEqual(calls[1], [
+            "paste-buffer", "-p", "-r", "-d", "-b", calls[0][2], "-t", "isolated:worker-dev",
+        ])
+        self.assertEqual(calls[2], ["send-keys", "-t", "isolated:worker-dev", "Enter"])
+        state = Path(self.env["TMUX_PASTE_STATE"])
+        self.assertEqual((state / "submitted.txt").read_text(),
+                         overseer.controller_dispatch_brief(self.tick, self.envelope))
+        self.assertEqual(json.loads((state / "state.json").read_text())["buffers"],
+                         {"ambient": "foreign clipboard"})
+        self.assertFalse(Path(calls[0][-1]).exists())
+        self.assertEqual(len(self.history()), 1)
+        command = cc.read_command_slots(self.root)[self.envelope["command_id"]]
+        self.assertEqual(command["acknowledgements"], [])
+        self.assertEqual(cc.read_mission_state(self.root).worker_slots["worker-dev"]["state"], "reserved")
+        retry = cc.controller_tick(self.root, as_of=self.at(1))
+        with patch.object(overseer, "tmux") as transport:
+            self.assertFalse(overseer.deliver_controller_dispatch(retry, "isolated", as_of=self.at(1)))
+            transport.assert_not_called()
+        self.assertEqual(cc.read_command_slots(self.root)[self.envelope["command_id"]]["envelope"],
+                         self.envelope)
+        self.assertTrue(self.accept().start_work)
+
+    def test_immediate_enter_model_stalls_but_settled_submit_is_single_shot(self):
+        clock = 0
+        ready_at = 0
+        submitted = []
+        operations = []
+
+        def transport(operation, *args):
+            nonlocal ready_at
+            operations.append(operation)
+            if operation == "paste-buffer":
+                ready_at = clock + 0.3
+            elif operation == "send-keys" and clock >= ready_at:
+                submitted.append(args)
+            return ""  # tmux enqueue succeeds even when the CLI does not submit
+
+        def settle(seconds):
+            nonlocal clock
+            operations.append("settle")
+            self.assertEqual(seconds, 1)
+            clock += seconds
+
+        transport("paste-buffer", "-t", "isolated:worker-fix")
+        transport("send-keys", "-t", "isolated:worker-fix", "Enter")
+        self.assertEqual(submitted, [])
+        operations.clear()
+        with patch.object(overseer, "tmux", side_effect=transport), \
+                patch.object(overseer.time, "sleep", side_effect=settle):
+            overseer.paste_and_submit("/unused/private-brief", "isolated:worker-fix")
+        self.assertEqual(operations, ["load-buffer", "paste-buffer", "settle", "send-keys"])
+        self.assertEqual(submitted, [("-t", "isolated:worker-fix", "Enter")])
+
+    def test_transport_failure_never_resubmits_or_releases_reservation(self):
+        for phase in ("load-buffer", "paste-buffer", "send-keys"):
+            with self.subTest(phase=phase):
+                self.env["TMUX_PASTE_STATE"] = str(self.base / phase)
+                self.env["TMUX_PASTE_FAIL"] = phase
+                with patch.object(overseer, "tmux", side_effect=self.paste_transport):
+                    with self.assertRaisesRegex(RuntimeError, "simulated lost tmux response"):
+                        overseer.deliver_controller_dispatch(self.tick, "isolated", as_of=self.at(0))
+                calls = self.paste_calls()
+                expected = {
+                    "load-buffer": ["load-buffer", "delete-buffer"],
+                    "paste-buffer": ["load-buffer", "paste-buffer", "delete-buffer"],
+                    "send-keys": ["load-buffer", "paste-buffer", "send-keys"],
+                }
+                self.assertEqual([call[0] for call in calls], expected[phase])
+                buffers = json.loads(
+                    (Path(self.env["TMUX_PASTE_STATE"]) / "state.json").read_text())["buffers"]
+                self.assertFalse(any(name.startswith("cockpit-") for name in buffers))
+                self.assertFalse(Path(calls[0][-1]).exists())
+                retry = cc.controller_tick(self.root, as_of=self.at(1))
+                with patch.object(overseer, "tmux") as transport:
+                    self.assertFalse(overseer.deliver_controller_dispatch(retry, "isolated", as_of=self.at(1)))
+                    transport.assert_not_called()
+                self.assertEqual(cc.read_command_slots(self.root)[self.envelope["command_id"]]["envelope"],
+                                 self.envelope)
+                self.assertEqual(cc.read_mission_state(self.root).worker_slots["worker-dev"]["state"], "reserved")
+                self.assertEqual(len(self.history()), 1)
+        expired = cc.controller_tick(self.root, as_of=self.at(300))
+        self.assertEqual(expired.action.reason, cc.CONTROLLER_REASON_ACCEPTANCE_EXPIRED)
+        self.assertEqual(cc.read_mission_state(self.root).worker_slots["worker-dev"]["state"], "reserved")
+        self.assertEqual(cc.read_command_slots(self.root)[self.envelope["command_id"]]["envelope"],
+                         self.envelope)
+
+    def test_crash_after_commit_before_transport_does_not_authorize_resubmission(self):
+        retry = cc.controller_tick(self.root, as_of=self.at(1))
+        with patch.object(overseer, "tmux") as transport:
+            self.assertFalse(overseer.deliver_controller_dispatch(retry, "isolated", as_of=self.at(1)))
+            transport.assert_not_called()
+        self.assertEqual(len(self.history()), 1)
+        self.assertEqual(cc.read_mission_state(self.root).worker_slots["worker-dev"]["state"], "reserved")
+
     def test_expiry_observation_cannot_overwrite_racing_acceptance(self):
         tick = cc.ControllerTick(self.root, as_of=self.at(300))
         evidence = tick._gathered_evidence()

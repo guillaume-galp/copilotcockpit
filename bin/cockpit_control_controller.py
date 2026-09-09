@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from uuid import UUID, uuid5
+from cockpit_footprint import footprints_conflict, queue_lock, require_footprint_authority, validate_footprint
 
 # Facade overrides these placeholders with authoritative values.
 DEFAULT_CONTROLLER_TICK_COMMAND = "cockpit-overseer tick"
@@ -112,6 +113,7 @@ class ControllerEvidence:
     # blocked observation.  It is `None` in the normal case.
     boundary_blocker: Optional[Dict[str, Any]]
     commands: Tuple[Dict[str, Any], ...] = ()
+    dispatch_phases: Optional[Mapping[str, str]] = None
 
     def __post_init__(self) -> None:
         """Refuse a derived-state classification outside the closed vocabulary."""
@@ -426,7 +428,7 @@ def controller_recovery_ladder(
     item = evidence.active_item(observation.queue_item_id)
     if item is None:
         return CONTROLLER_TERMINAL_ITEM_LADDER
-    if CONTROLLER_WORKER_BY_QUEUE_STATE.get(item.state) != observation.worker_id:
+    if item.worker_id != observation.worker_id:
         return CONTROLLER_UNREPLACEABLE_LADDER
     return CONTROLLER_RECOVERY_LADDER
 
@@ -582,11 +584,17 @@ def select_recovery_action(evidence: ControllerEvidence) -> Optional[ControllerA
     Only a worker's own claimed, materialized, still-active mission is
     recoverable, and only one worker is acted on per tick: the slots are walked
     in worker order so two ticks reading the same committed prefix always choose
-    the same worker, the same rung, and therefore the same command ID.
+    the same worker, the same rung, and therefore the same command ID. Owed
+    commands take priority over another worker's waiting/escalation observation.
     """
 
+    fallback: Optional[ControllerAction] = None
     for worker_id, slot in evidence.state.claimed_slots:
         mission_id = slot["mission_id"]
+        if any(entry["state"] in ("pending", "held")
+               and entry["dialog"]["mission_id"] == mission_id
+               for entry in evidence.state.dialogs.values()):
+            continue
         observation = evidence.observation(mission_id)
         if observation is None or observation.terminal or observation.state == LIFECYCLE_PENDING_DISPATCH:
             # A reserved slot whose worker has not accepted yet has no declared
@@ -608,8 +616,14 @@ def select_recovery_action(evidence: ControllerEvidence) -> Optional[ControllerA
         owned = evidence.active_item(observation.queue_item_id) is not None
         if not observation.stale and owned:
             continue
-        return _recovery_action(evidence, worker_id, slot, observation)
-    return None
+        action = _recovery_action(evidence, worker_id, slot, observation)
+        if action.kind == CONTROLLER_ACTION_RECOVER:
+            return action
+        if fallback is None or (
+            fallback.kind == CONTROLLER_ACTION_NONE and action.kind != CONTROLLER_ACTION_NONE
+        ):
+            fallback = action
+    return fallback
 
 
 def _normalized_architecture_blocker_category(value: Any) -> Optional[str]:
@@ -654,8 +668,15 @@ def _mission_boundaries(
 def _is_declared_repository_access(detail: str, boundaries: Mapping[str, Any]) -> bool:
     """Say whether one repository need is declared by implementation roots."""
 
-    runtime = boundaries.get("runtime_boundaries")
-    if isinstance(runtime, list) and detail in runtime:
+    footprint = boundaries.get("mission_footprint")
+    reviewed = isinstance(footprint, Mapping) and footprint.get("status") == "reviewed"
+    if reviewed:
+        try:
+            require_footprint_authority(footprint, boundaries)
+        except (ValueError, OSError):
+            return False
+    runtime = footprint["resources"] if reviewed else boundaries.get("runtime_boundaries")
+    if not reviewed and isinstance(runtime, list) and detail in runtime:
         return True
     parsed = _typed_reference_parts(detail)
     repo_path = detail
@@ -663,7 +684,17 @@ def _is_declared_repository_access(detail: str, boundaries: Mapping[str, Any]) -
         kind, value = parsed
         if kind in ("repo", "repository"):
             repo_path = value
-    roots = boundaries.get("implementation_roots")
+    if reviewed:
+        if not Path(repo_path).is_absolute():
+            return False
+        try:
+            repo_path = str(Path(repo_path).resolve())
+        except (OSError, RuntimeError):
+            return False
+    roots = (
+        [repo["path"] for repo in footprint["repositories"]] + footprint["write_paths"]
+        if reviewed else boundaries.get("implementation_roots")
+    )
     if not isinstance(roots, list):
         return False
     for declared in roots:
@@ -696,12 +727,19 @@ def _architecture_blocker_is_declared(
         "iam": ("iam",),
     }[category]
     for boundaries in declared_boundaries:
-        runtime = boundaries.get("runtime_boundaries")
+        footprint = boundaries.get("mission_footprint")
+        runtime = (
+            footprint["resources"]
+            if isinstance(footprint, Mapping) and footprint.get("status") == "reviewed"
+            else boundaries.get("runtime_boundaries")
+        )
         runtime_refs: Tuple[str, ...] = ()
         if isinstance(runtime, list):
             runtime_refs = tuple(ref for ref in runtime if isinstance(ref, str))
         if category == "repository" and _is_declared_repository_access(detail, boundaries):
             return True
+        if category == "repository" and isinstance(footprint, Mapping) and footprint.get("status") == "reviewed":
+            continue
         if detail in runtime_refs:
             return True
         parsed = _typed_reference_parts(detail)
@@ -724,6 +762,119 @@ def _mission_slot_command_id(state: MissionState, mission_id: str) -> Optional[s
         command_id = slot.get("command_id")
         return command_id if isinstance(command_id, str) and command_id else None
     return None
+
+
+def _controller_dispatch_phases(
+    events: Sequence[CommittedEvent], state: MissionState,
+) -> Dict[str, str]:
+    """Recover phase authority from immutable dispatches, never current queue text."""
+    phases = {}
+    for event in events:
+        if not state.mission_outcomes.get(event.event_id, (False, ""))[0]:
+            continue
+        record = event.record["payload"].get(CONTROLLER_DISPATCH_PAYLOAD_FIELD)
+        if record is None:
+            continue
+        phase = record.get("queue_item_state")
+        if phase is None:
+            # Historical initial dispatch keys bind phase and identity without brief text.
+            phase = next((
+                candidate for candidate in CONTROLLER_WORKER_BY_QUEUE_STATE
+                if record["state_key"] == controller_state_key({
+                    "reason": record["reason"], "queue_item_id": record["queue_item_id"],
+                    "queue_item_state": candidate, "worker_id": record["worker_id"],
+                    "mission_id": record["mission_id"],
+                })
+            ), None)
+        if phase is not None:
+            phases[record["mission_id"]] = phase
+    return phases
+
+
+def _terminal_phase_mission(
+    item: QueueItemObservation, state: MissionState,
+    dispatch_phases: Optional[Mapping[str, str]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fence completed phases; unknown historical phases retain a conservative role fence."""
+    if any(slot["queue_item_id"] == item.item_id for _worker, slot in state.claimed_slots):
+        # In particular, an applied replacement owns an explicit reservation.
+        return None
+    role = CONTROLLER_WORKER_BY_QUEUE_STATE.get(item.state)
+    ended = []
+    for mission in state.missions.values():
+        lifecycle = mission["lifecycle"]
+        worker = lifecycle["worker_id"]
+        same_role = (
+            role is None or worker == role
+            or (worker.startswith(role + "-") and worker[len(role) + 1:].isdigit())
+        )
+        phase = (dispatch_phases or {}).get(lifecycle["mission_id"])
+        same_phase = role is None or (item.state == phase if phase is not None else same_role)
+        if (lifecycle["queue_item_id"] == item.item_id and same_phase
+            and lifecycle["state"] in WORKER_LIFECYCLE_TERMINAL_STATES):
+            ended.append(mission)
+    if not ended:
+        return None
+    latest = max(ended, key=lambda mission: mission["revision"])
+    if latest["lifecycle"]["state"] == LIFECYCLE_CANCELLED and any(
+        entry["event_id"] == latest["event_id"]
+        and "reservation_recovery" in entry["cancellation"]
+        and state.mission_outcomes.get(entry["event_id"], (False, ""))[0]
+        for entry in state.cancellations.values()
+    ):
+        return None
+    return latest
+
+
+def _fifo_candidate(
+    queue: QueueObservation, state: MissionState,
+    dispatch_phases: Optional[Mapping[str, str]] = None,
+) -> Optional[QueueItemObservation]:
+    """Prefer new FIFO work to retries, without bypassing a waiting admission."""
+    claimed = {slot["queue_item_id"] for _worker, slot in state.claimed_slots}
+    settled = {item.item_id for item in queue.active
+               if _terminal_phase_mission(item, state, dispatch_phases) is not None}
+    waiting = [item for item in queue.items
+               if item.state in ("queued", "blocked")
+               or (item.active and item.item_id not in claimed and item.item_id not in settled)]
+    if waiting and waiting[0].active:
+        return waiting[0]
+    existing = [item for item in queue.active if item.item_id in claimed]
+    reserved = {slot["queue_item_id"] for _worker, slot in state.claimed_slots
+                if slot["state"] == MISSION_SLOT_RESERVED}
+    return next((item for item in existing if item.item_id in reserved),
+                existing[0] if existing else next(
+                    (item for item in queue.active if item.item_id in settled), None,
+                ))
+
+
+def _scope_conflict(
+    item: QueueItemObservation, state: MissionState, commands: Mapping[str, Mapping[str, Any]],
+) -> Optional[str]:
+    for _worker, slot in state.claimed_slots:
+        command = commands.get(slot["command_id"])
+        footprint = None if command is None else command["envelope"]["boundaries"].get("mission_footprint")
+        if footprint is not None:
+            _require_footprint_authority(footprint, command["envelope"]["boundaries"])
+            try:
+                validate_footprint(footprint, live=True)
+            except (ValueError, OSError):
+                # The occupied claim is uncertain, not released or replaced by queue history.
+                return slot["queue_item_id"]
+        if slot["queue_item_id"] == item.item_id:
+            continue
+        if footprints_conflict(item.footprint, footprint):
+            return slot["queue_item_id"]
+    return None
+
+
+def _require_footprint_authority(
+    footprint: Optional[Dict[str, Any]], roots: Mapping[str, Any],
+) -> None:
+    try:
+        require_footprint_authority(footprint, roots)
+    except (ValueError, OSError) as exc:
+        raise ControlStoreError(f"footprint authority refused: {exc}") from exc
 
 
 def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
@@ -849,13 +1000,51 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             ),
         )
 
+    # Owed recovery commands/observations outrank new work. Held dialogs are
+    # excluded by the recovery selector; unchanged observations need not monopolize a tick.
+    recovery = select_recovery_action(evidence)
+    if recovery is not None and recovery.kind != CONTROLLER_ACTION_NONE:
+        return recovery
+
+    active = queue.active
+    for index, left in enumerate(active):
+        if any(footprints_conflict(left.footprint, right.footprint) for right in active[index + 1:]):
+            return _controller_observation_action(
+                evidence, CONTROLLER_REASON_QUEUE_AMBIGUOUS,
+                {"active_items": [item.item_id for item in active], "footprint_conflict": True},
+                evidence_refs=tuple(f"queue:{item.item_id}" for item in active),
+            )
+    item = _fifo_candidate(queue, evidence.state, evidence.dispatch_phases)
+    terminal = None if item is None else _terminal_phase_mission(item, evidence.state, evidence.dispatch_phases)
+    if terminal is not None:
+        lifecycle = terminal["lifecycle"]
+        return _controller_observation_action(
+            evidence, CONTROLLER_REASON_ROLE_TERMINAL,
+            {"queue_item_id": item.item_id, "queue_item_state": item.state,
+             "mission_id": lifecycle["mission_id"], "terminal_state": lifecycle["state"],
+             "terminal_revision": terminal["revision"]},
+            queue_item_id=item.item_id, worker_id=lifecycle["worker_id"],
+            mission_id=lifecycle["mission_id"],
+            evidence_refs=(f"queue:{item.item_id}", f"mission:{lifecycle['mission_id']}"),
+        )
+    new_candidate = item is not None and not any(
+        slot["queue_item_id"] == item.item_id for _holder, slot in evidence.state.claimed_slots
+    )
+    commands = {entry["envelope"]["command_id"]: entry for entry in evidence.commands}
+    conflict = None if item is None else _scope_conflict(item, evidence.state, commands)
+    independent_candidate = (
+        new_candidate and conflict is None and item.worker_id is not None
+        and not any(holder == item.worker_id for holder, _slot in evidence.state.claimed_slots)
+    )
+
     # An explicit unanswered dialog is not worker silence. In particular an
     # operator hold outranks heartbeat-based recovery and never authorizes an
     # automatic answer, permission grant, cancellation, or replacement.
     for entry in evidence.state.dialogs.values():
         dialog = entry["dialog"]
         slot = evidence.state.worker_slots.get(dialog["worker_id"])
-        if (entry["state"] in ("pending", "held") and slot is not None
+        if (not independent_candidate and (item is None or item.item_id == dialog["queue_item_id"])
+            and entry["state"] in ("pending", "held") and slot is not None
             and slot["state"] == MISSION_SLOT_ACTIVE and slot["mission_id"] == dialog["mission_id"]
             and (entry["state"] == "held" or evidence.active_item(dialog["queue_item_id"]) is not None)):
             return _controller_observation_action(
@@ -870,8 +1059,7 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
     # the active set, is owed exactly one bounded recovery action.  It is never
     # marked failed here or anywhere else -- `stale` is an observation, and only
     # the worker's own lifecycle event or a human decision ends a mission.
-    recovery = select_recovery_action(evidence)
-    if recovery is not None:
+    if recovery is not None and not independent_candidate:
         return recovery
 
     active = queue.active
@@ -881,15 +1069,20 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
             CONTROLLER_REASON_QUEUE_EMPTY,
             {"queue_root": queue.root, "queued": len(queue.queued)},
         )
-    if len(active) > 1:
+    worker_busy = item is not None and any(
+        holder == item.worker_id for holder, _slot in evidence.state.claimed_slots
+    )
+    if item is None or (conflict is not None and not worker_busy):
         return _controller_observation_action(
             evidence,
-            CONTROLLER_REASON_QUEUE_AMBIGUOUS,
-            {"active_items": [item.item_id for item in active]},
-            evidence_refs=tuple(f"queue:{item.item_id}" for item in active),
+            CONTROLLER_REASON_FIFO_BLOCKED if item is None else CONTROLLER_REASON_FOOTPRINT_CONFLICT,
+            {"active_items": [item.item_id for item in active], "blocking_claim": conflict,
+             "fifo_waiting": item is None},
+            queue_item_id=None if item is None else item.item_id,
+            evidence_refs=tuple(f"queue:{item.item_id}" for item in active)
+            + (() if conflict is None else (f"queue:{conflict}",)),
         )
 
-    item = active[0]
     references = (f"queue:{item.item_id}",)
     worker_id = item.worker_id
     if worker_id is None:
@@ -946,6 +1139,8 @@ def select_controller_action(evidence: ControllerEvidence) -> ControllerAction:
                 envelope = None if stored is None else stored["envelope"]
                 deadline = None if envelope is None else envelope["deadline_at"]
                 reason = None
+                if envelope is not None and item.footprint != envelope["boundaries"].get("mission_footprint"):
+                    reason = CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED
                 if (
                     deadline is None or envelope["command_type"] != COMMAND_TYPE_MISSION_DISPATCH
                     or stored["status"] != COMMAND_STATUS_REGISTERED or stored["conflicts"]
@@ -1092,6 +1287,7 @@ def dispatch_payload_digest(
             "command_type": COMMAND_TYPE_MISSION_DISPATCH,
             "mission_id": mission_id, "queue_item_id": item.item_id,
             "queue_item_state": item.state, "trace_id": trace_id, "worker_id": worker_id,
+            **({"mission_footprint": item.footprint} if item.footprint is not None else {}),
         },
         "controller dispatch payload",
     )
@@ -1127,7 +1323,7 @@ def accept_dispatch(
     )
     with (nullcontext(None) if dry_run else PortableControlLock(
         root, command="cockpit-control accept-dispatch"
-    )) as lock:
+    )) as lock, ExitStack() as queue_locks:
         if as_of is None:
             now = utc_timestamp()
             lifecycle["heartbeat_at"] = now
@@ -1176,12 +1372,17 @@ def accept_dispatch(
             or command["conflicts"]
         ):
             raise ControlStoreError("dispatch receipt mismatches its identity, digest, slot, or boundaries")
+        if not dry_run:
+            queue_locks.enter_context(queue_lock(roots["queue_root"]))
         queue = observe_queue(Path(roots["queue_root"]))
         item = next((item for item in queue.active if item.item_id == queue_item_id), None)
         if queue.paused or item is None or item.worker_id != worker_id:
             raise ControlStoreError("dispatch queue item is paused, terminal, or no longer implementable")
         if dispatch_payload_digest(item, mission_id, worker_id, trace_id) != payload_digest:
             raise ControlStoreError("dispatch queue brief or state no longer matches the command digest")
+        if (item.footprint != boundaries.get("mission_footprint")
+            or _scope_conflict(item, state, commands) is not None):
+            raise ControlStoreError("dispatch footprint changed or conflicts with occupied claims")
         if command["status"] == COMMAND_ACCEPTED:
             mission = state.missions.get(mission_id)
             receipt = next(
@@ -1225,6 +1426,7 @@ def build_controller_dispatch(
     parent_trace_id: Optional[str] = None,
     evidence_refs: Sequence[str] = (),
     decided_at: Optional[str] = None,
+    queue_item_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Assemble one complete controller dispatch and validate it before use."""
 
@@ -1242,6 +1444,8 @@ def build_controller_dispatch(
         "evidence_refs": list(evidence_refs),
         "decided_at": decided_at if decided_at is not None else utc_timestamp(),
     }
+    if queue_item_state is not None:
+        record["queue_item_state"] = queue_item_state
     return validate_controller_dispatch(record)
 
 
@@ -1641,6 +1845,7 @@ class ControllerTick:
                             }
                             break
         return ControllerEvidence(
+            dispatch_phases=_controller_dispatch_phases(history.events, state),
             control_root=str(self.root),
             control_id=metadata["control_id"],
             journal_revision=history.latest_revision,
@@ -1757,6 +1962,12 @@ class ControllerTick:
             implementation_roots=tuple(roots["implementation_roots"]),
             deadline_at=action.deadline_at,
             created_at=self.as_of,
+            mission_footprint=next(
+                (entry["envelope"]["boundaries"].get("mission_footprint")
+                 for entry in evidence.commands
+                 if entry["envelope"]["command_id"] == _mission_slot_command_id(evidence.state, str(action.mission_id))),
+                None,
+            ),
         )
         result = register_mission_command(
             self.root,
@@ -1800,7 +2011,8 @@ class ControllerTick:
             self.root, self.command, timeout_seconds=self.timeout_seconds,
             poll_seconds=self.poll_seconds,
         )) as lock:
-            return self._dispatch_locked(action, evidence, lock)
+            with (nullcontext() if self.dry_run else queue_lock(evidence.declared_queue_root)):
+                return self._dispatch_locked(action, evidence, lock)
 
     def _dispatch_locked(
         self,
@@ -1818,19 +2030,32 @@ class ControllerTick:
             or not has_lifecycle_capability(metadata)):
             raise ControlStoreError("operationally-blocked: dispatch requires declared lifecycle capability and boundaries")
         state = fold_mission_state(observation.history.events)
+        dispatch_phases = _controller_dispatch_phases(observation.history.events, state)
         commands, _outcomes = fold_commands(observation.history.events)
         stored_command = commands.get(str(action.command_id))
         declared, _exported, fault = self._resolved_queue_root(metadata)
         if fault is not None or declared is None:
             raise ControlStoreError("dispatch queue authority changed; rerun tick; no command was committed")
         queue = observe_queue(Path(declared))
+        item = next((item for item in queue.active if item.item_id == action.queue_item_id), None)
+        if item is not None:
+            if _terminal_phase_mission(item, state, dispatch_phases) is not None:
+                raise ControlStoreError(
+                    "dispatch refused: queue phase already has terminal lifecycle; "
+                    "explicit recovery/replacement or a new queue mission is required"
+                )
+            _require_footprint_authority(item.footprint, roots)
+        candidate = _fifo_candidate(queue, state, dispatch_phases)
         if (
-            queue.paused or len(queue.active) != 1
-            or queue.active[0].item_id != action.queue_item_id
-            or queue.active[0].worker_id != action.worker_id
+            queue.paused or item is None or candidate is None
+            or candidate.item_id != action.queue_item_id
+            or item.worker_id != action.worker_id
             or dispatch_payload_digest(
-                queue.active[0], str(action.mission_id), str(action.worker_id), str(action.trace_id)
+                item, str(action.mission_id), str(action.worker_id), str(action.trace_id)
             ) != action.payload_digest
+            or _scope_conflict(item, state, commands) is not None
+            or any(footprints_conflict(item.footprint, other.footprint)
+                   for other in queue.active if other.item_id != item.item_id)
         ):
             raise ControlStoreError("dispatch queue evidence changed; rerun tick; no command was committed")
 
@@ -1863,6 +2088,11 @@ class ControllerTick:
             ))
         ):
             raise ControlStoreError("dispatch claim changed; rerun tick; no command was committed")
+        owner = stored_command
+        if replacement_reservation:
+            owner = commands[existing["command_id"]]
+        if owner is not None and owner["envelope"]["boundaries"].get("mission_footprint") != item.footprint:
+            raise ControlStoreError("dispatch immutable footprint changed; explicit recovery required")
 
         # Concurrent initial ticks derive the same identity, not the same
         # clock. Only the first publication owns the immutable time window.
@@ -1887,6 +2117,7 @@ class ControllerTick:
             queue_root=roots["queue_root"],
             planning_root=roots["planning_root"],
             implementation_roots=tuple(roots["implementation_roots"]),
+            mission_footprint=item.footprint,
             deadline_at=action.deadline_at,
             created_at=(
                 self.as_of
@@ -1924,6 +2155,7 @@ class ControllerTick:
             state_key=action.state_key,
             evidence_refs=action.evidence_refs,
             decided_at=self.as_of,
+            queue_item_state=item.state,
         )
         result = register_mission_command(
             self.root,

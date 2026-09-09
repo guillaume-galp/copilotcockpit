@@ -24,6 +24,7 @@
 #   * bin/cockpit_control_controller.py -> ~/.local/bin/cockpit_control_controller.py
 #   * bin/cockpit_control_wake.py -> ~/.local/bin/cockpit_control_wake.py
 #   * bin/cockpit_control_queue_adapter.py -> ~/.local/bin/cockpit_control_queue_adapter.py
+#   * bin/cockpit_footprint.py -> ~/.local/bin/cockpit_footprint.py
 #   * bin/cockpit_control_tmux_adapter.py -> ~/.local/bin/cockpit_control_tmux_adapter.py
 #   * bin/cockpit_control_rendering.py -> ~/.local/bin/cockpit_control_rendering.py
 #   * bin/cockpit_control_cli.py -> ~/.local/bin/cockpit_control_cli.py
@@ -87,6 +88,7 @@ Install/update the managed skills and cockpit CLI tools into your home:
   ~/.local/bin/cockpit_control_controller.py
   ~/.local/bin/cockpit_control_wake.py
   ~/.local/bin/cockpit_control_queue_adapter.py
+  ~/.local/bin/cockpit_footprint.py
   ~/.local/bin/cockpit_control_tmux_adapter.py
   ~/.local/bin/cockpit_control_rendering.py
   ~/.local/bin/cockpit_control_cli.py
@@ -390,6 +392,7 @@ main() {
 	local ccco_src="$CC_ROOT/bin/cockpit_control_controller.py"
 	local ccw_src="$CC_ROOT/bin/cockpit_control_wake.py"
 	local ccqa_src="$CC_ROOT/bin/cockpit_control_queue_adapter.py"
+	local ccfp_src="$CC_ROOT/bin/cockpit_footprint.py"
 	local ccta_src="$CC_ROOT/bin/cockpit_control_tmux_adapter.py"
 	local ccrn_src="$CC_ROOT/bin/cockpit_control_rendering.py"
 	local cccf_src="$CC_ROOT/bin/cockpit_control_cli.py"
@@ -413,6 +416,7 @@ main() {
 	local ccco_dst="$home_bin/cockpit_control_controller.py"
 	local ccw_dst="$home_bin/cockpit_control_wake.py"
 	local ccqa_dst="$home_bin/cockpit_control_queue_adapter.py"
+	local ccfp_dst="$home_bin/cockpit_footprint.py"
 	local ccta_dst="$home_bin/cockpit_control_tmux_adapter.py"
 	local ccrn_dst="$home_bin/cockpit_control_rendering.py"
 	local cccf_dst="$home_bin/cockpit_control_cli.py"
@@ -500,6 +504,10 @@ main() {
 		log_error "required source missing: $ccqa_src"
 		missing=1
 	fi
+	if [[ ! -f "$ccfp_src" ]]; then
+		log_error "required source missing: $ccfp_src"
+		missing=1
+	fi
 	if [[ ! -f "$ccta_src" ]]; then
 		log_error "required source missing: $ccta_src"
 		missing=1
@@ -571,6 +579,7 @@ main() {
 	cc_place "$ccco_src" "$ccco_dst" || return 1
 	cc_place "$ccw_src" "$ccw_dst" || return 1
 	cc_place "$ccqa_src" "$ccqa_dst" || return 1
+	cc_place "$ccfp_src" "$ccfp_dst" || return 1
 	cc_place "$ccta_src" "$ccta_dst" || return 1
 	cc_place "$ccrn_src" "$ccrn_dst" || return 1
 	cc_place "$cccf_src" "$cccf_dst" || return 1

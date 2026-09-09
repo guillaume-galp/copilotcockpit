@@ -1268,6 +1268,17 @@ print(
 	run "$QUEUE_BIN" reject "$item" --reason "delivered by hand"
 	[ "$status" -eq 0 ]
 	cc_active_item implementing >/dev/null
+	# Terminal queue disposition cannot release the still-unaccepted test
+	# reservation. Its unknown footprint remains exclusive until inspected recovery.
+	cc_tick --as-of 2026-09-04T10:30:00.000000Z
+	[ "$status" -eq 1 ]
+	echo "$output" | grep -Fq "reason mission-footprint-conflict"
+	local test_dispatch
+	test_dispatch="$(cc_ledger "$COCKPIT_CONTROL_ROOT" 'ledger["mission_slots"]["worker-test"]["command_id"]')"
+	run "$CONTROL_BIN" recover-dispatch --dispatch-command "$test_dispatch" \
+		--command-id bbbbbbbb-1234-4234-8234-bbbbbbbbbbbb --worker worker-test --inspect-safe --by operator \
+		--reason "fixture confirms test worker never accepted" --evidence "queue:$item"
+	[ "$status" -eq 0 ]
 	cc_tick --as-of 2026-09-04T10:30:00.000000Z
 	[ "$status" -eq 0 ]
 	echo "$output" | grep -Fq "outcome dispatched reason queue-item-implementable"

@@ -172,7 +172,7 @@ func cmdDispatch(args []string) error {
 	messageFile := fs.String("message-file", "", "mission file path")
 	bootstrap := fs.Bool("bootstrap", false, "allow setup-time worker priming only")
 	force := fs.Bool("force", false, "dispatch even when worker pane looks busy")
-	enterDelay := fs.Int("enter-delay", 1, "seconds to wait before Enter")
+	enterDelay := fs.Int("enter-delay", 1, "seconds to wait before Enter (minimum 1, maximum 30)")
 	confirmDelay := fs.Int("confirm-delay", 4, "seconds to wait before status check")
 	confirmLines := fs.Int("confirm-lines", 8, "lines captured for status check")
 	if err := fs.Parse(args); err != nil {
@@ -183,6 +183,9 @@ func cmdDispatch(args []string) error {
 	}
 	if strings.TrimSpace(*worker) != "" {
 		return errors.New("--bootstrap requires an explicit --target and cannot address a managed worker mission")
+	}
+	if *enterDelay < 0 || *enterDelay > 30 {
+		return errors.New("--enter-delay must be between 0 and 30 seconds (0 uses the safe minimum of 1)")
 	}
 
 	resolvedTarget, workerAddressed, err := resolveCommandTarget(*target, *worker, *session)
@@ -224,30 +227,39 @@ func cmdDispatch(args []string) error {
 		return err
 	}
 
-	if _, err := tmux("load-buffer", tmpPath); err != nil {
-		return err
+	if err := pasteAndSubmit(tmpPath, resolvedTarget, time.Duration(*enterDelay)*time.Second); err != nil {
+		return fmt.Errorf("bootstrap delivery unknown; do not automatically resubmit: %w", err)
 	}
-	if _, err := tmux("paste-buffer", "-t", resolvedTarget); err != nil {
-		return err
-	}
-	time.Sleep(time.Duration(*enterDelay) * time.Second)
-	if _, err := tmux("send-keys", "-t", resolvedTarget, "", "Enter"); err != nil {
-		return err
-	}
+	fmt.Println("bootstrap transport=enqueued; worker start/acceptance not confirmed (pane output is diagnostic only)")
 	time.Sleep(time.Duration(*confirmDelay) * time.Second)
 	out, err := captureTail(resolvedTarget, *confirmLines)
 	if err != nil {
 		return err
 	}
 	fmt.Print(out)
-	if !workerStarted(out) {
-		return errors.New("worker start not confirmed (missing working status marker)")
-	}
 	return nil
 }
 
-func workerStarted(text string) bool {
-	return hasWorkingMarker(text)
+func pasteAndSubmit(path, target string, settle time.Duration) error {
+	buffer := "cockpit-" + filepath.Base(path)
+	_, err := tmux("load-buffer", "-b", buffer, path)
+	if err == nil {
+		_, err = tmux("paste-buffer", "-p", "-r", "-d", "-b", buffer, "-t", target)
+	}
+	if err != nil {
+		if _, cleanupErr := tmux("delete-buffer", "-b", buffer); cleanupErr != nil {
+			fmt.Fprintf(os.Stderr, "cockpit-protocol: buffer cleanup failed: %v\n", cleanupErr)
+		}
+		return err
+	}
+	// tmux only queues paste. Give the CLI a bounded processing interval before
+	// the sole Enter; retrying it could answer a permission prompt instead.
+	if settle < time.Second {
+		settle = time.Second
+	}
+	time.Sleep(settle)
+	_, err = tmux("send-keys", "-t", target, "Enter")
+	return err
 }
 
 func cmdSend(args []string) error {

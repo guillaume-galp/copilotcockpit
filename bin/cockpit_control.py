@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import socket
 import stat
@@ -264,6 +265,12 @@ DEFAULT_LIFECYCLE_STATUS_COMMAND = "cockpit-control lifecycle-status"
 # older or newer command protocol is refused explicitly instead of being
 # partially understood.
 COMMAND_SCHEMA_VERSION = 1
+SUPPORTED_CONTROL_CAPABILITIES = {
+    "control_store": CONTROL_SCHEMA_VERSION,
+    "worker_lifecycle": WORKER_LIFECYCLE_SCHEMA_VERSION,
+    "command_protocol": COMMAND_SCHEMA_VERSION,
+}
+SUPPORTED_CONTROL_TOOL_CAPABILITIES = {"cockpit-control": CONTROL_SCHEMA_VERSION}
 COMMAND_ENVELOPE_RECORD_TYPE = "command-envelope"
 COMMAND_ACKNOWLEDGEMENT_RECORD_TYPE = "command-acknowledgement"
 # One committed event carries at most one command record, always under one of
@@ -893,8 +900,11 @@ CONTROLLER_REASON_LEDGER_DIVERGENT = "ledger-projection-divergent"
 CONTROLLER_REASON_QUEUE_PAUSED = "queue-paused"
 CONTROLLER_REASON_QUEUE_EMPTY = "no-active-queue-item"
 CONTROLLER_REASON_QUEUE_AMBIGUOUS = "multiple-active-queue-items"
+CONTROLLER_REASON_FOOTPRINT_CONFLICT = "mission-footprint-conflict"
+CONTROLLER_REASON_FIFO_BLOCKED = "fifo-admission-blocked"
 CONTROLLER_REASON_NOT_IMPLEMENTABLE = "queue-item-not-implementable"
 CONTROLLER_REASON_MISSION_IN_PROGRESS = "mission-in-progress"
+CONTROLLER_REASON_ROLE_TERMINAL = "queue-role-terminal"
 CONTROLLER_REASON_WORKER_BUSY = "worker-busy"
 CONTROLLER_REASON_WORKER_CONFLICT = "worker-mission-conflict"
 CONTROLLER_REASON_RECOVERY_AWAITING = "awaiting-recovery-response"
@@ -903,10 +913,13 @@ CONTROLLER_REASON_ACCEPTANCE_EXPIRED = "dispatch-acceptance-expired"
 CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED = "dispatch-acceptance-unsupported"
 CONTROLLER_DISPATCH_REASONS = (CONTROLLER_REASON_IMPLEMENTABLE,)
 CONTROLLER_OBSERVATION_REASONS = (
+    CONTROLLER_REASON_FOOTPRINT_CONFLICT,
+    CONTROLLER_REASON_FIFO_BLOCKED,
     CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
     CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
     CONTROLLER_REASON_MISSION_IN_PROGRESS,
+    CONTROLLER_REASON_ROLE_TERMINAL,
     CONTROLLER_REASON_NOT_IMPLEMENTABLE,
     CONTROLLER_REASON_NO_ROOT,
     CONTROLLER_REASON_QUEUE_AMBIGUOUS,
@@ -972,6 +985,8 @@ CONTROLLER_EPISODE_REASONS = CONTROLLER_RECOVERY_REASONS + (
 # They are still recorded exactly once and still terminate the tick cleanly;
 # `blocked` is a refusal to guess, never a loop and never a retry.
 CONTROLLER_BLOCKING_REASONS = (
+    CONTROLLER_REASON_FOOTPRINT_CONFLICT,
+    CONTROLLER_REASON_FIFO_BLOCKED,
     CONTROLLER_REASON_ACCEPTANCE_EXPIRED,
     CONTROLLER_REASON_ACCEPTANCE_UNSUPPORTED,
     CONTROLLER_REASON_LEDGER_DIVERGENT,
@@ -986,6 +1001,15 @@ CONTROLLER_BLOCKING_REASONS = (
 # The exact repair each blocking reason asks a human for.  A refusal that does
 # not name its repair is not fail-closed, it is just a dead end.
 CONTROLLER_BLOCKING_REPAIRS = {
+    CONTROLLER_REASON_FOOTPRINT_CONFLICT: (
+        "inspect queue declarations and immutable claimed mission boundaries; "
+        "unknown scopes remain exclusive; wait for lifecycle release or use explicit "
+        "inspected/cooperative recovery; queue clearance and scope edits do not release claims"
+    ),
+    CONTROLLER_REASON_FIFO_BLOCKED: (
+        "review and admit or explicitly reject the earlier queued/blocked item with "
+        "cockpit-queue; do not bypass FIFO or reset an occupied worker"
+    ),
     CONTROLLER_REASON_ACCEPTANCE_EXPIRED: (
         "inspect command {command} and worker {worker}; acceptance expired and the "
         "reservation is retained; an operator must decide explicit recovery or queue "
@@ -2791,11 +2815,19 @@ def validate_controller_dispatch(
     data = _require_object(record, label)
     _require_controller_schema_version(data, label)
     _require_record_type(data, CONTROLLER_DISPATCH_RECORD_TYPE, label)
-    _require_closed_fields(data, CONTROLLER_DISPATCH_FIELDS, label)
+    _require_closed_fields(
+        {key: value for key, value in data.items() if key != "queue_item_state"},
+        CONTROLLER_DISPATCH_FIELDS, label,
+    )
 
     _require_uuid(data, "command_id", label)
     _require_uuid(data, "mission_id", label)
     _require_mission_correlation(data, label)
+    if "queue_item_state" in data:
+        phase = _require_string(data, "queue_item_state", label)
+        role = CONTROLLER_WORKER_BY_QUEUE_STATE.get(phase)
+        if role is None or re.fullmatch(re.escape(role) + r"(?:-[1-9][0-9]*)?", data["worker_id"]) is None:
+            raise ControlStoreError(f"{label} declares unsupported queue_item_state or mismatched worker role")
     _require_controller_reason(data, label, CONTROLLER_DISPATCH_REASONS)
     _require_digest(data, "state_key", label)
     _require_evidence_refs(data, label, required=True)
@@ -7407,6 +7439,7 @@ class QueueItemObservation:
     state: str
     source_text: str
     created_at: str
+    footprint: Optional[Dict[str, Any]] = None
 
     @property
     def active(self) -> bool:
@@ -7420,7 +7453,8 @@ class QueueItemObservation:
     def worker_id(self) -> Optional[str]:
         """Return the worker this product state is implementable by, if any."""
 
-        return CONTROLLER_WORKER_BY_QUEUE_STATE.get(self.state)
+        role = CONTROLLER_WORKER_BY_QUEUE_STATE.get(self.state)
+        return self.footprint["workers"].get(role, role) if self.footprint is not None else role
 
 
 @dataclass(frozen=True)
@@ -7458,12 +7492,21 @@ def _queue_item_observation(path: Path, label: str) -> QueueItemObservation:
             f"{label} declares unknown state {state!r}; expected one of "
             f"{', '.join(sorted(QUEUE_STATES))}"
         )
+    from cockpit_footprint import validate_footprint
+    footprint = record.get("footprint")
+    if footprint is not None:
+        try:
+            # Retired repositories may disappear; live claims are checked from command snapshots.
+            footprint = validate_footprint(footprint, live=state not in QUEUE_TERMINAL_STATES)
+        except (ValueError, OSError) as exc:
+            raise ControlStoreError(f"{label}: {exc}") from exc
     return QueueItemObservation(
         item_id=item_id,
         title=_require_string(record, "title", label),
         state=state,
         source_text=_require_string(record, "source_text", label),
         created_at=_require_string(record, "created_at", label),
+        footprint=footprint,
     )
 
 
@@ -10419,6 +10462,8 @@ class ControlPreflight:
             return
         declared = self.metadata["canonical_roots"]["queue_root"]
         exported = os.environ.get("COCKPIT_QUEUE_ROOT")
+        if exported is None:
+            exported = control_root_schema.tmux_queue_root()
         if declared is None:
             detail = (
                 "no queue root is declared yet, so this root-level store carries no "
@@ -10475,11 +10520,20 @@ class ControlPreflight:
         for required in ("worker_lifecycle", "command_protocol"):
             value = self.metadata["capabilities"].get(required)
             if type(value) is not int or value != 1:
+                repair = (
+                    "inspect existing work before initializing a fresh configured control root; "
+                    "do not rewrite live immutable history (ADR-017)"
+                )
+                if required not in self.metadata["capabilities"]:
+                    repair = (
+                        "for an empty bound schema-v1 store only, use "
+                        "cockpit-control upgrade-capabilities --expect-control-id "
+                        f"{self.metadata['control_id']}; otherwise {repair}"
+                    )
                 self._operationally_blocked(
                     dimension,
                     f"missing supported {required} capability; workers are legacy-observed",
-                    "inspect existing work before initializing a fresh configured control root; "
-                    "do not rewrite live immutable history (ADR-017)",
+                    repair,
                 )
         _metadata, history = inspect_control_events(self.root)
         state = fold_mission_state(history.events)
@@ -11225,8 +11279,8 @@ def _initial_records(
         "queue_root": canonical_roots["queue_root"],
         "planning_root": canonical_roots["planning_root"],
         "implementation_roots": list(canonical_roots["implementation_roots"]),
-        "capabilities": {"control_store": CONTROL_SCHEMA_VERSION, "worker_lifecycle": 1, "command_protocol": 1},
-        "tool_capability_versions": {"cockpit-control": CONTROL_SCHEMA_VERSION},
+        "capabilities": dict(SUPPORTED_CONTROL_CAPABILITIES),
+        "tool_capability_versions": dict(SUPPORTED_CONTROL_TOOL_CAPABILITIES),
         "created_at": created_at,
         "last_migration_at": created_at,
     }
@@ -11454,6 +11508,137 @@ def bind_control_roots(
         implementation_roots=tuple(roots["implementation_roots"]),
         changed=changed,
     )
+
+
+@dataclass(frozen=True)
+class CapabilityUpgradeResult:
+    root: Path
+    control_id: str
+    added: Tuple[str, ...]
+
+
+def _validate_empty_capability_upgrade(
+    root: Path,
+    expected_control_id: str,
+    *,
+    held_lock: Optional[PortableControlLock] = None,
+) -> Dict[str, Any]:
+    """Prove emptiness without repairing or discarding any legacy evidence."""
+
+    for path in (*reversed(root.parents), root):
+        _require_directory(path, "control root path")
+    if held_lock is not None:
+        if held_lock.owner is None or held_lock.observed is None:
+            raise ControlStoreError("capability upgrade requires exact held control lock ownership")
+        _validate_owned_directory(
+            root / LOCKS_DIR_NAME / CONTROL_LOCK_NAME,
+            held_lock.owner,
+            held_lock.observed,
+            "capability upgrade control lock",
+            require_complete_match=True,
+        )
+    metadata = validate_control_store(root)
+    if metadata["control_id"] != expected_control_id:
+        raise ControlStoreError("expected control_id does not match control.json; upgrade refused")
+    for field, supported, required in (
+        ("capabilities", SUPPORTED_CONTROL_CAPABILITIES, "control_store"),
+        ("tool_capability_versions", SUPPORTED_CONTROL_TOOL_CAPABILITIES, "cockpit-control"),
+    ):
+        declared = metadata[field]
+        if required not in declared:
+            raise ControlStoreError(f"upgrade requires supported {field}.{required}")
+        for name, version in declared.items():
+            if name not in supported or type(version) is not int or version != supported[name]:
+                raise ControlStoreError(f"unsupported {field}.{name} {version!r}; upgrade refused")
+
+    roots = metadata["canonical_roots"]
+    if roots["queue_root"] is None or roots["planning_root"] is None or not roots["implementation_roots"]:
+        raise ControlStoreError("upgrade requires complete bound roots; use cockpit-control bind-roots first")
+    _declared_roots_from_values(
+        root, roots["queue_root"], roots["planning_root"], roots["implementation_roots"],
+    )
+    for value in (roots["queue_root"], roots["planning_root"], *roots["implementation_roots"]):
+        path = Path(value)
+        for component in (*reversed(path.parents), path):
+            _require_directory(component, "declared root path")
+
+    history = read_committed_events(root, metadata["control_id"])
+    if history.events:
+        raise ControlStoreError("upgrade requires empty committed history; historical migration is unsupported")
+    debris = collect_store_debris(root)
+    if debris:
+        raise ControlStoreError(f"upgrade refuses unresolved store debris: {debris[0].relative}")
+    allowed = {CONTROL_METADATA_NAME, LEDGER_NAME, EVENTS_NAME, *REQUIRED_STORE_DIRECTORIES}
+    for entry in _sorted_entries(root, "control root"):
+        if entry.name not in allowed:
+            raise ControlStoreError(f"upgrade refuses unexpected control state: {entry.name}")
+    for name in REQUIRED_STORE_DIRECTORIES:
+        path = root / name
+        _require_directory(path, name)
+        for entry in _sorted_entries(path, name):
+            if name == LOCKS_DIR_NAME and entry.name == CONTROL_GUARD_NAME:
+                _require_regular_file(entry, "control transition guard")
+                continue
+            if name == LOCKS_DIR_NAME and entry.name == CONTROL_LOCK_NAME and held_lock is not None:
+                continue
+            raise ControlStoreError(f"upgrade requires empty store directories: {name}/{entry.name}")
+    ledger = _load_json(root / LEDGER_NAME, LEDGER_NAME)
+    if ledger != build_ledger_projection(metadata):
+        raise ControlStoreError("upgrade requires ledger.json to equal the empty journal projection")
+    if not _published_view_matches(root, ""):
+        raise ControlStoreError("upgrade requires empty events.jsonl; legacy history cannot be migrated")
+
+    # Queue items and its append-only view are independent of control events.
+    # Inspect names/emptiness only; never load item bodies or mutate queue state.
+    queue = Path(roots["queue_root"])
+    for entry in _sorted_entries(queue, "declared queue root"):
+        if entry.name == "items":
+            _require_directory(entry, "queue items")
+            if not _sorted_entries(entry, "queue items"):
+                continue
+        elif entry.name == EVENTS_NAME:
+            _require_regular_file(entry, "queue events.jsonl")
+            if _published_view_matches(queue, ""):
+                continue
+        raise ControlStoreError(f"upgrade refuses queue activity or unexpected state: {entry.name}")
+    return metadata
+
+
+def upgrade_control_capabilities(
+    root: Path,
+    expected_control_id: str,
+    *,
+    dry_run: bool = False,
+    timeout_seconds: Optional[float] = None,
+) -> CapabilityUpgradeResult:
+    """Adopt only missing current protocols on an empty, explicitly bound store."""
+
+    root = _require_absolute_root(str(root), "configured")
+    _require_uuid({"control_id": expected_control_id}, "control_id", "--expect-control-id")
+    metadata = _validate_empty_capability_upgrade(root, expected_control_id)
+    added = tuple(
+        name for name in SUPPORTED_CONTROL_CAPABILITIES if name not in metadata["capabilities"]
+    )
+    if dry_run:
+        return CapabilityUpgradeResult(root, expected_control_id, added)
+
+    with PortableControlLock(
+        root, "cockpit-control upgrade-capabilities", timeout_seconds=timeout_seconds,
+    ) as lock:
+        with ControlTransitionGuard(root / LOCKS_DIR_NAME, timeout_seconds=timeout_seconds):
+            metadata = _validate_empty_capability_upgrade(root, expected_control_id, held_lock=lock)
+            added = tuple(
+                name for name in SUPPORTED_CONTROL_CAPABILITIES if name not in metadata["capabilities"]
+            )
+            if added:
+                updated = dict(metadata)
+                updated["capabilities"] = dict(metadata["capabilities"])
+                for name in added:
+                    updated["capabilities"][name] = SUPPORTED_CONTROL_CAPABILITIES[name]
+                updated["last_migration_at"] = utc_timestamp()
+                validate_root_metadata(updated, root)
+                _write_replacement_json(root / CONTROL_METADATA_NAME, updated, CONTROL_METADATA_NAME)
+    return CapabilityUpgradeResult(root, expected_control_id, added)
 
 
 def _print_error(error: Exception) -> int:
@@ -12629,6 +12814,13 @@ def _managed_envelope(
     roots = validate_root_metadata(
         _load_json(control_root / CONTROL_METADATA_NAME, CONTROL_METADATA_NAME), control_root,
     )["canonical_roots"]
+    commands = read_command_slots(control_root)
+    owner = next(
+        (entry["envelope"] for entry in commands.values()
+         if entry["envelope"]["command_type"] == COMMAND_TYPE_MISSION_DISPATCH
+         and entry["envelope"]["mission_id"] == mission_id),
+        None,
+    )
     return build_command_envelope(
         command_id=args.command_id,
         command_type=command_type,
@@ -12644,6 +12836,7 @@ def _managed_envelope(
         planning_root=args.planning_root if args.planning_root is not None else roots["planning_root"],
         implementation_roots=tuple(args.implementation_root or roots["implementation_roots"]),
         runtime_boundaries=tuple(args.runtime_boundary or ()),
+        mission_footprint=None if owner is None else owner["boundaries"].get("mission_footprint"),
         deadline_at=args.deadline,
     )
 
@@ -13109,6 +13302,15 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
         "--dry-run",
         action="store_true",
         help="validate and report the binding without changing any state",
+    )
+    upgrade = subcommands.add_parser(
+        "upgrade-capabilities",
+        help="adopt missing current protocols on an empty bound schema-v1 store only",
+    )
+    upgrade.add_argument("--expect-control-id", required=True, metavar="UUID")
+    upgrade.add_argument(
+        "--dry-run", action="store_true",
+        help="read-only eligibility preview; actual upgrade revalidates under locks",
     )
     subcommands.add_parser("validate", help="validate an explicit control root without mutation")
     repair = subcommands.add_parser(
@@ -13764,6 +13966,19 @@ def _facade_main_impl(argv: Optional[Sequence[str]] = None) -> int:
                 f"cockpit-control: {verb} roots in {result.root}: "
                 f"queue={result.queue_root} planning={result.planning_root} "
                 f"implementation-roots={len(result.implementation_roots)}"
+            )
+            return 0
+        if args.command == "upgrade-capabilities":
+            result = upgrade_control_capabilities(
+                resolved.path, args.expect_control_id, dry_run=args.dry_run,
+            )
+            verb = "would upgrade" if args.dry_run else "upgraded"
+            if not result.added:
+                verb = "already current"
+            print(
+                f"cockpit-control: {verb} capabilities in {result.root} "
+                f"(control_id: {result.control_id}; added: {','.join(result.added) or 'none'}); "
+                "store protocol support only, not worker acceptance or idle evidence"
             )
             return 0
         if args.command == "publish-event":

@@ -59,14 +59,14 @@ def require_absolute_root(
     return normalized
 
 
-def tmux_control_root() -> Optional[str]:
-    """Read the exact root from the active tmux server, if there is one."""
+def _tmux_root(variable: str) -> Optional[str]:
+    """Read an explicit root from the active tmux session, if there is one."""
 
     if not os.environ.get("TMUX"):
         return None
     try:
         result = subprocess.run(
-            ["tmux", "show-environment", CONTROL_ROOT_VARIABLE],
+            ["tmux", "show-environment", variable],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -78,10 +78,18 @@ def tmux_control_root() -> Optional[str]:
     if result.returncode != 0:
         return None
     output = result.stdout.rstrip("\r\n")
-    prefix = f"{CONTROL_ROOT_VARIABLE}="
+    prefix = f"{variable}="
     if not output.startswith(prefix):
         return None
     return output[len(prefix) :]
+
+
+def tmux_control_root() -> Optional[str]:
+    return _tmux_root(CONTROL_ROOT_VARIABLE)
+
+
+def tmux_queue_root() -> Optional[str]:
+    return _tmux_root(QUEUE_ROOT_VARIABLE)
 
 
 def resolve_control_root(environ: Optional[Mapping[str, str]] = None) -> ResolvedControlRoot:

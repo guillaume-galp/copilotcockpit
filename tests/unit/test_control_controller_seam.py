@@ -112,6 +112,8 @@ class ControlControllerSeamTests(unittest.TestCase):
             self.assertIn("action dispatch-mission", second.stdout)
             self.assertIn("redelivery of command", second.stdout)
             self.assertIn("events-committed 0", second.stdout)
+            self.assertIn("not resent: delivery unknown; acceptance=pending; reservation retained", second.stdout)
+            self.assertNotIn("transport=enqueued", second.stdout)
 
             mission_id = re.search(r"mission ([0-9a-f-]{36}) queue-item", first.stdout).group(1)
             trace_id = re.search(r"trace ([0-9a-f-]{36}) digest", first.stdout).group(1)

@@ -106,7 +106,8 @@ EOF
 	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue --id QI-a --text "A /the-copilot-build-method" >/dev/null
 	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" enqueue --id QI-b --text "B /the-copilot-build-method" >/dev/null
 	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" transition QI-a shaping --reason "simulate active one" >/dev/null
-	"$BATS_TEST_DIRNAME/../../bin/cockpit-queue" transition QI-b shaping --reason "simulate active two" >/dev/null
+	# Bypass admission only to exercise detection of externally corrupted legacy state.
+	python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); d=json.loads(p.read_text()); d["state"]="shaping"; p.write_text(json.dumps(d))' "$COCKPIT_QUEUE_ROOT/items/QI-b.yaml"
 
 	run "$BATS_TEST_DIRNAME/../../bin/cockpit-queue" start-next
 	[ "$status" -ne 0 ]

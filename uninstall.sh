@@ -22,6 +22,7 @@
 #   * ~/.local/bin/cockpit_control_controller.py
 #   * ~/.local/bin/cockpit_control_wake.py
 #   * ~/.local/bin/cockpit_control_queue_adapter.py
+#   * ~/.local/bin/cockpit_footprint.py
 #   * ~/.local/bin/cockpit_control_tmux_adapter.py
 #   * ~/.local/bin/cockpit_control_rendering.py
 #   * ~/.local/bin/cockpit_control_cli.py
@@ -63,6 +64,7 @@ Remove copilotcockpit's managed user-scoped install:
   ~/.local/bin/cockpit_control_controller.py
   ~/.local/bin/cockpit_control_wake.py
   ~/.local/bin/cockpit_control_queue_adapter.py
+  ~/.local/bin/cockpit_footprint.py
   ~/.local/bin/cockpit_control_tmux_adapter.py
   ~/.local/bin/cockpit_control_rendering.py
   ~/.local/bin/cockpit_control_cli.py
@@ -173,6 +175,7 @@ if [[ "$cc_target_bin" -ne 0 ]]; then
 	cc_remove_file "$HOME/.local/bin/cockpit_control_controller.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_wake.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_queue_adapter.py"
+	cc_remove_file "$HOME/.local/bin/cockpit_footprint.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_tmux_adapter.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_rendering.py"
 	cc_remove_file "$HOME/.local/bin/cockpit_control_cli.py"

@@ -12,6 +12,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from cockpit_footprint import footprints_conflict, queue_lock, validate_footprint
 
 ACTIVE_STATES = {
     "shaping",
@@ -216,6 +217,8 @@ def cmd_enqueue(args: argparse.Namespace) -> int:
         "created_at": created_at,
         "updated_at": created_at,
     }
+    if args.footprint:
+        item["footprint"] = validate_footprint(load_json(Path(args.footprint)), live=True, normalize=True)
     write_json(path, item)
     append_event(
         {
@@ -268,15 +271,50 @@ def single_active_item() -> Optional[Dict[str, Any]]:
 def cmd_start_next(args: argparse.Namespace) -> int:
     if queue_paused():
         raise SystemExit("queue is paused")
-    active = single_active_item()
-    if active:
-        raise SystemExit(f"active item exists: {active['id']}")
+    active = active_items()
+    for index, left in enumerate(active):
+        if any(footprints_conflict(left.get("footprint"), right.get("footprint"))
+               for right in active[index + 1:]):
+            single_active_item()
     for item in iter_items():
         if item.get("state") == "queued":
+            require_admission(item)
             item = mutate_state(item, "shaping", args.actor, args.reason)
             print(item["id"])
             return 0
     raise SystemExit("no queued item available")
+
+
+def require_admission(item: Dict[str, Any]) -> None:
+    if queue_paused():
+        raise SystemExit("queue is paused")
+    items = list(iter_items())
+    waiting = [row for row in items if row.get("state") in {"queued", "blocked"}]
+    if waiting and waiting[0]["id"] != item["id"]:
+        raise SystemExit(f"FIFO admission blocked by: {waiting[0]['id']}")
+    footprint = item.get("footprint")
+    if footprint is not None:
+        validate_footprint(footprint, live=True)
+    for active in active_items():
+        if active["id"] == item["id"]:
+            continue
+        if active.get("footprint") is not None:
+            validate_footprint(active["footprint"], live=True)
+        if footprints_conflict(footprint, active.get("footprint")):
+            raise SystemExit(f"active item exists: {active['id']}; footprint conflict or unknown scope")
+
+
+def cmd_review_footprint(args: argparse.Namespace) -> int:
+    item = load_item(args.item_id)
+    if item.get("state") != "queued":
+        raise SystemExit("footprint review/update requires a queued item")
+    item["footprint"] = validate_footprint(load_json(Path(args.footprint)), live=True, normalize=True)
+    item["updated_at"] = now()
+    write_json(item_path(item["id"]), item)
+    append_event({"type": "footprint-reviewed", "item_id": item["id"], "actor": args.actor,
+                  "footprint": item["footprint"]})
+    print(item["id"])
+    return 0
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
@@ -301,7 +339,7 @@ def cmd_reject(args: argparse.Namespace) -> int:
 
 
 def cmd_clear_current(args: argparse.Namespace) -> int:
-    item = single_active_item()
+    item = load_item(args.item) if args.item else single_active_item()
     if not item:
         raise SystemExit("no active item")
     if item.get("state") not in {"delivered", "e2e-testing-runbooks"}:
@@ -322,6 +360,8 @@ def cmd_transition(args: argparse.Namespace) -> int:
     item = load_item(args.item_id)
     if item.get("state") in TERMINAL_STATES:
         raise SystemExit(f"cannot transition terminal item: {args.item_id}")
+    if args.state in ACTIVE_STATES and item.get("state") not in ACTIVE_STATES:
+        require_admission(item)
     mutate_state(item, args.state, args.actor, args.reason)
     print(args.item_id)
     return 0
@@ -344,7 +384,14 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--actor", default="overseer")
     enqueue.add_argument("--approved", action="store_true")
     enqueue.add_argument("--id")
+    enqueue.add_argument("--footprint", help="JSON version-1 draft or reviewed footprint file")
     enqueue.set_defaults(func=cmd_enqueue)
+
+    review = sub.add_parser("review-footprint")
+    review.add_argument("item_id")
+    review.add_argument("--footprint", required=True)
+    review.add_argument("--actor", default="overseer")
+    review.set_defaults(func=cmd_review_footprint)
 
     list_cmd = sub.add_parser("list")
     list_cmd.add_argument("--all", action="store_true")
@@ -377,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_next.set_defaults(func=cmd_start_next)
 
     clear = sub.add_parser("clear-current")
+    clear.add_argument("--item", help="explicit target when multiple items are active")
     clear.add_argument("--actor", default="overseer")
     clear.add_argument("--reason", default="queue item complete")
     clear.add_argument("--e2e-run")
@@ -396,7 +444,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        if args.command in {"classify", "list", "inspect"}:
+            return args.func(args)
+        with queue_lock(queue_root()):
+            return args.func(args)
+    except (ValueError, OSError) as exc:
+        raise SystemExit(str(exc)) from None
 
 
 if __name__ == "__main__":
